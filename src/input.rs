@@ -72,12 +72,10 @@ pub fn handle_shortcuts(ctx: &egui::Context, state: &mut AppState) -> bool {
 }
 
 fn compute_nodes_bounding_rect(state: &AppState) -> Option<egui::Rect> {
-    use crate::nodes::lod::LodLevel;
-    let lod = LodLevel::from_zoom(state.viewport.zoom);
     let mut rects = Vec::new();
     for id in state.node_store.all_file_ids() {
         if let Some(node) = state.node_store.get_file(id) {
-            rects.push(node.world_rect(state.settings.node_width, state.settings.font_size, lod));
+            rects.push(node.world_rect(state.settings.node_width, state.settings.font_size));
         }
     }
     if rects.is_empty() {

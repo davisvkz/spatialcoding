@@ -5,7 +5,6 @@ use egui::{Color32, Pos2, Stroke, Vec2};
 use crate::canvas::viewport::Viewport;
 use crate::edges::edge_store::EdgeStore;
 use crate::edges::style::{EdgeStyle, EdgeStyleConfig, OpacityMode};
-use crate::nodes::lod::LodLevel;
 use crate::nodes::node_store::NodeStore;
 
 pub fn draw_edges(
@@ -15,7 +14,6 @@ pub fn draw_edges(
     viewport: &Viewport,
     config: &EdgeStyleConfig,
     selected_nodes: &HashSet<u64>,
-    lod: LodLevel,
     node_width: f32,
     font_size: f32,
 ) {
@@ -32,8 +30,8 @@ pub fn draw_edges(
             None => continue,
         };
 
-        let src_rect = src.world_rect(node_width, font_size, lod);
-        let tgt_rect = tgt.world_rect(node_width, font_size, lod);
+        let src_rect = src.world_rect(node_width, font_size);
+        let tgt_rect = tgt.world_rect(node_width, font_size);
         let src_center = src_rect.center();
         let tgt_center = tgt_rect.center();
 

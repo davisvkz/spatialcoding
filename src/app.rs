@@ -4,6 +4,7 @@ use crate::edges::renderer as edge_renderer;
 use crate::fs::tree::TreeNode;
 use crate::highlight::syntect_hl::Highlighter;
 use crate::input;
+use crate::nodes::file_node::{line_height, CODE_PADDING, HEADER_HEIGHT};
 use crate::nodes::lod::LodLevel;
 use crate::state::{AppState, Tool};
 use crate::ui;
@@ -56,12 +57,10 @@ impl SpatialCodingApp {
         if response.clicked() {
             if let Some(pos) = response.interact_pointer_pos() {
                 let world_pos = self.state.viewport.screen_to_world(pos);
-                let lod = LodLevel::from_zoom(self.state.viewport.zoom);
                 if let Some(id) = self.state.node_store.node_at_position(
                     world_pos,
                     self.state.settings.node_width,
                     self.state.settings.font_size,
-                    lod,
                 ) {
                     if ui.input(|i| i.modifiers.shift) {
                         self.state.selection.toggle(id);
@@ -100,7 +99,7 @@ impl SpatialCodingApp {
                     label_pos,
                     egui::Align2::LEFT_TOP,
                     &label,
-                    egui::FontId::proportional(11.0 * self.state.viewport.zoom),
+                    egui::FontId::proportional((11.0 * self.state.viewport.zoom).max(10.0)),
                     theme.text_secondary,
                 );
             }
@@ -108,7 +107,6 @@ impl SpatialCodingApp {
     }
 
     fn update_folder_bounds(&mut self) {
-        let lod = LodLevel::from_zoom(self.state.viewport.zoom);
         let folder_ids = self.state.node_store.all_folder_ids();
         for folder_id in folder_ids {
             let child_rects: Vec<egui::Rect> = {
@@ -124,7 +122,6 @@ impl SpatialCodingApp {
                         n.world_rect(
                             self.state.settings.node_width,
                             self.state.settings.font_size,
-                            lod,
                         )
                     })
                     .collect()
@@ -137,116 +134,113 @@ impl SpatialCodingApp {
     }
 
     fn draw_file_nodes(&mut self, painter: &egui::Painter, canvas_rect: egui::Rect) {
-        let lod = LodLevel::from_zoom(self.state.viewport.zoom);
+        let zoom = self.state.viewport.zoom;
+        let lod = LodLevel::from_zoom(zoom);
         let theme = &self.state.theme;
+        let node_width = self.state.settings.node_width;
+        let font_size = self.state.settings.font_size;
         let visible_world = self.state.viewport.visible_world_rect(canvas_rect);
 
-        let file_ids = self.state.node_store.all_file_ids();
-        for id in file_ids {
-            let (world_rect, file_name, content_clone, path_clone) = {
-                let node = match self.state.node_store.get_file(id) {
-                    Some(n) => n,
-                    None => continue,
-                };
-                let wr = node.world_rect(self.state.settings.node_width, self.state.settings.font_size, lod);
-                if !wr.intersects(visible_world) {
-                    continue;
-                }
-                (
-                    wr,
-                    node.file_name().to_string(),
-                    node.content.clone(),
-                    node.path.clone(),
-                )
-            };
+        for node in self.state.node_store.file_nodes.values() {
+            let world_rect = node.world_rect(node_width, font_size);
+            if !world_rect.intersects(visible_world) {
+                continue;
+            }
 
             let screen_rect = self.state.viewport.world_to_screen_rect(world_rect);
-            let selected = self.state.selection.is_selected(id);
-
-            let border_color = if selected {
-                theme.selection
-            } else {
-                theme.node_border
-            };
+            let selected = self.state.selection.is_selected(node.id);
+            let border_color = if selected { theme.selection } else { theme.node_border };
             let border_width: f32 = if selected { 2.0 } else { 1.0 };
+            let rounding = (4.0 * zoom).clamp(1.0, 4.0);
 
-            painter.rect_filled(screen_rect, 4.0, theme.node_bg);
+            if lod == LodLevel::TitleOnly {
+                // Far away: solid block + centered name, sized to stay readable.
+                painter.rect_filled(screen_rect, rounding, theme.node_header);
+                painter.rect_stroke(
+                    screen_rect,
+                    rounding,
+                    egui::Stroke::new(border_width, border_color),
+                    egui::StrokeKind::Outside,
+                );
+                draw_fitted_label(
+                    painter,
+                    node.file_name(),
+                    screen_rect.center(),
+                    egui::Align2::CENTER_CENTER,
+                    screen_rect.width(),
+                    14.0,
+                    theme.text_primary,
+                );
+                continue;
+            }
+
+            painter.rect_filled(screen_rect, rounding, theme.node_bg);
             painter.rect_stroke(
                 screen_rect,
-                4.0,
+                rounding,
                 egui::Stroke::new(border_width, border_color),
                 egui::StrokeKind::Outside,
             );
 
-            let header_height = 24.0 * self.state.viewport.zoom;
             let header_rect = egui::Rect::from_min_size(
                 screen_rect.left_top(),
-                egui::vec2(screen_rect.width(), header_height),
+                egui::vec2(screen_rect.width(), HEADER_HEIGHT * zoom),
             );
-            painter.rect_filled(header_rect, egui::CornerRadius { nw: 4, ne: 4, sw: 0, se: 0 }, theme.node_header);
-
-            let text_pos = header_rect.left_top() + egui::vec2(8.0 * self.state.viewport.zoom, 4.0 * self.state.viewport.zoom);
-            let font_size = (self.state.settings.font_size * self.state.viewport.zoom).max(6.0);
-            painter.text(
-                text_pos,
-                egui::Align2::LEFT_TOP,
-                &file_name,
-                egui::FontId::monospace(font_size),
-                theme.text_primary,
+            let r = rounding as u8;
+            painter.rect_filled(
+                header_rect,
+                egui::CornerRadius { nw: r, ne: r, sw: 0, se: 0 },
+                theme.node_header,
             );
 
-            if lod == LodLevel::Full && !content_clone.is_empty() {
-                let zoom = self.state.viewport.zoom;
-                let code_top = header_rect.bottom() + 4.0 * zoom;
-                let max_lines = ((screen_rect.bottom() - code_top) / (font_size * 1.4)).max(1.0) as usize;
-                let highlighted = self.highlighter.highlight_file(&path_clone, &content_clone);
-                let limit = highlighted.len().min(max_lines);
-                let code_font_size = font_size * 0.85;
-                let line_height = font_size * 1.3;
-                let code_font = egui::FontId::monospace(code_font_size);
-                let x_start = screen_rect.left() + 8.0 * zoom;
-                for (i, line_spans) in highlighted[..limit].iter().enumerate() {
-                    let y = code_top + i as f32 * line_height;
-                    if y > screen_rect.bottom() {
-                        break;
-                    }
-                    let mut x = x_start;
-                    for (style, text) in line_spans {
-                        let trimmed = text.trim_end_matches(['\n', '\r']);
-                        if trimmed.is_empty() {
-                            continue;
-                        }
-                        let color = Highlighter::style_to_egui_color(style);
-                        let text_rect = painter.text(
-                            egui::pos2(x, y),
-                            egui::Align2::LEFT_TOP,
-                            trimmed,
-                            code_font.clone(),
-                            color,
-                        );
-                        x += text_rect.width();
-                    }
+            let title_px = font_size * zoom;
+            if title_px >= 8.0 {
+                painter.text(
+                    header_rect.left_center() + egui::vec2(8.0 * zoom, 0.0),
+                    egui::Align2::LEFT_CENTER,
+                    node.file_name(),
+                    egui::FontId::monospace(title_px),
+                    theme.text_primary,
+                );
+            } else {
+                // Header text would be illegible: float a fixed-size label above the node.
+                draw_fitted_label(
+                    painter,
+                    node.file_name(),
+                    screen_rect.left_top() - egui::vec2(0.0, 2.0),
+                    egui::Align2::LEFT_BOTTOM,
+                    screen_rect.width(),
+                    11.0,
+                    theme.text_secondary,
+                );
+            }
+
+            if node.content.is_empty() {
+                continue;
+            }
+
+            let highlighted = self.highlighter.highlight_file(&node.path, &node.content);
+            let lines = &highlighted[..highlighted.len().min(node.visible_lines())];
+            let code_origin = egui::pos2(
+                screen_rect.left() + 8.0 * zoom,
+                header_rect.bottom() + CODE_PADDING * zoom,
+            );
+            let line_h = line_height(font_size) * zoom;
+            let code_clip = painter.with_clip_rect(screen_rect.intersect(painter.clip_rect()));
+
+            match lod {
+                LodLevel::Full => {
+                    draw_code_text(&code_clip, lines, code_origin, line_h, font_size * zoom)
                 }
-            } else if lod == LodLevel::Summary {
-                if let Some(node) = self.state.node_store.get_file(id) {
-                    let info = format!("{} lines", node.line_count);
-                    painter.text(
-                        egui::pos2(
-                            screen_rect.left() + 8.0 * self.state.viewport.zoom,
-                            header_rect.bottom() + 4.0 * self.state.viewport.zoom,
-                        ),
-                        egui::Align2::LEFT_TOP,
-                        &info,
-                        egui::FontId::monospace(font_size * 0.8),
-                        theme.text_muted,
-                    );
+                LodLevel::Minified => {
+                    draw_code_bars(&code_clip, lines, code_origin, line_h, font_size * zoom)
                 }
+                LodLevel::TitleOnly => unreachable!(),
             }
         }
     }
 
     fn draw_edges(&self, painter: &egui::Painter) {
-        let lod = LodLevel::from_zoom(self.state.viewport.zoom);
         let selected: std::collections::HashSet<u64> = self.state.selection.selected_ids().collect();
         edge_renderer::draw_edges(
             painter,
@@ -255,14 +249,12 @@ impl SpatialCodingApp {
             &self.state.viewport,
             &self.state.edge_style,
             &selected,
-            lod,
             self.state.settings.node_width,
             self.state.settings.font_size,
         );
     }
 
     fn collect_node_rects(&self) -> Vec<egui::Rect> {
-        let lod = LodLevel::from_zoom(self.state.viewport.zoom);
         self.state
             .node_store
             .all_file_ids()
@@ -272,7 +264,6 @@ impl SpatialCodingApp {
                     n.world_rect(
                         self.state.settings.node_width,
                         self.state.settings.font_size,
-                        lod,
                     )
                 })
             })
@@ -353,4 +344,131 @@ impl SpatialCodingApp {
                 });
             });
     }
+}
+
+type HighlightedLine = Vec<(syntect::highlighting::Style, String)>;
+
+/// Approximate advance of one monospace glyph, as a fraction of font size.
+const MONO_ADVANCE: f32 = 0.6;
+
+/// Draws `text` with a font no larger than `max_px`, shrunk to fit `max_width`.
+/// Skips drawing when it would be too small to read.
+fn draw_fitted_label(
+    painter: &egui::Painter,
+    text: &str,
+    pos: egui::Pos2,
+    align: egui::Align2,
+    max_width: f32,
+    max_px: f32,
+    color: egui::Color32,
+) {
+    let chars = text.chars().count().max(1) as f32;
+    let px = max_px.min((max_width - 4.0) / (chars * MONO_ADVANCE));
+    if px < 5.0 {
+        return;
+    }
+    painter.text(pos, align, text, egui::FontId::monospace(px), color);
+}
+
+/// Full LOD: real syntax-highlighted text.
+fn draw_code_text(
+    painter: &egui::Painter,
+    lines: &[HighlightedLine],
+    origin: egui::Pos2,
+    line_h: f32,
+    font_px: f32,
+) {
+    let font = egui::FontId::monospace(font_px * 0.85);
+    let bottom = painter.clip_rect().bottom();
+    for (i, spans) in lines.iter().enumerate() {
+        let y = origin.y + i as f32 * line_h;
+        if y > bottom {
+            break;
+        }
+        let mut x = origin.x;
+        for (style, text) in spans {
+            let text = text.trim_end_matches(['\n', '\r']);
+            if text.is_empty() {
+                continue;
+            }
+            let rect = painter.text(
+                egui::pos2(x, y),
+                egui::Align2::LEFT_TOP,
+                text,
+                font.clone(),
+                Highlighter::style_to_egui_color(style),
+            );
+            x += rect.width();
+        }
+    }
+}
+
+/// Minified LOD: each token drawn as a colored bar (minimap style). When lines
+/// get very thin, collapses to one bar per line to keep the shape count low.
+fn draw_code_bars(
+    painter: &egui::Painter,
+    lines: &[HighlightedLine],
+    origin: egui::Pos2,
+    line_h: f32,
+    font_px: f32,
+) {
+    let char_w = font_px * 0.85 * MONO_ADVANCE;
+    let bar_h = (line_h * 0.6).max(1.0);
+    let per_token = line_h >= 4.0;
+    let bottom = painter.clip_rect().bottom();
+
+    for (i, spans) in lines.iter().enumerate() {
+        let y = origin.y + i as f32 * line_h + (line_h - bar_h) * 0.5;
+        if y > bottom {
+            break;
+        }
+        let mut col = 0usize;
+        let mut line_span: Option<(usize, usize, egui::Color32)> = None;
+        for (style, text) in spans {
+            let text = text.trim_end_matches(['\n', '\r']);
+            let len = visual_width(text);
+            let lead = visual_width(&text[..text.len() - text.trim_start().len()]);
+            let trail = visual_width(&text[text.trim_end().len()..]);
+            let (start, end) = (col + lead, col + len - trail);
+            col += len;
+            if end <= start {
+                continue;
+            }
+            let color = Highlighter::style_to_egui_color(style).gamma_multiply(0.75);
+            if per_token {
+                bar(painter, origin.x, y, start, end, char_w, bar_h, color);
+            } else {
+                line_span = Some(match line_span {
+                    Some((s, _, c)) => (s, end, c),
+                    None => (start, end, color),
+                });
+            }
+        }
+        if let Some((s, e, c)) = line_span {
+            bar(painter, origin.x, y, s, e, char_w, bar_h, c);
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn bar(
+    painter: &egui::Painter,
+    x0: f32,
+    y: f32,
+    start: usize,
+    end: usize,
+    char_w: f32,
+    h: f32,
+    color: egui::Color32,
+) {
+    let rect = egui::Rect::from_min_size(
+        egui::pos2(x0 + start as f32 * char_w, y),
+        egui::vec2((end - start) as f32 * char_w, h),
+    );
+    painter.rect_filled(rect, 0.0, color);
+}
+
+/// Column width of `s`, counting tabs as 4.
+fn visual_width(s: &str) -> usize {
+    s.chars().map(|c| if c == '\t' { 4 } else { 1 }).sum()
 }

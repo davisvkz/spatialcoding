@@ -1,6 +1,16 @@
 use std::path::{Path, PathBuf};
 
-use super::lod::LodLevel;
+/// World-space height of the file header bar.
+pub const HEADER_HEIGHT: f32 = 28.0;
+/// World-space vertical padding around the code area.
+pub const CODE_PADDING: f32 = 4.0;
+/// Maximum number of code lines a node shows.
+pub const MAX_VISIBLE_LINES: usize = 50;
+
+/// World-space height of one code line.
+pub fn line_height(font_size: f32) -> f32 {
+    font_size * 1.4
+}
 
 pub struct FileNode {
     pub id: u64,
@@ -27,16 +37,16 @@ impl FileNode {
         }
     }
 
-    pub fn world_rect(&self, node_width: f32, font_size: f32, lod: LodLevel) -> egui::Rect {
-        let header_height = 28.0_f32;
-        let line_height = font_size * 1.4;
-        let visible_lines = match lod {
-            LodLevel::TitleOnly => 0,
-            LodLevel::Summary => 1,
-            LodLevel::Full => self.line_count.min(50),
-        };
-        let height = header_height + visible_lines as f32 * line_height;
+    /// World-space rect of the node. Independent of zoom/LOD.
+    pub fn world_rect(&self, node_width: f32, font_size: f32) -> egui::Rect {
+        let height = HEADER_HEIGHT
+            + CODE_PADDING * 2.0
+            + self.visible_lines() as f32 * line_height(font_size);
         egui::Rect::from_min_size(self.position, egui::vec2(node_width, height))
+    }
+
+    pub fn visible_lines(&self) -> usize {
+        self.line_count.min(MAX_VISIBLE_LINES)
     }
 
     pub fn file_name(&self) -> &str {

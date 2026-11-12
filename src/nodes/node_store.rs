@@ -3,7 +3,6 @@ use std::path::PathBuf;
 
 use super::file_node::FileNode;
 use super::folder_node::FolderNode;
-use super::lod::LodLevel;
 
 pub struct NodeStore {
     pub file_nodes: HashMap<u64, FileNode>,
@@ -79,10 +78,9 @@ impl NodeStore {
         world_pos: egui::Pos2,
         node_width: f32,
         font_size: f32,
-        lod: LodLevel,
     ) -> Option<u64> {
         for node in self.file_nodes.values() {
-            let rect = node.world_rect(node_width, font_size, lod);
+            let rect = node.world_rect(node_width, font_size);
             if rect.contains(world_pos) {
                 return Some(node.id);
             }

@@ -5,7 +5,6 @@ use petgraph::graph::Graph;
 
 use crate::edges::edge_store::EdgeStore;
 use crate::layout::settings::{LayoutSettings, SortMode, VAlign};
-use crate::nodes::lod::LodLevel;
 use crate::nodes::node_store::NodeStore;
 
 pub fn apply_layout(
@@ -67,7 +66,6 @@ pub fn apply_layout(
     }
 
     let node_width = 700.0_f32;
-    let lod = LodLevel::Summary;
     let font_size = 12.0_f32;
 
     let max_rank = ranks.keys().copied().max().unwrap_or(0);
@@ -81,7 +79,7 @@ pub fn apply_layout(
         let total_height: f32 = members
             .iter()
             .filter_map(|&nid| nodes.get_file(nid))
-            .map(|n| n.world_rect(node_width, font_size, lod).height())
+            .map(|n| n.world_rect(node_width, font_size).height())
             .sum::<f32>()
             + (members.len().saturating_sub(1) as f32) * settings.file_spacing;
 
@@ -95,7 +93,7 @@ pub fn apply_layout(
         for &nid in members {
             let node_height = nodes
                 .get_file(nid)
-                .map(|n| n.world_rect(node_width, font_size, lod).height())
+                .map(|n| n.world_rect(node_width, font_size).height())
                 .unwrap_or(100.0);
 
             if let Some(node) = nodes.get_file_mut(nid) {
