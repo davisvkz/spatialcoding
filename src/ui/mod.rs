@@ -1,0 +1,9 @@
+pub mod theme;
+pub mod sidebar_left;
+pub mod sidebar_right;
+pub mod toolbar;
+pub mod settings_dialog;
+pub mod shortcuts_dialog;
+pub mod command_palette;
+pub mod search_panel;
+pub mod changes_panel;
