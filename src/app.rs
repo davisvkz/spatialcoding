@@ -31,7 +31,7 @@ impl SpatialCodingApp {
 
         self.state
             .viewport
-            .handle_input(ui, canvas_rect, self.state.space_held);
+            .handle_input(&response, canvas_rect, self.state.space_held);
 
         let dt = ui.input(|i| i.stable_dt);
         self.state
@@ -42,6 +42,7 @@ impl SpatialCodingApp {
 
         CanvasRenderer::draw_background(&painter, &self.state.viewport, canvas_rect, &self.state.theme);
 
+        self.update_folder_bounds();
         self.draw_folder_nodes(&painter);
         self.draw_file_nodes(&painter, canvas_rect);
         self.draw_edges(&painter);
@@ -106,6 +107,35 @@ impl SpatialCodingApp {
         }
     }
 
+    fn update_folder_bounds(&mut self) {
+        let lod = LodLevel::from_zoom(self.state.viewport.zoom);
+        let folder_ids = self.state.node_store.all_folder_ids();
+        for folder_id in folder_ids {
+            let child_rects: Vec<egui::Rect> = {
+                let folder = match self.state.node_store.get_folder(folder_id) {
+                    Some(f) => f,
+                    None => continue,
+                };
+                folder
+                    .children_ids
+                    .iter()
+                    .filter_map(|&id| self.state.node_store.get_file(id))
+                    .map(|n| {
+                        n.world_rect(
+                            self.state.settings.node_width,
+                            self.state.settings.font_size,
+                            lod,
+                        )
+                    })
+                    .collect()
+            };
+            if let Some(folder) = self.state.node_store.get_folder_mut(folder_id) {
+                folder.file_count = child_rects.len();
+                folder.update_bounds(&child_rects, self.state.layout_settings.folder_padding);
+            }
+        }
+    }
+
     fn draw_file_nodes(&mut self, painter: &egui::Painter, canvas_rect: egui::Rect) {
         let lod = LodLevel::from_zoom(self.state.viewport.zoom);
         let theme = &self.state.theme;
@@ -113,7 +143,7 @@ impl SpatialCodingApp {
 
         let file_ids = self.state.node_store.all_file_ids();
         for id in file_ids {
-            let (world_rect, file_name, _position, content_key) = {
+            let (world_rect, file_name, content_clone, path_clone) = {
                 let node = match self.state.node_store.get_file(id) {
                     Some(n) => n,
                     None => continue,
@@ -125,7 +155,7 @@ impl SpatialCodingApp {
                 (
                     wr,
                     node.file_name().to_string(),
-                    node.position,
+                    node.content.clone(),
                     node.path.clone(),
                 )
             };
@@ -165,24 +195,36 @@ impl SpatialCodingApp {
                 theme.text_primary,
             );
 
-            if lod == LodLevel::Full {
-                if let Some(content) = self.state.file_contents.get(&content_key) {
-                    let code_top = header_rect.bottom() + 4.0 * self.state.viewport.zoom;
-                    let max_lines = ((screen_rect.bottom() - code_top) / (font_size * 1.4)).max(1.0) as usize;
-                    let lines: Vec<&str> = content.lines().take(max_lines).collect();
-                    let code_font = egui::FontId::monospace(font_size * 0.85);
-                    for (i, line) in lines.iter().enumerate() {
-                        let y = code_top + i as f32 * font_size * 1.3;
-                        if y > screen_rect.bottom() {
-                            break;
+            if lod == LodLevel::Full && !content_clone.is_empty() {
+                let zoom = self.state.viewport.zoom;
+                let code_top = header_rect.bottom() + 4.0 * zoom;
+                let max_lines = ((screen_rect.bottom() - code_top) / (font_size * 1.4)).max(1.0) as usize;
+                let highlighted = self.highlighter.highlight_file(&path_clone, &content_clone);
+                let limit = highlighted.len().min(max_lines);
+                let code_font_size = font_size * 0.85;
+                let line_height = font_size * 1.3;
+                let code_font = egui::FontId::monospace(code_font_size);
+                let x_start = screen_rect.left() + 8.0 * zoom;
+                for (i, line_spans) in highlighted[..limit].iter().enumerate() {
+                    let y = code_top + i as f32 * line_height;
+                    if y > screen_rect.bottom() {
+                        break;
+                    }
+                    let mut x = x_start;
+                    for (style, text) in line_spans {
+                        let trimmed = text.trim_end_matches(['\n', '\r']);
+                        if trimmed.is_empty() {
+                            continue;
                         }
-                        painter.text(
-                            egui::pos2(screen_rect.left() + 8.0 * self.state.viewport.zoom, y),
+                        let color = Highlighter::style_to_egui_color(style);
+                        let text_rect = painter.text(
+                            egui::pos2(x, y),
                             egui::Align2::LEFT_TOP,
-                            line,
+                            trimmed,
                             code_font.clone(),
-                            theme.text_secondary,
+                            color,
                         );
+                        x += text_rect.width();
                     }
                 }
             } else if lod == LodLevel::Summary {

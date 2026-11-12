@@ -14,10 +14,25 @@ const PANELS: &[(&str, RightPanel)] = &[
 ];
 
 pub fn draw_sidebar_right(ctx: &egui::Context, state: &mut AppState) {
-    egui::SidePanel::right("sidebar_right_icons")
-        .exact_width(40.0)
+    if state.right_panel.is_none() {
+        egui::SidePanel::right("sidebar_right_collapsed")
+            .exact_width(32.0)
+            .show(ctx, |ui| {
+                ui.vertical_centered(|ui| {
+                    if ui.selectable_label(false, "\u{25c0}").clicked() {
+                        state.right_panel = Some(RightPanel::Layout);
+                    }
+                });
+            });
+        return;
+    }
+
+    egui::SidePanel::right("sidebar_right")
+        .default_width(280.0)
+        .width_range(200.0..=500.0)
+        .resizable(true)
         .show(ctx, |ui| {
-            ui.vertical(|ui| {
+            ui.horizontal_wrapped(|ui| {
                 for &(label, panel) in PANELS {
                     let active = state.right_panel == Some(panel);
                     if ui.selectable_label(active, label).clicked() {
@@ -29,21 +44,20 @@ pub fn draw_sidebar_right(ctx: &egui::Context, state: &mut AppState) {
                     }
                 }
             });
-        });
 
-    if let Some(panel) = state.right_panel {
-        egui::SidePanel::right("sidebar_right_content")
-            .exact_width(300.0)
-            .show(ctx, |ui| {
-                egui::ScrollArea::vertical().show(ui, |ui| match panel {
-                    RightPanel::Layout => draw_layout_panel(ui, state),
-                    RightPanel::DependencyEdges => draw_edges_panel(ui, state),
-                    _ => {
+            ui.separator();
+
+            egui::ScrollArea::vertical().show(ui, |ui| {
+                match state.right_panel {
+                    Some(RightPanel::Layout) => draw_layout_panel(ui, state),
+                    Some(RightPanel::DependencyEdges) => draw_edges_panel(ui, state),
+                    Some(_) => {
                         ui.label("Coming soon");
                     }
-                });
+                    None => {}
+                }
             });
-    }
+        });
 }
 
 fn draw_layout_panel(ui: &mut egui::Ui, state: &mut AppState) {
@@ -51,7 +65,11 @@ fn draw_layout_panel(ui: &mut egui::Ui, state: &mut AppState) {
     ui.separator();
 
     if ui.button("Apply Layout").clicked() {
-        // TODO: trigger layout engine
+        crate::layout::hierarchical::apply_layout(
+            &mut state.node_store,
+            &state.edge_store,
+            &state.layout_settings,
+        );
     }
 
     ui.add_space(8.0);

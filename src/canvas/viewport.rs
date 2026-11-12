@@ -1,4 +1,4 @@
-use egui::{Pos2, Rect, Vec2, Ui};
+use egui::{Pos2, Rect, Vec2};
 
 const MIN_ZOOM: f32 = 0.05;
 const MAX_ZOOM: f32 = 5.0;
@@ -44,9 +44,8 @@ impl Viewport {
         )
     }
 
-    pub fn handle_input(&mut self, ui: &Ui, canvas_rect: Rect, space_held: bool) {
-        let response = ui.interact(canvas_rect, ui.id().with("canvas_input"), egui::Sense::click_and_drag());
-
+    pub fn handle_input(&mut self, response: &egui::Response, canvas_rect: Rect, space_held: bool) {
+        // Pan: right-click drag, or Space + left-click drag
         if response.dragged_by(egui::PointerButton::Secondary)
             || (space_held && response.dragged_by(egui::PointerButton::Primary))
         {
@@ -54,23 +53,40 @@ impl Viewport {
             self.offset += delta / self.zoom;
         }
 
-        if canvas_rect.contains(ui.input(|i| i.pointer.hover_pos()).unwrap_or_default()) {
-            let scroll_delta = ui.input(|i| i.smooth_scroll_delta.y);
-            let ctrl = ui.input(|i| i.modifiers.ctrl || i.modifiers.command);
+        let ui = &response.ctx;
+        let hovered = canvas_rect.contains(ui.input(|i| i.pointer.hover_pos()).unwrap_or_default());
+        if !hovered {
+            return;
+        }
 
-            if ctrl && scroll_delta != 0.0 {
-                let factor = (scroll_delta * 0.002).exp();
-                let new_zoom = (self.target_zoom * factor).clamp(MIN_ZOOM, MAX_ZOOM);
+        let (smooth_scroll, raw_scroll, ctrl) = ui.input(|i| {
+            (
+                i.smooth_scroll_delta,
+                i.raw_scroll_delta,
+                i.modifiers.ctrl || i.modifiers.command,
+            )
+        });
 
-                if let Some(cursor) = ui.input(|i| i.pointer.hover_pos()) {
-                    self.zoom_center = Some(cursor);
-                    let world_before = self.screen_to_world(cursor);
-                    self.target_zoom = new_zoom;
-                    self.zoom = new_zoom;
-                    let world_after = self.screen_to_world(cursor);
-                    self.offset += world_after - world_before;
-                }
+        // Pick the best scroll delta available
+        let scroll_y = if raw_scroll.y.abs() > 0.1 { raw_scroll.y } else { smooth_scroll.y };
+        let scroll_x = if raw_scroll.x.abs() > 0.1 { raw_scroll.x } else { smooth_scroll.x };
+
+        if ctrl && scroll_y.abs() > 0.1 {
+            // Zoom centered on cursor
+            let factor = (scroll_y * 0.005).exp();
+            let new_zoom = (self.target_zoom * factor).clamp(MIN_ZOOM, MAX_ZOOM);
+
+            if let Some(cursor) = ui.input(|i| i.pointer.hover_pos()) {
+                self.zoom_center = Some(cursor);
+                let world_before = self.screen_to_world(cursor);
+                self.target_zoom = new_zoom;
+                self.zoom = new_zoom;
+                let world_after = self.screen_to_world(cursor);
+                self.offset += world_after - world_before;
             }
+        } else if scroll_y.abs() > 0.1 || scroll_x.abs() > 0.1 {
+            // Pan via scroll (trackpad or mouse wheel)
+            self.offset += Vec2::new(scroll_x, scroll_y) / self.zoom;
         }
     }
 

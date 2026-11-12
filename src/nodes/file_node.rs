@@ -28,13 +28,14 @@ impl FileNode {
     }
 
     pub fn world_rect(&self, node_width: f32, font_size: f32, lod: LodLevel) -> egui::Rect {
+        let header_height = 28.0_f32;
         let line_height = font_size * 1.4;
         let visible_lines = match lod {
-            LodLevel::TitleOnly => 1,
-            LodLevel::Summary => 2,
+            LodLevel::TitleOnly => 0,
+            LodLevel::Summary => 1,
             LodLevel::Full => self.line_count.min(50),
         };
-        let height = visible_lines as f32 * line_height;
+        let height = header_height + visible_lines as f32 * line_height;
         egui::Rect::from_min_size(self.position, egui::vec2(node_width, height))
     }
 
