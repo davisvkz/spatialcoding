@@ -113,6 +113,32 @@ pub fn clear_canvas(state: &mut AppState) {
     state.selection.clear();
 }
 
+/// Removes file nodes together with their edges, their folder membership,
+/// any folder left empty, and their selection.
+pub fn remove_nodes(state: &mut AppState, ids: &[u64]) {
+    let removed: HashSet<u64> = ids.iter().copied().collect();
+    for &id in ids {
+        for edge_id in state.edge_store.edges_for_node(id) {
+            state.edge_store.remove(edge_id);
+        }
+        state.node_store.remove_node(id);
+        if state.selection.is_selected(id) {
+            state.selection.toggle(id);
+        }
+    }
+
+    let mut empty_folders = Vec::new();
+    for folder in state.node_store.folder_nodes.values_mut() {
+        folder.children_ids.retain(|child| !removed.contains(child));
+        if folder.children_ids.is_empty() {
+            empty_folders.push(folder.id);
+        }
+    }
+    for id in empty_folders {
+        state.node_store.remove_node(id);
+    }
+}
+
 /// Recomputes every dependency edge between the open file nodes.
 pub fn rebuild_edges(state: &mut AppState) {
     let root = match state.loaded_dir {

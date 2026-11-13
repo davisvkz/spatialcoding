@@ -51,3 +51,33 @@ fn clear_all_removes_nodes_folders_edges_and_selection() {
     assert_eq!(s.edge_store.all_edges().count(), 0, "no dangling edges");
     assert_eq!(s.selection.count(), 0);
 }
+
+#[test]
+fn clear_selected_removes_nodes_with_their_edges_and_empty_folders() {
+    let fx = fixture();
+    let mut app = app_with(&fx);
+    let main = app.open(&fx.path("src/main.rs"));
+    let util = app.open(&fx.path("src/util.rs"));
+    let app_ts = app.open(&fx.path("web/app.ts"));
+    let a_ts = app.open(&fx.path("web/a.ts"));
+    assert_eq!(app.app_state().edge_store.all_edges().count(), 2);
+    {
+        let sel = &mut app.app_state_mut().selection;
+        sel.select(util);
+        sel.toggle(app_ts);
+        sel.toggle(a_ts);
+    }
+    app.run();
+
+    app.get_by_label("Clear Selected").click();
+    app.run();
+
+    let s = app.app_state();
+    assert_eq!(s.node_store.all_file_ids(), [main]);
+    assert_eq!(s.edge_store.all_edges().count(), 0, "edges of removed nodes are gone");
+    assert_eq!(s.selection.count(), 0);
+    let folders: Vec<_> = s.node_store.folder_nodes.values().collect();
+    assert_eq!(folders.len(), 1, "web/ became empty and was removed");
+    assert_eq!(folders[0].path, fx.path("src"));
+    assert_eq!(folders[0].children_ids, [main]);
+}

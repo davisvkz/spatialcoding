@@ -50,10 +50,7 @@ pub fn draw_toolbar(ui: &mut egui::Ui, state: &mut AppState) {
             .clicked()
         {
             let ids: Vec<u64> = state.selection.selected_ids().collect();
-            for id in ids {
-                state.node_store.remove_node(id);
-            }
-            state.selection.clear();
+            crate::workspace::remove_nodes(state, &ids);
         }
     });
 }
