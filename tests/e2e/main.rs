@@ -8,6 +8,7 @@ mod common;
 
 mod canvas;
 mod file_tree;
+mod manual_fixtures;
 mod settings;
 mod shortcuts;
 mod sidebar_right;
