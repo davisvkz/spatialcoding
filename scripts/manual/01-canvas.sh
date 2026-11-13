@@ -11,5 +11,6 @@ checklist "01 · Canvas infinito: pan e zoom" \
   "Segurar Espaço e arrastar com o botão esquerdo|a câmera acompanha o mouse" \
   "Selecionar um nó (clique) e repetir os dois pans acima|só a câmera se move; o nó selecionado fica onde estava" \
   "Afastar tudo e apertar Shift+F|todos os nós cabem na tela" \
-  "Mouse sobre um ponto e apertar F|a visão recentraliza no ponto sob o mouse"
+  "Mouse sobre um ponto e apertar F|a visão recentraliza no ponto sob o mouse" \
+  "Settings (toolbar) → desmarcar Smooth Zoom e dar Ctrl+roda|o zoom muda na hora, sem animação, ainda centrado no cursor; marcar de novo volta a animar"
 launch "$dir" --open-all --layout

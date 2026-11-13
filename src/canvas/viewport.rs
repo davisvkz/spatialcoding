@@ -72,17 +72,12 @@ impl Viewport {
         let scroll_x = if raw_scroll.x.abs() > 0.1 { raw_scroll.x } else { smooth_scroll.x };
 
         if ctrl && scroll_y.abs() > 0.1 {
-            // Zoom centered on cursor
-            let factor = (scroll_y * 0.005).exp();
-            let new_zoom = (self.target_zoom * factor).clamp(MIN_ZOOM, MAX_ZOOM);
-
+            // Zoom centered on cursor. Only the target is set here; `animate`
+            // moves `zoom` toward it (at once or smoothly) around `zoom_center`.
             if let Some(cursor) = ui.input(|i| i.pointer.hover_pos()) {
+                let factor = (scroll_y * 0.005).exp();
+                self.target_zoom = (self.target_zoom * factor).clamp(MIN_ZOOM, MAX_ZOOM);
                 self.zoom_center = Some(cursor);
-                let world_before = self.screen_to_world(cursor);
-                self.target_zoom = new_zoom;
-                self.zoom = new_zoom;
-                let world_after = self.screen_to_world(cursor);
-                self.offset += world_after - world_before;
             }
         } else if scroll_y.abs() > 0.1 || scroll_x.abs() > 0.1 {
             // Pan via scroll (trackpad or mouse wheel)
@@ -90,37 +85,37 @@ impl Viewport {
         }
     }
 
-    pub fn animate(&mut self, dt: f32, smooth: bool) {
+    /// Moves `zoom` toward `target_zoom`: all at once, or a step per frame when
+    /// `smooth`. While `zoom_center` is set, the world point under it stays put.
+    /// Returns true while still animating, so the caller keeps repainting.
+    pub fn animate(&mut self, dt: f32, smooth: bool) -> bool {
+        let prev_zoom = self.zoom;
         if smooth {
             let t = (10.0 * dt).min(1.0);
-            let prev_zoom = self.zoom;
             self.zoom += (self.target_zoom - self.zoom) * t;
-
-            // Snap before anchoring, so the offset is computed for the final zoom
-            // and the point under the cursor does not drift on the last frame.
-            let settled = (self.zoom - self.target_zoom).abs() < 0.001;
-            if settled {
-                self.zoom = self.target_zoom;
-            }
-
-            if let Some(center) = self.zoom_center {
-                let world_point = Pos2::new(
-                    center.x / prev_zoom - self.offset.x,
-                    center.y / prev_zoom - self.offset.y,
-                );
-                self.offset = Vec2::new(
-                    center.x / self.zoom - world_point.x,
-                    center.y / self.zoom - world_point.y,
-                );
-            }
-
-            if settled {
-                self.zoom_center = None;
-            }
-        } else {
+        }
+        // Snap before anchoring, so the offset is computed for the final zoom
+        // and the point under the cursor does not drift on the last frame.
+        let settled = !smooth || (self.zoom - self.target_zoom).abs() < 0.001;
+        if settled {
             self.zoom = self.target_zoom;
+        }
+
+        if let Some(center) = self.zoom_center {
+            let world_point = Pos2::new(
+                center.x / prev_zoom - self.offset.x,
+                center.y / prev_zoom - self.offset.y,
+            );
+            self.offset = Vec2::new(
+                center.x / self.zoom - world_point.x,
+                center.y / self.zoom - world_point.y,
+            );
+        }
+
+        if settled {
             self.zoom_center = None;
         }
+        !settled
     }
 
     pub fn fit_to_rect(&mut self, world_rect: Rect, screen_rect: Rect) {
@@ -249,17 +244,19 @@ mod tests {
     }
 
     #[test]
-    fn animate_without_smoothing_jumps_to_target() {
+    fn animate_without_smoothing_jumps_to_target_around_the_cursor() {
         let mut vp = Viewport {
             target_zoom: 2.0,
             zoom_center: Some(Pos2::new(10.0, 10.0)),
             ..Default::default()
         };
+        let anchored = vp.screen_to_world(Pos2::new(10.0, 10.0));
 
-        vp.animate(0.016, false);
+        assert!(!vp.animate(0.016, false), "nothing left to animate");
 
         assert_eq!(vp.zoom, 2.0);
         assert!(vp.zoom_center.is_none());
+        assert_close(vp.screen_to_world(Pos2::new(10.0, 10.0)), anchored);
     }
 
     #[test]
@@ -270,7 +267,7 @@ mod tests {
         vp.zoom_center = Some(center);
         let anchored = vp.screen_to_world(center);
 
-        vp.animate(0.05, true);
+        assert!(vp.animate(0.05, true), "still animating");
         assert!(vp.zoom > 1.0 && vp.zoom < 2.0, "zoom {}", vp.zoom);
         assert_close(vp.screen_to_world(center), anchored);
 

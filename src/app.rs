@@ -95,9 +95,13 @@ impl SpatialCodingApp {
             .handle_input(&response, canvas_rect, self.state.space_held);
 
         let dt = ui.input(|i| i.stable_dt);
-        self.state
+        let animating = self
+            .state
             .viewport
             .animate(dt, self.state.settings.smooth_zoom);
+        if animating {
+            ui.ctx().request_repaint();
+        }
 
         let painter = ui.painter_at(canvas_rect);
 

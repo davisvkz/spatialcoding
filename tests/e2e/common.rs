@@ -57,10 +57,20 @@ pub fn fixture() -> Fixture {
     Fixture { _dir: dir, root, name }
 }
 
+/// kittest's default frame time: long enough that animations finish in one frame.
+pub const DEFAULT_STEP_DT: f32 = 1.0 / 4.0;
+
 /// The real app in a 1400x900 window, with nothing loaded.
 pub fn app() -> App {
+    app_stepping(DEFAULT_STEP_DT)
+}
+
+/// Like [`app`], but each frame advances `step_dt` seconds (use 1/60 to watch
+/// an animation frame by frame).
+pub fn app_stepping(step_dt: f32) -> App {
     let mut harness = Harness::builder()
         .with_size(Vec2::new(1400.0, 900.0))
+        .with_step_dt(step_dt)
         .build_eframe(|cc| SpatialCodingApp::new(cc));
     harness.run();
     harness
@@ -68,7 +78,11 @@ pub fn app() -> App {
 
 /// The app with `fx` loaded as the workspace.
 pub fn app_with(fx: &Fixture) -> App {
-    let mut harness = app();
+    app_with_stepping(fx, DEFAULT_STEP_DT)
+}
+
+pub fn app_with_stepping(fx: &Fixture, step_dt: f32) -> App {
+    let mut harness = app_stepping(step_dt);
     harness.state_mut().open_folder(fx.root.clone());
     harness.run();
     harness
@@ -192,8 +206,15 @@ pub fn hold_key(harness: &mut App, key: egui::Key, down: bool) {
     );
 }
 
-/// Mouse wheel over `pos`, holding `modifiers`.
+/// Mouse wheel over `pos`, holding `modifiers`, then runs until the app settles.
 pub fn wheel(harness: &mut App, pos: Pos2, delta: Vec2, modifiers: Modifiers) {
+    wheel_frame(harness, pos, delta, modifiers);
+    harness.run();
+}
+
+/// Mouse wheel over `pos`, holding `modifiers`; stops right after the frame
+/// that handled the wheel event.
+pub fn wheel_frame(harness: &mut App, pos: Pos2, delta: Vec2, modifiers: Modifiers) {
     harness.input_mut().modifiers = modifiers;
     send(harness, Event::PointerMoved(pos));
     send(
@@ -205,7 +226,15 @@ pub fn wheel(harness: &mut App, pos: Pos2, delta: Vec2, modifiers: Modifiers) {
         },
     );
     harness.input_mut().modifiers = Modifiers::NONE;
-    harness.run();
+}
+
+/// True if the last frame asked egui to draw another one right away.
+pub fn wants_repaint(harness: &App) -> bool {
+    harness
+        .output()
+        .viewport_output
+        .values()
+        .any(|v| v.repaint_delay.is_zero())
 }
 
 pub fn assert_close(a: Pos2, b: Pos2) {

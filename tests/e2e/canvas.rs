@@ -5,8 +5,12 @@ use crate::common::*;
 /// Two nodes side by side at zoom 0.5, `a` centered on `CANVAS_SPOT`.
 /// Returns (app, a, b, screen center of a, screen center of b).
 fn two_nodes() -> (App, Fixture, u64, u64, Pos2, Pos2) {
+    two_nodes_stepping(DEFAULT_STEP_DT)
+}
+
+fn two_nodes_stepping(step_dt: f32) -> (App, Fixture, u64, u64, Pos2, Pos2) {
     let fx = fixture();
-    let mut app = app_with(&fx);
+    let mut app = app_with_stepping(&fx, step_dt);
     let a = app.open(&fx.path("src/main.rs"));
     let b = app.open(&fx.path("src/util.rs"));
     {
@@ -101,6 +105,50 @@ fn ctrl_wheel_zooms_around_the_cursor() {
 
     wheel(&mut app, CANVAS_SPOT, Vec2::new(0.0, -400.0), Modifiers::CTRL);
     assert!(app.app_state().viewport.zoom < 0.5, "zoomed out");
+}
+
+#[test]
+fn smooth_zoom_animates_over_frames_keeping_the_cursor_anchored() {
+    let (mut app, ..) = two_nodes_stepping(1.0 / 60.0);
+    assert!(app.app_state().settings.smooth_zoom, "on by default");
+    let anchor = app.app_state().viewport.screen_to_world(CANVAS_SPOT);
+
+    wheel_frame(&mut app, CANVAS_SPOT, Vec2::new(0.0, 100.0), Modifiers::CTRL);
+
+    let (first, target) = {
+        let vp = &app.app_state().viewport;
+        (vp.zoom, vp.target_zoom)
+    };
+    assert!(target > 0.5, "target zoomed in: {target}");
+    assert!(first > 0.5 && first < target, "first frame is part way: {first} of {target}");
+    assert!(wants_repaint(&app), "keeps repainting while animating");
+    assert_close(app.app_state().viewport.screen_to_world(CANVAS_SPOT), anchor);
+
+    let mut prev = first;
+    for frame in 0..120 {
+        app.step();
+        let vp = &app.app_state().viewport;
+        assert!(vp.zoom >= prev, "frame {frame}: zoom went back {prev} -> {}", vp.zoom);
+        assert_close(vp.screen_to_world(CANVAS_SPOT), anchor);
+        prev = vp.zoom;
+    }
+    let vp = &app.app_state().viewport;
+    assert_eq!(vp.zoom, target);
+    assert!(vp.zoom_center.is_none(), "animation finished");
+}
+
+#[test]
+fn without_smooth_zoom_the_zoom_applies_at_once() {
+    let (mut app, ..) = two_nodes_stepping(1.0 / 60.0);
+    app.app_state_mut().settings.smooth_zoom = false;
+    let anchor = app.app_state().viewport.screen_to_world(CANVAS_SPOT);
+
+    wheel_frame(&mut app, CANVAS_SPOT, Vec2::new(0.0, 100.0), Modifiers::CTRL);
+
+    let vp = &app.app_state().viewport;
+    assert!(vp.zoom > 0.5);
+    assert_eq!(vp.zoom, vp.target_zoom, "no animation");
+    assert_close(vp.screen_to_world(CANVAS_SPOT), anchor);
 }
 
 #[test]
