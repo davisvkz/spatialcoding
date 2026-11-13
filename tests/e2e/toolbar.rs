@@ -81,3 +81,18 @@ fn clear_selected_removes_nodes_with_their_edges_and_empty_folders() {
     assert_eq!(folders[0].path, fx.path("src"));
     assert_eq!(folders[0].children_ids, [main]);
 }
+
+#[test]
+fn settings_button_opens_the_settings_dialog() {
+    let mut app = app();
+    assert!(app.query_by_label("Minimap").is_none());
+
+    app.get_by_label("Settings").click();
+    app.run();
+    assert!(app.app_state().show_settings);
+    app.get_by_label("Minimap");
+
+    app.get_by_label("Close").click();
+    app.run();
+    assert!(!app.app_state().show_settings);
+}

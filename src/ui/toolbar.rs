@@ -52,5 +52,11 @@ pub fn draw_toolbar(ui: &mut egui::Ui, state: &mut AppState) {
             let ids: Vec<u64> = state.selection.selected_ids().collect();
             crate::workspace::remove_nodes(state, &ids);
         }
+
+        ui.separator();
+
+        if ui.button("Settings").clicked() {
+            state.show_settings = !state.show_settings;
+        }
     });
 }
