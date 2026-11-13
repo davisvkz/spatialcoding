@@ -14,7 +14,7 @@ use std::collections::{HashMap, VecDeque};
 use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
 
-use super::{DependencyLink, LineSpan, OpenFiles, StatementFinder, pick_symbols, usages};
+use super::{DependencyLink, LineSpan, OpenFiles, StatementFinder, byte_offset, pick_symbols, usages};
 use crate::analysis::lsp::manager::{LspManager, LspRequest, LspResponse, RequestId, ServerStatus};
 use crate::analysis::lsp::{Location, Position, ServerId, server_for};
 
@@ -25,6 +25,8 @@ struct SymbolEntry {
     label: String,
     definition: LineSpan,
     position: Position,
+    /// End of the symbol name (selection_range.end), for inline highlight.
+    name_end: Position,
     references: Option<Vec<Location>>,
 }
 
@@ -160,6 +162,7 @@ impl DependencyIndexer {
                             label: s.kind.label().to_string(),
                             definition: LineSpan::of_range(s.range),
                             position: s.selection_range.start,
+                            name_end: s.selection_range.end,
                             references: None,
                         })
                         .collect();
@@ -291,6 +294,11 @@ impl DependencyIndexer {
             }
             for symbol in symbols {
                 let Some(references) = &symbol.references else { continue };
+                let name_span = Self::name_byte_span(
+                    &entry.text,
+                    symbol.position,
+                    symbol.name_end,
+                );
                 for (source, usage) in usages(target, references, open, &mut finder) {
                     out.push(DependencyLink {
                         source,
@@ -298,11 +306,29 @@ impl DependencyIndexer {
                         label: symbol.label.clone(),
                         usage,
                         definition: symbol.definition,
+                        name_span,
                     });
                 }
             }
         }
         out
+    }
+
+    /// Converts the symbol's selection_range (UTF-16 positions) to
+    /// `(line, start_byte_in_line, end_byte_in_line)`.
+    fn name_byte_span(
+        content: &str,
+        start: Position,
+        end: Position,
+    ) -> Option<(usize, usize, usize)> {
+        if start.line != end.line {
+            return None;
+        }
+        let line = start.line;
+        let abs_start = byte_offset(content, line, start.character)?;
+        let abs_end = byte_offset(content, line, end.character)?;
+        let line_start = byte_offset(content, line, 0)?;
+        Some((line, abs_start - line_start, abs_end - line_start))
     }
 
     /// Progress per language server, in [`ServerId`] order.

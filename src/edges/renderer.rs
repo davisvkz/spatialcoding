@@ -203,6 +203,7 @@ mod tests {
             label: None,
             source_span: None,
             target_span: None,
+            name_span: None,
         }
     }
 

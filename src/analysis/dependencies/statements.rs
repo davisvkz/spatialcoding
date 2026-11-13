@@ -127,7 +127,7 @@ impl StatementFinder {
 }
 
 /// Byte offset of `line` and UTF-16 column `character` in `content`.
-fn byte_offset(content: &str, line: usize, character: usize) -> Option<usize> {
+pub fn byte_offset(content: &str, line: usize, character: usize) -> Option<usize> {
     let line_start = if line == 0 {
         0
     } else {

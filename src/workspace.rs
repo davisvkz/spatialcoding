@@ -217,9 +217,16 @@ fn apply_dependency_edges(state: &mut AppState) {
     state.edge_store.clear();
     for link in state.deps.links(&open) {
         if let (Some(&src), Some(&tgt)) = (ids.get(link.source.as_path()), ids.get(link.target.as_path())) {
+            let name_span = link.name_span.map(|(line, start, end)| {
+                crate::edges::edge_store::NameSpan {
+                    line,
+                    start_byte: start,
+                    end_byte: end,
+                }
+            });
             state
                 .edge_store
-                .add_spanned(src, tgt, Some(link.label), Some(link.usage), Some(link.definition));
+                .add_spanned(src, tgt, Some(link.label), Some(link.usage), Some(link.definition), name_span);
         }
     }
 }

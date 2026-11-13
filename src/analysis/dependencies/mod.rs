@@ -13,6 +13,7 @@ use std::path::{Path, PathBuf};
 
 use crate::analysis::lsp::{Location, LspSymbol, Range, SymbolKind};
 pub use statements::StatementFinder;
+pub(crate) use statements::byte_offset;
 
 /// Links drawn per symbol; a helper called everywhere would otherwise draw
 /// dozens of edges.
@@ -51,6 +52,9 @@ pub struct DependencyLink {
     pub label: String,
     pub usage: LineSpan,
     pub definition: LineSpan,
+    /// The symbol name's position: `(line, start_byte, end_byte)` within the
+    /// target file's content.
+    pub name_span: Option<(usize, usize, usize)>,
 }
 
 /// The symbols whose references become edges: every top-level symbol except

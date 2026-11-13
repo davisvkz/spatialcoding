@@ -104,11 +104,14 @@ fn rust_fixture_links_usage_statements_to_definitions_and_highlights_them() {
     state.selection.select(client);
     let selected: HashSet<u64> = state.selection.selected_ids().collect();
     let highlights = state.edge_store.selected_spans(&selected);
+    let has_span = |hl: &[spatialcoding::edges::edge_store::SpanHighlight], s: LineSpan| {
+        hl.iter().any(|h| h.span == s)
+    };
     for line in [4, 9, 13] {
-        assert!(highlights[&client].contains(&span(line, line)), "client.rs line {line}");
+        assert!(has_span(&highlights[&client], span(line, line)), "client.rs line {line}");
     }
     for line in [2, 7, 11] {
-        assert!(highlights[&server].contains(&span(line, line)), "server.rs line {line}");
+        assert!(has_span(&highlights[&server], span(line, line)), "server.rs line {line}");
     }
 }
 

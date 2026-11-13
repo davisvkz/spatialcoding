@@ -218,6 +218,33 @@ fn draw_edges_panel(ui: &mut egui::Ui, state: &mut AppState) {
         &mut state.edge_style.min_size_pct,
         0.0..=1.0,
     ));
+
+    ui.add_space(8.0);
+    ui.separator();
+    egui::CollapsingHeader::new("Symbol Colors")
+        .default_open(true)
+        .show(ui, |ui| {
+            let mut counts: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
+            for e in state.edge_store.all_edges() {
+                if let Some(label) = &e.label {
+                    *counts.entry(label.as_str()).or_default() += 1;
+                }
+            }
+            let mut kinds: Vec<String> = state.edge_style.symbol_colors.keys().cloned().collect();
+            kinds.sort();
+            for kind in &kinds {
+                let count = counts.get(kind.as_str()).copied().unwrap_or(0);
+                ui.horizontal(|ui| {
+                    if let Some(color) = state.edge_style.symbol_colors.get_mut(kind.as_str()) {
+                        ui.color_edit_button_rgb(color);
+                    }
+                    ui.label(kind.as_str());
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        ui.weak(format!("{count}"));
+                    });
+                });
+            }
+        });
 }
 
 #[cfg(test)]

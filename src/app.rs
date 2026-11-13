@@ -231,8 +231,6 @@ impl SpatialCodingApp {
         let visible_world = self.state.viewport.visible_world_rect(canvas_rect);
         let selected_ids: std::collections::HashSet<u64> = self.state.selection.selected_ids().collect();
         let edge_spans = self.state.edge_store.selected_spans(&selected_ids);
-        let [r, g, b] = self.state.edge_style.base_color.map(|c| (c * 255.0) as u8);
-        let edge_highlight = egui::Color32::from_rgb(r, g, b).gamma_multiply(0.18);
 
         for node in self.state.node_store.file_nodes.values() {
             let world_rect = node.world_rect(node_width, font_size);
@@ -329,29 +327,51 @@ impl SpatialCodingApp {
                 .lsp
                 .target
                 .filter(|t| self.state.selection.primary == Some(t.node_id));
-            let edge_lines = edge_spans
-                .get(&node.id)
-                .into_iter()
-                .flatten()
-                .map(|s| (node.id, s.start, s.end, edge_highlight));
+            let hl_origin = egui::pos2(screen_rect.left(), code_origin.y);
+            let char_width = font_size * zoom * 0.6;
+
+            // Edge highlights: block + left border + optional name highlight.
+            if let Some(highlights) = edge_spans.get(&node.id) {
+                for hl in highlights {
+                    let color = self.state.edge_style.kind_color(&hl.label);
+                    if let Some(rect) = cst_panel::highlight_rect(
+                        hl_origin, screen_rect.width(), line_h,
+                        hl.span.start, hl.span.end, node.visible_lines(),
+                    ) {
+                        code_clip.rect_filled(rect, 0.0, color.gamma_multiply(0.12));
+                        let border = egui::Rect::from_min_size(
+                            rect.left_top(),
+                            egui::vec2(3.0 * zoom, rect.height()),
+                        );
+                        code_clip.rect_filled(border, 0.0, color.gamma_multiply(0.7));
+                    }
+                    if let Some(ns) = hl.name_span {
+                        if ns.line < node.visible_lines() {
+                            let y = code_origin.y + ns.line as f32 * line_h;
+                            let x = code_origin.x + ns.start_byte as f32 * char_width;
+                            let w = (ns.end_byte - ns.start_byte) as f32 * char_width;
+                            let name_rect = egui::Rect::from_min_size(
+                                egui::pos2(x, y),
+                                egui::vec2(w, line_h),
+                            );
+                            code_clip.rect_filled(name_rect, 2.0, color.gamma_multiply(0.35));
+                        }
+                    }
+                }
+            }
+
+            // CST/LSP hover highlights and reference-jump target.
             let pointer_lines = [
                 self.state.cst.hovered.map(|h| (h.node_id, h.start_line, h.end_line, 0.25)),
                 self.state.lsp.hovered.map(|h| (h.node_id, h.start_line, h.end_line, 0.25)),
                 lsp_target.map(|t| (t.node_id, t.start_line, t.end_line, 0.4)),
-            ]
-            .into_iter()
-            .flatten()
-            .map(|(id, start, end, alpha)| (id, start, end, theme.selection.gamma_multiply(alpha)));
-            for (_, start, end, color) in edge_lines.chain(pointer_lines).filter(|h| h.0 == node.id) {
+            ];
+            for (_, start, end, alpha) in pointer_lines.into_iter().flatten().filter(|h| h.0 == node.id) {
                 if let Some(rect) = cst_panel::highlight_rect(
-                    egui::pos2(screen_rect.left(), code_origin.y),
-                    screen_rect.width(),
-                    line_h,
-                    start,
-                    end,
-                    node.visible_lines(),
+                    hl_origin, screen_rect.width(), line_h,
+                    start, end, node.visible_lines(),
                 ) {
-                    code_clip.rect_filled(rect, 0.0, color);
+                    code_clip.rect_filled(rect, 0.0, theme.selection.gamma_multiply(alpha));
                 }
             }
 
