@@ -91,6 +91,17 @@ impl SpatialCodingApp {
             self.state.viewport.fit_to_rect(world_rect, canvas_rect);
         }
 
+        if let Some(world) = self.state.pending_focus.take() {
+            // Jump to a reference: readable text, centered on its line.
+            let vp = &mut self.state.viewport;
+            if LodLevel::from_zoom(vp.zoom) != LodLevel::Full {
+                vp.zoom = 1.0;
+                vp.target_zoom = 1.0;
+            }
+            vp.zoom_center = None;
+            vp.offset = canvas_rect.center().to_vec2() / vp.zoom - world.to_vec2();
+        }
+
         self.state
             .viewport
             .handle_input(&response, canvas_rect, self.state.space_held);
@@ -297,17 +308,28 @@ impl SpatialCodingApp {
             let line_h = line_height(font_size) * zoom;
             let code_clip = painter.with_clip_rect(screen_rect.intersect(painter.clip_rect()));
 
-            if let Some(hover) = self.state.cst.hovered.filter(|h| h.node_id == node.id) {
-                // Under the code text: the lines of the CST row under the pointer.
+            // Under the code text: the lines of the CST or LSP row under the
+            // pointer, and the line of the last reference jumped to.
+            let lsp_target = self
+                .state
+                .lsp
+                .target
+                .filter(|t| self.state.selection.primary == Some(t.node_id));
+            let highlights = [
+                self.state.cst.hovered.map(|h| (h.node_id, h.start_line, h.end_line, 0.25)),
+                self.state.lsp.hovered.map(|h| (h.node_id, h.start_line, h.end_line, 0.25)),
+                lsp_target.map(|t| (t.node_id, t.start_line, t.end_line, 0.4)),
+            ];
+            for (_, start, end, alpha) in highlights.into_iter().flatten().filter(|h| h.0 == node.id) {
                 if let Some(rect) = cst_panel::highlight_rect(
                     egui::pos2(screen_rect.left(), code_origin.y),
                     screen_rect.width(),
                     line_h,
-                    hover.start_line,
-                    hover.end_line,
+                    start,
+                    end,
                     node.visible_lines(),
                 ) {
-                    code_clip.rect_filled(rect, 0.0, theme.selection.gamma_multiply(0.25));
+                    code_clip.rect_filled(rect, 0.0, theme.selection.gamma_multiply(alpha));
                 }
             }
 

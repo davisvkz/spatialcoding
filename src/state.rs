@@ -8,6 +8,7 @@ use crate::layout::settings::LayoutSettings;
 use crate::nodes::node_store::NodeStore;
 use crate::nodes::selection::Selection;
 use crate::ui::cst_panel::CstPanelState;
+use crate::ui::lsp_panel::LspPanelState;
 use crate::ui::theme::Theme;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -56,6 +57,11 @@ pub struct AppState {
     pub settings: AppSettings,
     /// CST tab: cached syntax tree of the selected node and the hovered row.
     pub cst: CstPanelState,
+    /// LSP tab: language servers, symbols of the selected node, references.
+    pub lsp: LspPanelState,
+    /// World point the canvas centers on next frame (set when jumping to a
+    /// reference; the canvas size is only known while drawing).
+    pub pending_focus: Option<egui::Pos2>,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -106,6 +112,8 @@ impl Default for AppState {
             space_held: false,
             settings: AppSettings::default(),
             cst: CstPanelState::default(),
+            lsp: LspPanelState::default(),
+            pending_focus: None,
         }
     }
 }

@@ -22,6 +22,7 @@ scripts/manual/04-edges.sh python
 | `09-minimap.sh` | Minimap (TASK-9) | `large` | ~150 arquivos + layout |
 | `10-open-all-and-clear.sh` | Ctrl+Shift+O, Clear All/Selected, Shift+X | `mixed` | só a pasta (canvas vazio) |
 | `11-cst.sh` | Aba CST: árvore tree-sitter e destaque de linhas (TASK-11) | `mixed` | um arquivo por linguagem + README e JSON |
+| `12-lsp.sh` | Aba LSP: símbolos, referências entre arquivos, pular para a linha (TASK-12; precisa do rust-analyzer) | `rust` | `util.rs` e `main.rs` + layout |
 
 ## Fixtures
 

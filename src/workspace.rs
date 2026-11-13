@@ -7,7 +7,9 @@ use std::path::{Path, PathBuf};
 
 use crate::fs::loader::{load_directory, read_file_content};
 use crate::fs::tree::TreeNode;
+use crate::nodes::file_node::{line_height, CODE_PADDING, HEADER_HEIGHT};
 use crate::state::AppState;
+use crate::ui::lsp_panel::LineHighlight;
 
 /// Newly opened files are placed on a grid until a layout is applied.
 const GRID_COLUMNS: usize = 3;
@@ -137,6 +139,42 @@ pub fn remove_nodes(state: &mut AppState, ids: &[u64]) {
     for id in empty_folders {
         state.node_store.remove_node(id);
     }
+}
+
+/// Shows line `line` (0-based) of `path`: opens the file if it is not on the
+/// canvas, makes it the only selection, marks the line as the LSP target and
+/// asks the canvas to center on it next frame. Returns the node id.
+pub fn focus_location(state: &mut AppState, path: &Path, line: usize) -> u64 {
+    let id = find_file_node(state, path).unwrap_or_else(|| open_file(state, path));
+    state.selection.select(id);
+    state.lsp.target = Some(LineHighlight {
+        node_id: id,
+        start_line: line,
+        end_line: line,
+    });
+    if let Some(node) = state.node_store.get_file(id) {
+        let font_size = state.settings.font_size;
+        let rect = node.world_rect(state.settings.node_width, font_size);
+        // Lines past the node's visible ones are not drawn: aim at the last one.
+        let shown = line.min(node.visible_lines().saturating_sub(1));
+        let y = rect.top() + HEADER_HEIGHT + CODE_PADDING + (shown as f32 + 0.5) * line_height(font_size);
+        state.pending_focus = Some(egui::pos2(rect.center().x, y));
+    }
+    id
+}
+
+/// The node showing `path`, also when one of the two paths goes through a
+/// symlink (language servers report canonical paths).
+fn find_file_node(state: &AppState, path: &Path) -> Option<u64> {
+    let nodes = &state.node_store.file_nodes;
+    if let Some(node) = nodes.values().find(|n| n.path == path) {
+        return Some(node.id);
+    }
+    let canonical = std::fs::canonicalize(path).ok()?;
+    nodes
+        .values()
+        .find(|n| std::fs::canonicalize(&n.path).is_ok_and(|p| p == canonical))
+        .map(|n| n.id)
 }
 
 /// Recomputes every dependency edge between the open file nodes.
@@ -290,6 +328,38 @@ mod tests {
             .map(|e| (e.source_node, e.target_node))
             .collect();
         assert_eq!(edges, [(first, ids[0])]);
+    }
+
+    #[test]
+    fn focus_location_opens_selects_and_aims_at_the_line() {
+        let dir = tempfile::tempdir().unwrap();
+        let a = write(dir.path(), "a.rs", "fn a() {}\n");
+        let b = write(dir.path(), "b.rs", "\n\nfn b() {}\n");
+        let mut state = AppState::default();
+        let a_id = open_file(&mut state, &a);
+        state.selection.select(a_id);
+
+        let b_id = focus_location(&mut state, &b, 2);
+        assert_ne!(a_id, b_id, "b.rs was opened");
+        assert_eq!(state.selection.primary, Some(b_id));
+        assert_eq!(state.selection.count(), 1);
+        assert_eq!(
+            state.lsp.target,
+            Some(LineHighlight { node_id: b_id, start_line: 2, end_line: 2 })
+        );
+        let node = state.node_store.get_file(b_id).unwrap();
+        let rect = node.world_rect(state.settings.node_width, state.settings.font_size);
+        let lh = line_height(state.settings.font_size);
+        let focus = state.pending_focus.unwrap();
+        assert_eq!(focus.x, rect.center().x);
+        assert!((focus.y - (rect.top() + HEADER_HEIGHT + CODE_PADDING + 2.5 * lh)).abs() < 1e-3);
+
+        // An open file is reused, also through a symlinked path.
+        let link = dir.path().join("link");
+        std::os::unix::fs::symlink(dir.path(), &link).unwrap();
+        assert_eq!(focus_location(&mut state, &link.join("a.rs"), 0), a_id);
+        assert_eq!(state.node_store.file_nodes.len(), 2);
+        assert_eq!(state.selection.primary, Some(a_id));
     }
 
     #[test]

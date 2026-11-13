@@ -8,7 +8,9 @@ mod common;
 
 mod canvas;
 mod cst_panel;
+mod fake_lsp;
 mod file_tree;
+mod lsp_panel;
 mod manual_fixtures;
 mod settings;
 mod shortcuts;
