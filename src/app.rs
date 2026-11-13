@@ -1,3 +1,5 @@
+use std::path::PathBuf;
+
 use crate::canvas::minimap::Minimap;
 use crate::canvas::renderer::CanvasRenderer;
 use crate::edges::renderer as edge_renderer;
@@ -24,6 +26,34 @@ impl SpatialCodingApp {
             highlighter: Highlighter::new(),
             minimap: Minimap::default(),
         }
+    }
+
+    pub fn state(&self) -> &AppState {
+        &self.state
+    }
+
+    pub fn state_mut(&mut self) -> &mut AppState {
+        &mut self.state
+    }
+
+    pub fn file_tree(&self) -> Option<&TreeNode> {
+        self.file_tree.as_ref()
+    }
+
+    /// Loads `dir` as the workspace, replacing whatever is on the canvas.
+    pub fn open_folder(&mut self, dir: PathBuf) {
+        self.state.node_store.clear();
+        self.state.edge_store.clear();
+        self.state.selection.clear();
+        self.file_tree =
+            match crate::fs::loader::load_directory(&dir, self.state.settings.show_dot_folders) {
+                Ok(tree) => Some(tree),
+                Err(e) => {
+                    log::error!("Failed to load {}: {e}", dir.display());
+                    None
+                }
+            };
+        self.state.loaded_dir = Some(dir);
     }
 
     fn draw_canvas(&mut self, ui: &mut egui::Ui) {
@@ -322,15 +352,7 @@ impl SpatialCodingApp {
 
                         if ui.button("Open folder...").clicked() {
                             if let Some(dir) = rfd::FileDialog::new().pick_folder() {
-                                self.state.loaded_dir = Some(dir.clone());
-                                self.file_tree = None;
-                                match crate::fs::loader::load_directory(
-                                    &dir,
-                                    self.state.settings.show_dot_folders,
-                                ) {
-                                    Ok(tree) => self.file_tree = Some(tree),
-                                    Err(e) => log::error!("Failed to load: {}", e),
-                                }
+                                self.open_folder(dir);
                             }
                         }
 

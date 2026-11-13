@@ -1,16 +1,4 @@
-mod app;
-mod state;
-mod input;
-mod canvas;
-mod nodes;
-mod edges;
-mod layout;
-mod fs;
-mod analysis;
-mod highlight;
-mod ui;
-mod git;
-mod server;
+use spatialcoding::app::SpatialCodingApp;
 
 fn main() -> eframe::Result {
     env_logger::init();
@@ -26,6 +14,6 @@ fn main() -> eframe::Result {
     eframe::run_native(
         "SpatialCoding",
         options,
-        Box::new(|cc| Ok(Box::new(app::SpatialCodingApp::new(cc)))),
+        Box::new(|cc| Ok(Box::new(SpatialCodingApp::new(cc)))),
     )
 }
