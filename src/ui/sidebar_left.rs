@@ -61,28 +61,35 @@ fn draw_tree_node(ui: &mut egui::Ui, node: &mut TreeNode, state: &mut AppState) 
     match node {
         TreeNode::Dir {
             name,
+            path,
             children,
             expanded,
             ..
         } => {
+            use egui::collapsing_header::CollapsingState;
+
             let file_count = count_files(children);
             let header = format!("{name} ({file_count})");
-            let id = ui.make_persistent_id(name.as_str());
-            egui::collapsing_header::CollapsingState::load_with_default_open(
-                ui.ctx(),
-                id,
-                *expanded,
-            )
-            .show_header(ui, |ui| {
-                if ui.selectable_label(false, &header).clicked() {
-                    *expanded = !*expanded;
+            // Keyed by path: folders with the same name must not share state.
+            let id = ui.make_persistent_id(&*path);
+            let (_, header_response, _) =
+                CollapsingState::load_with_default_open(ui.ctx(), id, *expanded)
+                    .show_header(ui, |ui| ui.selectable_label(false, &header).clicked())
+                    .body(|ui| {
+                        for child in children.iter_mut() {
+                            draw_tree_node(ui, child, state);
+                        }
+                    });
+
+            // The name toggles the folder too, not only the arrow. The open
+            // state lives in egui memory, so toggle it there.
+            if let Some(mut collapsing) = CollapsingState::load(ui.ctx(), id) {
+                if header_response.inner {
+                    collapsing.toggle(ui);
+                    collapsing.store(ui.ctx());
                 }
-            })
-            .body(|ui| {
-                for child in children.iter_mut() {
-                    draw_tree_node(ui, child, state);
-                }
-            });
+                *expanded = collapsing.is_open();
+            }
         }
         TreeNode::File { name, path } => {
             let icon = file_icon(name);

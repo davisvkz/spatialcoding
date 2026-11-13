@@ -7,6 +7,7 @@
 mod common;
 
 mod canvas;
+mod file_tree;
 mod settings;
 mod shortcuts;
 mod sidebar_right;
