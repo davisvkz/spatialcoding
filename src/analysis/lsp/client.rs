@@ -104,7 +104,12 @@ type Pending = Arc<Mutex<HashMap<u64, Sender<Reply>>>>;
 type SharedWriter = Arc<Mutex<Box<dyn Write + Send>>>;
 
 /// Active `$/progress` tokens; non-empty while the server is indexing.
+/// rust-analyzer's `experimental/serverStatus` adds [`NOT_QUIESCENT`] while it
+/// loads or indexes the workspace, even between progress reports.
 pub type ProgressTokens = Arc<Mutex<HashSet<String>>>;
+
+/// Pseudo progress token held while a server reports `quiescent: false`.
+pub const NOT_QUIESCENT: &str = "$serverStatus";
 
 pub struct LspClient {
     writer: SharedWriter,
@@ -165,7 +170,8 @@ impl LspClient {
                         "references": {}
                     },
                     "window": {"workDoneProgress": true},
-                    "workspace": {"configuration": true, "workspaceFolders": true}
+                    "workspace": {"configuration": true, "workspaceFolders": true},
+                    "experimental": {"serverStatusNotification": true}
                 }
             }),
         )?;
@@ -381,6 +387,14 @@ fn dispatch(msg: &Value, writer: &SharedWriter, pending: &Pending, progress: &Pr
             let reply = json!({"jsonrpc": "2.0", "id": id, "result": result});
             let _ = write_message(&mut *writer.lock().unwrap(), &reply);
         }
+        (Some("experimental/serverStatus"), None) => {
+            let mut tokens = progress.lock().unwrap();
+            if msg["params"]["quiescent"].as_bool() == Some(false) {
+                tokens.insert(NOT_QUIESCENT.to_string());
+            } else {
+                tokens.remove(NOT_QUIESCENT);
+            }
+        }
         (Some("$/progress"), None) => {
             let token = match &msg["params"]["token"] {
                 Value::String(s) => s.clone(),
@@ -510,6 +524,20 @@ mod tests {
         let tokens = client.progress();
         tokens.lock().unwrap().clear();
         assert!(!client.is_indexing());
+    }
+
+    #[test]
+    fn rust_analyzer_server_status_counts_as_progress() {
+        let writer: SharedWriter = Arc::new(Mutex::new(Box::new(std::io::sink())));
+        let (pending, progress): (Pending, ProgressTokens) = Default::default();
+        let status = |quiescent: bool| {
+            json!({"jsonrpc": "2.0", "method": "experimental/serverStatus",
+                "params": {"health": "ok", "quiescent": quiescent}})
+        };
+        dispatch(&status(false), &writer, &pending, &progress);
+        assert!(progress.lock().unwrap().contains(NOT_QUIESCENT));
+        dispatch(&status(true), &writer, &pending, &progress);
+        assert!(progress.lock().unwrap().is_empty());
     }
 
     #[test]

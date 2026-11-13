@@ -15,7 +15,8 @@ fn open_and_layout_options_prepare_the_canvas_and_fit_the_view() {
     };
 
     app.state_mut().apply_startup(&opts);
-    app.run();
+    // The layout is applied again once the language server answered.
+    app.settle_edges();
 
     let s = app.app_state();
     assert_eq!(s.node_store.file_nodes.len(), 2);

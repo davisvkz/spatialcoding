@@ -49,6 +49,14 @@ impl FileNode {
         self.line_count.min(MAX_VISIBLE_LINES)
     }
 
+    /// World-space y of the middle of code line `line` (0-based), or `None`
+    /// when the node does not draw that line.
+    pub fn line_anchor_y(&self, line: usize, font_size: f32) -> Option<f32> {
+        (line < self.visible_lines()).then(|| {
+            self.position.y + HEADER_HEIGHT + CODE_PADDING + (line as f32 + 0.5) * line_height(font_size)
+        })
+    }
+
     pub fn file_name(&self) -> &str {
         self.path
             .file_name()
@@ -131,6 +139,14 @@ mod tests {
         assert_eq!(rect.min, egui::pos2(5.0, 6.0));
         assert_eq!(rect.width(), 700.0);
         assert!((rect.height() - expected_height).abs() < 1e-4);
+    }
+
+    #[test]
+    fn line_anchor_y_is_the_middle_of_a_drawn_line() {
+        let n = node("a.rs", "1\n2\n3");
+        let y = n.line_anchor_y(1, 10.0).unwrap();
+        assert!((y - (6.0 + HEADER_HEIGHT + CODE_PADDING + 1.5 * line_height(10.0))).abs() < 1e-4);
+        assert_eq!(n.line_anchor_y(3, 10.0), None, "past the last line");
     }
 
     #[test]

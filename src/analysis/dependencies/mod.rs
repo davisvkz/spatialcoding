@@ -1,433 +1,248 @@
-//! Static, per-language dependency analysis between source files.
+//! Dependencies between open files, from the language servers.
 //!
-//! Each language module parses import-like statements and resolves them to
-//! files in the analyzed file set. Only dependencies whose target is part of
-//! that set are reported, so edges always connect two known file nodes.
+//! For each open file the [`indexer`] asks its server for the document's
+//! symbols and, for each top-level symbol or type member, for its references.
+//! A reference in another open file becomes a link from the statement around
+//! it ([`statements`]) to the symbol's definition.
 
-mod go;
-mod python;
-mod rust;
-mod typescript;
+pub mod indexer;
+mod statements;
 
-use std::cell::RefCell;
 use std::collections::HashMap;
-use std::path::{Component, Path, PathBuf};
-use std::rc::Rc;
+use std::path::{Path, PathBuf};
 
-#[derive(Debug, Clone)]
-pub struct Dependency {
+use crate::analysis::lsp::{Location, LspSymbol, Range, SymbolKind};
+pub use statements::StatementFinder;
+
+/// Links drawn per symbol; a helper called everywhere would otherwise draw
+/// dozens of edges.
+pub const MAX_LINKS_PER_SYMBOL: usize = 20;
+
+/// Lines `start..=end` of a file, 0-based.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct LineSpan {
+    pub start: usize,
+    pub end: usize,
+}
+
+impl LineSpan {
+    /// The lines an LSP range covers; a range ending at column 0 of a line
+    /// does not cover that line.
+    pub fn of_range(range: Range) -> Self {
+        let end = if range.end.character == 0 && range.end.line > range.start.line {
+            range.end.line - 1
+        } else {
+            range.end.line
+        };
+        LineSpan {
+            start: range.start.line,
+            end,
+        }
+    }
+}
+
+/// One edge: the statement of `source` using a symbol, and the definition of
+/// that symbol in `target`. Paths are the file nodes' paths.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DependencyLink {
     pub source: PathBuf,
     pub target: PathBuf,
-    pub kind: DependencyKind,
+    /// The symbol's kind, e.g. `fn` or `struct`.
+    pub label: String,
+    pub usage: LineSpan,
+    pub definition: LineSpan,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum DependencyKind {
-    /// The source uses items from the target (`use`, `import`, `require`).
-    Import,
-    /// The target uses items exported by the source.
-    Export,
-    /// The source re-exports items of the target (`pub use`, `export … from`).
-    ReExport,
-    /// The source declares the target as a child module (`mod x;`).
-    Module,
-}
-
-impl DependencyKind {
-    /// When the same source/target pair is found several times, the kind with
-    /// the highest priority is kept.
-    fn priority(self) -> u8 {
-        match self {
-            DependencyKind::Export => 0,
-            DependencyKind::Import => 1,
-            DependencyKind::Module => 2,
-            DependencyKind::ReExport => 3,
+/// The symbols whose references become edges: every top-level symbol except
+/// containers without a name of their own (rust-analyzer's `impl` blocks), and
+/// the members of top-level types (methods, nested types), never their fields
+/// or a function's locals.
+pub fn pick_symbols(symbols: &[LspSymbol]) -> Vec<&LspSymbol> {
+    let mut out = Vec::new();
+    for symbol in symbols {
+        if symbol.kind != SymbolKind::Other {
+            out.push(symbol);
+        }
+        let has_members = !matches!(
+            symbol.kind,
+            SymbolKind::Function
+                | SymbolKind::Method
+                | SymbolKind::Constructor
+                | SymbolKind::Variable
+                | SymbolKind::Constant
+        );
+        if has_members {
+            out.extend(
+                symbol
+                    .children
+                    .iter()
+                    .filter(|c| !matches!(c.kind, SymbolKind::Field | SymbolKind::Other)),
+            );
         }
     }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Language {
-    Rust,
-    TypeScript,
-    Python,
-    Go,
-}
-
-impl Language {
-    fn from_path(path: &Path) -> Option<Self> {
-        let ext = path.extension()?.to_str()?;
-        match ext {
-            "rs" => Some(Language::Rust),
-            "ts" | "tsx" | "mts" | "cts" | "js" | "jsx" | "mjs" | "cjs" => {
-                Some(Language::TypeScript)
-            }
-            "py" | "pyi" => Some(Language::Python),
-            "go" => Some(Language::Go),
-            _ => None,
-        }
-    }
-}
-
-/// Analyze `files` (all belonging to the project at `root`) and return the
-/// dependencies between them. Each `(source, target)` pair appears once.
-pub fn analyze_dependencies(root: &Path, files: &[PathBuf]) -> Vec<Dependency> {
-    let ctx = Ctx::new(root, files);
-    let mut index: HashMap<(PathBuf, PathBuf), usize> = HashMap::new();
-    let mut deps: Vec<Dependency> = Vec::new();
-
-    for file in files {
-        let Some(lang) = Language::from_path(file) else {
-            continue;
-        };
-        let Ok(content) = std::fs::read_to_string(file) else {
-            continue;
-        };
-
-        let found = match lang {
-            Language::Rust => rust::analyze(&ctx, file, &content),
-            Language::TypeScript => typescript::analyze(&ctx, file, &content),
-            Language::Python => python::analyze(&ctx, file, &content),
-            Language::Go => go::analyze(&ctx, file, &content),
-        };
-
-        for (target, kind) in found {
-            if target == *file {
-                continue;
-            }
-            let key = (file.clone(), target.clone());
-            match index.get(&key) {
-                Some(&i) => {
-                    if kind.priority() > deps[i].kind.priority() {
-                        deps[i].kind = kind;
-                    }
-                }
-                None => {
-                    index.insert(key, deps.len());
-                    deps.push(Dependency {
-                        source: file.clone(),
-                        target,
-                        kind,
-                    });
-                }
-            }
-        }
-    }
-
-    deps
-}
-
-/// Shared state for one analysis run: the file set plus caches for project
-/// configuration files (Cargo.toml, tsconfig.json, go.mod, …).
-pub(crate) struct Ctx {
-    root: PathBuf,
-    /// normalized path -> path as given by the caller
-    files: HashMap<PathBuf, PathBuf>,
-    /// normalized directory -> files directly inside it (caller paths)
-    by_dir: HashMap<PathBuf, Vec<PathBuf>>,
-    find_up_cache: RefCell<HashMap<(PathBuf, String), Option<PathBuf>>>,
-    ts_configs: RefCell<HashMap<PathBuf, Option<Rc<typescript::TsConfig>>>>,
-    go_modules: RefCell<HashMap<PathBuf, Option<String>>>,
-}
-
-impl Ctx {
-    fn new(root: &Path, files: &[PathBuf]) -> Self {
-        let mut map = HashMap::new();
-        let mut by_dir: HashMap<PathBuf, Vec<PathBuf>> = HashMap::new();
-        for f in files {
-            let norm = normalize(f);
-            if let Some(parent) = norm.parent() {
-                by_dir.entry(parent.to_path_buf()).or_default().push(f.clone());
-            }
-            map.insert(norm, f.clone());
-        }
-        Self {
-            root: root.to_path_buf(),
-            files: map,
-            by_dir,
-            find_up_cache: RefCell::new(HashMap::new()),
-            ts_configs: RefCell::new(HashMap::new()),
-            go_modules: RefCell::new(HashMap::new()),
-        }
-    }
-
-    fn root(&self) -> &Path {
-        &self.root
-    }
-
-    /// Return the caller's path for `candidate` if it is part of the file set.
-    fn lookup(&self, candidate: &Path) -> Option<PathBuf> {
-        self.files.get(&normalize(candidate)).cloned()
-    }
-
-    /// Files of the set located directly inside `dir`.
-    fn files_in_dir(&self, dir: &Path) -> &[PathBuf] {
-        self.by_dir
-            .get(&normalize(dir))
-            .map(Vec::as_slice)
-            .unwrap_or(&[])
-    }
-
-    /// Find the nearest ancestor of `start` (inclusive) that contains one of
-    /// `names`, returning the path of that file. Results are cached.
-    fn find_up(&self, start: &Path, names: &[&str]) -> Option<PathBuf> {
-        let key = (start.to_path_buf(), names.join("|"));
-        if let Some(hit) = self.find_up_cache.borrow().get(&key) {
-            return hit.clone();
-        }
-        let found = start.ancestors().find_map(|dir| {
-            names
-                .iter()
-                .map(|n| dir.join(n))
-                .find(|candidate| candidate.is_file())
-        });
-        self.find_up_cache.borrow_mut().insert(key, found.clone());
-        found
-    }
-}
-
-/// Lexically normalize a path: drop `.` components and fold `..` into the
-/// preceding normal component.
-pub(crate) fn normalize(path: &Path) -> PathBuf {
-    let mut out: Vec<Component> = Vec::new();
-    for comp in path.components() {
-        match comp {
-            Component::CurDir => {}
-            Component::ParentDir => match out.last() {
-                Some(Component::Normal(_)) => {
-                    out.pop();
-                }
-                Some(Component::RootDir) | Some(Component::Prefix(_)) => {}
-                _ => out.push(comp),
-            },
-            other => out.push(other),
-        }
-    }
-    out.iter().collect()
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum CommentStyle {
-    /// Nested block comments, `"…"` strings, raw strings and char literals.
-    Rust,
-    /// `'…'`, `"…"` and `` `…` `` strings (also used for Go and JSONC).
-    CLike,
-}
-
-/// Remove `//` and `/* */` comments while keeping string literals intact.
-/// Newlines inside block comments are preserved so line structure survives.
-pub(crate) fn strip_comments(src: &str, style: CommentStyle) -> String {
-    let b: Vec<char> = src.chars().collect();
-    let len = b.len();
-    let mut out = String::with_capacity(src.len());
-    let is_ident = |c: char| c.is_alphanumeric() || c == '_';
-    let mut i = 0;
-
-    while i < len {
-        let c = b[i];
-        let next = b.get(i + 1).copied();
-
-        // Line comment
-        if c == '/' && next == Some('/') {
-            while i < len && b[i] != '\n' {
-                i += 1;
-            }
-            continue;
-        }
-
-        // Block comment
-        if c == '/' && next == Some('*') {
-            let mut depth = 1;
-            i += 2;
-            while i < len && depth > 0 {
-                if b[i] == '*' && b.get(i + 1) == Some(&'/') {
-                    depth -= 1;
-                    i += 2;
-                } else if style == CommentStyle::Rust && b[i] == '/' && b.get(i + 1) == Some(&'*')
-                {
-                    depth += 1;
-                    i += 2;
-                } else {
-                    if b[i] == '\n' {
-                        out.push('\n');
-                    }
-                    i += 1;
-                }
-            }
-            out.push(' ');
-            continue;
-        }
-
-        if style == CommentStyle::Rust {
-            // Raw strings: r"…", r#"…"#, br"…"
-            let prev = if i > 0 { Some(b[i - 1]) } else { None };
-            let prev_ok = match prev {
-                None => true,
-                Some('b') => i < 2 || !is_ident(b[i - 2]),
-                Some(p) => !is_ident(p),
-            };
-            if c == 'r' && prev_ok && matches!(next, Some('"') | Some('#')) {
-                let mut j = i + 1;
-                let mut hashes = 0;
-                while j < len && b[j] == '#' {
-                    hashes += 1;
-                    j += 1;
-                }
-                if j < len && b[j] == '"' {
-                    let start = i;
-                    j += 1;
-                    loop {
-                        if j >= len {
-                            break;
-                        }
-                        if b[j] == '"' && (0..hashes).all(|h| b.get(j + 1 + h) == Some(&'#')) {
-                            j += 1 + hashes;
-                            break;
-                        }
-                        j += 1;
-                    }
-                    out.extend(&b[start..j.min(len)]);
-                    i = j;
-                    continue;
-                }
-            }
-
-            // Char literals ('x', '\n', '\u{1F600}'); lifetimes pass through.
-            if c == '\'' {
-                if next == Some('\\') {
-                    let start = i;
-                    let mut j = i + 3;
-                    while j < len && b[j] != '\'' && b[j] != '\n' {
-                        j += 1;
-                    }
-                    let end = if j < len && b[j] == '\'' { j + 1 } else { j };
-                    out.extend(&b[start..end.min(len)]);
-                    i = end;
-                    continue;
-                }
-                if b.get(i + 2) == Some(&'\'') {
-                    out.extend(&b[i..i + 3]);
-                    i += 3;
-                    continue;
-                }
-            }
-        }
-
-        let is_quote = c == '"' || (style == CommentStyle::CLike && (c == '\'' || c == '`'));
-        if is_quote {
-            out.push(c);
-            i += 1;
-            while i < len {
-                let d = b[i];
-                out.push(d);
-                i += 1;
-                if d == '\\' {
-                    if i < len {
-                        out.push(b[i]);
-                        i += 1;
-                    }
-                    continue;
-                }
-                if d == c {
-                    break;
-                }
-            }
-            continue;
-        }
-
-        out.push(c);
-        i += 1;
-    }
-
     out
 }
 
-#[cfg(test)]
-pub(crate) mod test_util {
-    use super::*;
+/// The open files, looked up by the paths language servers report (which may
+/// differ from the nodes' paths through symlinks).
+pub struct OpenFiles<'a> {
+    by_path: HashMap<PathBuf, (&'a Path, &'a str)>,
+}
 
-    /// Create a temporary project with the given `(relative path, content)`
-    /// files. Returns the temp dir guard and the absolute paths of all files.
-    pub fn project(files: &[(&str, &str)]) -> (tempfile::TempDir, Vec<PathBuf>) {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let mut paths = Vec::new();
-        for (rel, content) in files {
-            let path = dir.path().join(rel);
-            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-            std::fs::write(&path, content).unwrap();
-            paths.push(path);
+impl<'a> OpenFiles<'a> {
+    /// `files` are `(node path, content)` pairs.
+    pub fn new(files: impl IntoIterator<Item = (&'a Path, &'a str)>) -> Self {
+        let mut by_path = HashMap::new();
+        for (path, content) in files {
+            if let Ok(canonical) = std::fs::canonicalize(path) {
+                by_path.insert(canonical, (path, content));
+            }
+            by_path.insert(path.to_path_buf(), (path, content));
         }
-        (dir, paths)
+        Self { by_path }
     }
 
-    /// Run the analysis and return edges as sorted `(source, target, kind)`
-    /// triples with paths relative to `root`.
-    pub fn edges(root: &Path, files: &[PathBuf]) -> Vec<(String, String, DependencyKind)> {
-        let rel = |p: &Path| {
-            p.strip_prefix(root)
-                .unwrap()
-                .to_string_lossy()
-                .replace('\\', "/")
+    /// The node path and content of the open file at `path`.
+    pub fn get(&self, path: &Path) -> Option<(&'a Path, &'a str)> {
+        self.by_path.get(path).copied()
+    }
+}
+
+/// Usage statements of one symbol defined in `target`, from its references:
+/// `(source node path, statement lines)`, at most [`MAX_LINKS_PER_SYMBOL`].
+/// References in `target` itself or in files that are not open are ignored. A
+/// reference inside an import counts only when the file has no other one.
+pub fn usages(
+    target: &Path,
+    locations: &[Location],
+    open: &OpenFiles,
+    finder: &mut StatementFinder,
+) -> Vec<(PathBuf, LineSpan)> {
+    let mut sorted: Vec<&Location> = locations.iter().collect();
+    sorted.sort();
+    // (source, span, is_import), in reference order per file
+    let mut found: Vec<(&Path, LineSpan, bool)> = Vec::new();
+    for loc in sorted {
+        let Some((source, content)) = open.get(&loc.path) else {
+            continue;
         };
-        let mut out: Vec<_> = analyze_dependencies(root, files)
-            .into_iter()
-            .map(|d| (rel(&d.source), rel(&d.target), d.kind))
-            .collect();
-        out.sort_by(|a, b| (&a.0, &a.1).cmp(&(&b.0, &b.1)));
-        out
+        if source == target {
+            continue;
+        }
+        let stmt = finder.at(source, content, loc.range.start.line, loc.range.start.character);
+        if !found.iter().any(|(s, span, _)| *s == source && *span == stmt.span) {
+            found.push((source, stmt.span, stmt.is_import));
+        }
     }
-
-    pub fn edge(src: &str, tgt: &str, kind: DependencyKind) -> (String, String, DependencyKind) {
-        (src.to_string(), tgt.to_string(), kind)
-    }
+    let uses_outside_imports = |source: &Path| found.iter().any(|(s, _, imp)| *s == source && !imp);
+    found
+        .iter()
+        .filter(|(source, _, is_import)| !is_import || !uses_outside_imports(source))
+        .take(MAX_LINKS_PER_SYMBOL)
+        .map(|(source, span, _)| (source.to_path_buf(), *span))
+        .collect()
 }
 
 #[cfg(test)]
 mod tests {
-    use super::test_util::*;
     use super::*;
+    use crate::analysis::lsp::Position;
 
-    #[test]
-    fn normalize_folds_dot_segments() {
-        assert_eq!(normalize(Path::new("/a/b/./../c/d")), PathBuf::from("/a/c/d"));
-        assert_eq!(normalize(Path::new("a/../../b")), PathBuf::from("../b"));
+    fn range(line: usize, character: usize) -> Range {
+        Range {
+            start: Position { line, character },
+            end: Position { line, character: character + 1 },
+        }
+    }
+
+    fn symbol(name: &str, kind: SymbolKind, children: Vec<LspSymbol>) -> LspSymbol {
+        LspSymbol {
+            name: name.into(),
+            detail: None,
+            kind,
+            range: range(0, 0),
+            selection_range: range(0, 0),
+            children,
+        }
     }
 
     #[test]
-    fn strip_comments_keeps_strings() {
-        let src = "let a = \"// not a comment\"; // gone\n/* block\n */ let b = 1;";
-        let out = strip_comments(src, CommentStyle::Rust);
-        assert!(out.contains("\"// not a comment\""));
-        assert!(!out.contains("gone"));
-        assert!(!out.contains("block"));
-        assert_eq!(out.lines().count(), 3);
-    }
-
-    #[test]
-    fn strip_comments_rust_char_and_lifetime() {
-        let src = "fn f<'a>(x: &'a str) -> char { '\"' } // c\nuse crate::x;";
-        let out = strip_comments(src, CommentStyle::Rust);
-        assert!(out.contains("use crate::x;"));
-        assert!(!out.contains("// c"));
-    }
-
-    #[test]
-    fn dedups_pairs_and_ignores_files_outside_set() {
-        let (dir, files) = project(&[
-            ("Cargo.toml", "[package]\nname = \"x\"\n"),
-            (
-                "src/main.rs",
-                "mod a;\nmod missing;\nuse crate::a::Thing;\nuse a::other;\nfn main() { crate::a::f(); }\n",
+    fn picks_top_level_symbols_and_type_members() {
+        let symbols = vec![
+            symbol("Client", SymbolKind::Struct, vec![symbol("server", SymbolKind::Field, vec![])]),
+            symbol(
+                "impl Client",
+                SymbolKind::Other,
+                vec![symbol("new", SymbolKind::Method, vec![]), symbol("greet", SymbolKind::Method, vec![])],
             ),
-            ("src/a.rs", "pub fn f() {}\n"),
-            ("src/unlisted.rs", ""),
-        ]);
-        // `unlisted.rs` exists on disk but is not part of the analyzed set.
-        let set: Vec<PathBuf> = files
-            .into_iter()
-            .filter(|p| !p.ends_with("unlisted.rs"))
+            symbol("run", SymbolKind::Function, vec![symbol("local", SymbolKind::Variable, vec![])]),
+            symbol("Kind", SymbolKind::Enum, vec![symbol("A", SymbolKind::Field, vec![])]),
+        ];
+        let names: Vec<&str> = pick_symbols(&symbols).iter().map(|s| s.name.as_str()).collect();
+        assert_eq!(names, ["Client", "new", "greet", "run", "Kind"]);
+    }
+
+    #[test]
+    fn line_span_of_a_range_skips_a_trailing_line_start() {
+        let r = |sl, sc, el, ec| Range {
+            start: Position { line: sl, character: sc },
+            end: Position { line: el, character: ec },
+        };
+        assert_eq!(LineSpan::of_range(r(2, 0, 5, 1)), LineSpan { start: 2, end: 5 });
+        assert_eq!(LineSpan::of_range(r(2, 0, 5, 0)), LineSpan { start: 2, end: 4 });
+        assert_eq!(LineSpan::of_range(r(3, 4, 3, 0)), LineSpan { start: 3, end: 3 });
+    }
+
+    #[test]
+    fn usages_keep_other_open_files_and_drop_imports_with_other_uses() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(dir.path()).unwrap();
+        let (math, app, unused, closed) = (
+            root.join("math.ts"),
+            root.join("app.ts"),
+            root.join("unused.ts"),
+            root.join("closed.ts"),
+        );
+        let app_text = "import { add } from './math';\n\nadd(1, 2);\nconst x = add(\n  3, add(4, 5));\n";
+        let contents = [
+            (math.as_path(), "export function add() {}\n"),
+            (app.as_path(), app_text),
+            (unused.as_path(), "import { add } from './math';\n"),
+        ];
+        let open = OpenFiles::new(contents);
+        let loc = |path: &Path, line, character| Location {
+            path: path.to_path_buf(),
+            range: range(line, character),
+        };
+        let locations = [
+            loc(&math, 0, 16), // the declaration
+            loc(&app, 0, 9),   // the import, dropped: app.ts uses add
+            loc(&app, 2, 0),
+            loc(&app, 3, 10),
+            loc(&app, 4, 5), // same statement as line 3
+            loc(&unused, 0, 9),
+            loc(&closed, 0, 0),
+        ];
+        let span = |start, end| LineSpan { start, end };
+        assert_eq!(
+            usages(&math, &locations, &open, &mut StatementFinder::default()),
+            [(app.clone(), span(2, 2)), (app.clone(), span(3, 4)), (unused.clone(), span(0, 0))]
+        );
+    }
+
+    #[test]
+    fn usages_are_capped_per_symbol() {
+        let dir = tempfile::tempdir().unwrap();
+        let (lib, app) = (dir.path().join("lib.rs"), dir.path().join("app.rs"));
+        let app_text = "fn main() {\n".to_string() + &"    f();\n".repeat(30) + "}\n";
+        let open = OpenFiles::new([(lib.as_path(), "pub fn f() {}\n"), (app.as_path(), app_text.as_str())]);
+        let locations: Vec<Location> = (1..=30)
+            .map(|line| Location {
+                path: app.clone(),
+                range: range(line, 4),
+            })
             .collect();
-        let edges = edges(dir.path(), &set);
-        assert_eq!(edges, vec![edge("src/main.rs", "src/a.rs", DependencyKind::Module)]);
+        let found = usages(&lib, &locations, &open, &mut StatementFinder::default());
+        assert_eq!(found.len(), MAX_LINKS_PER_SYMBOL);
     }
 }

@@ -158,26 +158,23 @@ impl LspPanelState {
         });
     }
 
-    /// Takes the answers that arrived; stale ones are dropped.
-    pub fn poll(&mut self) {
-        for (id, response) in self.manager.poll() {
-            match response {
-                LspResponse::Symbols(result) => {
-                    if let Some(entry) = &mut self.symbols
-                        && entry.fetch == Fetch::Pending(id)
-                    {
-                        entry.fetch = Fetch::Done(result);
-                    }
+    /// Takes an answer of the shared [`LspManager`] if it is the one the tab
+    /// waits for; any other answer (stale, or another requester's) is handed
+    /// back.
+    pub fn receive(&mut self, id: RequestId, response: LspResponse) -> Option<LspResponse> {
+        match response {
+            LspResponse::Symbols(result) => match &mut self.symbols {
+                Some(entry) if entry.fetch == Fetch::Pending(id) => entry.fetch = Fetch::Done(result),
+                _ => return Some(LspResponse::Symbols(result)),
+            },
+            LspResponse::References(result) => match &mut self.references {
+                Some(refs) if matches!(refs.fetch, Fetch::Pending(p) if p == id) => {
+                    refs.fetch = Fetch::Done(result.map(|locs| reference_rows(&locs)));
                 }
-                LspResponse::References(result) => {
-                    if let Some(refs) = &mut self.references
-                        && matches!(refs.fetch, Fetch::Pending(p) if p == id)
-                    {
-                        refs.fetch = Fetch::Done(result.map(|locs| reference_rows(&locs)));
-                    }
-                }
-            }
+                _ => return Some(LspResponse::References(result)),
+            },
         }
+        None
     }
 
     /// True while an answer is on its way.
@@ -221,7 +218,6 @@ enum Action {
 
 pub fn draw_lsp_panel(ui: &mut egui::Ui, state: &mut AppState) {
     state.lsp.hovered = None;
-    state.lsp.poll();
     let mut action = None;
 
     ui.heading("Symbols");
@@ -504,7 +500,7 @@ mod tests {
     }
 
     #[test]
-    fn poll_keeps_only_answers_to_the_latest_requests() {
+    fn receive_keeps_only_answers_to_the_latest_requests() {
         let mut lsp = LspPanelState {
             manager: LspManager::with_launcher(Arc::new(|_, _| -> Result<Connection, String> {
                 Err("boom".into())
@@ -517,10 +513,14 @@ mod tests {
         lsp.find_references(None, root, 1, Path::new("/p/a.rs"), "b", &symbol("a", 0));
 
         let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        let mut handed_back = 0;
         while lsp.is_waiting() && std::time::Instant::now() < deadline {
-            lsp.poll();
+            for (id, response) in lsp.manager.poll() {
+                handed_back += usize::from(lsp.receive(id, response).is_some());
+            }
             std::thread::sleep(Duration::from_millis(5));
         }
+        assert_eq!(handed_back, 1, "the stale symbols answer is not the tab's");
         assert_eq!(lsp.symbols(), Some(&Fetch::Done(Err("boom".into()))));
         let refs = lsp.references.as_ref().unwrap();
         assert_eq!((refs.symbol.as_str(), refs.line), ("a", 0));

@@ -55,7 +55,7 @@ fn clicking_files_opens_nodes_folders_and_edges() {
     }
 
     app.get_by_label_contains("util.rs").click();
-    app.run();
+    app.settle_edges();
 
     let s = app.app_state();
     assert_eq!(s.node_store.file_nodes.len(), 2);
@@ -68,6 +68,6 @@ fn clicking_files_opens_nodes_folders_and_edges() {
         .collect();
     assert_eq!(
         edges,
-        [(fx.path("src/main.rs"), fx.path("src/util.rs"), Some("Module".into()))]
+        [(fx.path("src/main.rs"), fx.path("src/util.rs"), Some("fn".into()))]
     );
 }

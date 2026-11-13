@@ -1,7 +1,8 @@
 //! An in-process fake language server for the LSP tab tests.
 //!
 //! It speaks real LSP over pipes, but understands little:
-//! - symbols are the `fn` and `struct` items found with a regex;
+//! - symbols are the `fn`, `struct`, `function`, `class` and `const`
+//!   declarations found with a regex, as one flat list;
 //! - references are whole-word matches of the word under the cursor in every
 //!   `.rs` and `.ts` file under the workspace root.
 //!
@@ -81,14 +82,19 @@ fn range(line: usize, start: usize, end: usize) -> Value {
 }
 
 fn symbols(text: &str) -> Value {
-    let re = Regex::new(r"^\s*(?:pub\s+)?(fn|struct)\s+(\w+)").unwrap();
+    let re = Regex::new(r"^\s*(?:pub\s+)?(?:export\s+)?(fn|struct|function|class|const)\s+(\w+)").unwrap();
     let items: Vec<Value> = text
         .lines()
         .enumerate()
         .filter_map(|(i, line)| {
             let caps = re.captures(line)?;
             let name = caps.get(2).unwrap();
-            let kind = if &caps[1] == "fn" { 12 } else { 23 };
+            let kind = match &caps[1] {
+                "fn" | "function" => 12,
+                "struct" => 23,
+                "class" => 5,
+                _ => 14,
+            };
             Some(json!({
                 "name": name.as_str(), "kind": kind,
                 "range": range(i, 0, line.len()),

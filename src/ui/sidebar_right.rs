@@ -1,3 +1,5 @@
+use crate::analysis::dependencies::indexer::ServerProgress;
+use crate::analysis::lsp::manager::ServerStatus;
 use crate::edges::style::{EdgeStyle, OpacityMode};
 use crate::layout::settings::{HAlign, SortMode, VAlign};
 use crate::state::{AppState, RightPanel};
@@ -131,9 +133,41 @@ fn draw_layout_panel(ui: &mut egui::Ui, state: &mut AppState) {
     });
 }
 
+/// One line of the Edges tab about a language server's dependency analysis,
+/// and whether it reports an error.
+pub fn progress_line(p: &ServerProgress) -> (String, bool) {
+    let name = p.server.name();
+    if let Some(err) = &p.error {
+        let first = err.lines().next().unwrap_or_default();
+        return (format!("{name}: {first}"), true);
+    }
+    let counts = format!("{}/{} files", p.done, p.files);
+    let text = match p.status {
+        Some(ServerStatus::Starting) | None => format!("{name}: starting\u{2026} {counts}"),
+        Some(ServerStatus::Indexing) => format!("{name}: indexing\u{2026} {counts}"),
+        Some(ServerStatus::Failed(ref err)) => return (format!("{name}: {err}"), true),
+        Some(ServerStatus::Ready) if p.done == p.files => format!("{name}: {} files analyzed", p.files),
+        Some(ServerStatus::Ready) => format!("{name}: {counts}"),
+    };
+    (text, false)
+}
+
 fn draw_edges_panel(ui: &mut egui::Ui, state: &mut AppState) {
     ui.heading("Dependency Edges");
     ui.separator();
+
+    ui.label("Analysis (language servers)");
+    let progress = state.deps.progress(&state.lsp.manager);
+    if progress.is_empty() {
+        ui.weak("Open source files to find their dependencies.");
+    }
+    for p in &progress {
+        match progress_line(p) {
+            (text, true) => ui.colored_label(ui.visuals().error_fg_color, text),
+            (text, false) => ui.label(text),
+        };
+    }
+    ui.add_space(8.0);
 
     ui.label("Style");
     ui.horizontal(|ui| {
@@ -184,4 +218,33 @@ fn draw_edges_panel(ui: &mut egui::Ui, state: &mut AppState) {
         &mut state.edge_style.min_size_pct,
         0.0..=1.0,
     ));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::analysis::lsp::ServerId;
+
+    fn progress(done: usize, status: Option<ServerStatus>, error: Option<&str>) -> ServerProgress {
+        ServerProgress {
+            server: ServerId::Rust,
+            files: 3,
+            done,
+            status,
+            error: error.map(str::to_string),
+        }
+    }
+
+    #[test]
+    fn progress_line_reports_indexing_counts_and_errors() {
+        let name = ServerId::Rust.name();
+        assert_eq!(progress_line(&progress(1, Some(ServerStatus::Indexing), None)), (format!("{name}: indexing\u{2026} 1/3 files"), false));
+        assert_eq!(progress_line(&progress(0, None, None)).0, format!("{name}: starting\u{2026} 0/3 files"));
+        assert_eq!(progress_line(&progress(3, Some(ServerStatus::Ready), None)).0, format!("{name}: 3 files analyzed"));
+        assert_eq!(progress_line(&progress(2, Some(ServerStatus::Ready), None)).0, format!("{name}: 2/3 files"));
+        assert_eq!(
+            progress_line(&progress(3, Some(ServerStatus::Failed("x".into())), Some("not found\nhint"))),
+            (format!("{name}: not found"), true)
+        );
+    }
 }

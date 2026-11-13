@@ -1,4 +1,6 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+
+use crate::analysis::dependencies::LineSpan;
 
 #[derive(Debug, Clone)]
 pub struct Edge {
@@ -6,6 +8,10 @@ pub struct Edge {
     pub source_node: u64,
     pub target_node: u64,
     pub label: Option<String>,
+    /// Statement of the source the edge starts at; `None`: the whole node.
+    pub source_span: Option<LineSpan>,
+    /// Statement of the target the edge ends at; `None`: the node header.
+    pub target_span: Option<LineSpan>,
 }
 
 #[derive(Debug, Clone)]
@@ -25,6 +31,18 @@ impl Default for EdgeStore {
 
 impl EdgeStore {
     pub fn add(&mut self, source: u64, target: u64, label: Option<String>) -> u64 {
+        self.add_spanned(source, target, label, None, None)
+    }
+
+    /// Adds an edge between two statements of the source and target nodes.
+    pub fn add_spanned(
+        &mut self,
+        source: u64,
+        target: u64,
+        label: Option<String>,
+        source_span: Option<LineSpan>,
+        target_span: Option<LineSpan>,
+    ) -> u64 {
         let id = self.next_id;
         self.next_id += 1;
         self.edges.insert(
@@ -34,9 +52,32 @@ impl EdgeStore {
                 source_node: source,
                 target_node: target,
                 label,
+                source_span,
+                target_span,
             },
         );
         id
+    }
+
+    /// Statement spans to highlight per node: both ends of every edge that
+    /// touches a node in `selected`, sorted and without duplicates.
+    pub fn selected_spans(&self, selected: &HashSet<u64>) -> HashMap<u64, Vec<LineSpan>> {
+        let mut out: HashMap<u64, Vec<LineSpan>> = HashMap::new();
+        for e in self.edges.values() {
+            if !selected.contains(&e.source_node) && !selected.contains(&e.target_node) {
+                continue;
+            }
+            for (node, span) in [(e.source_node, e.source_span), (e.target_node, e.target_span)] {
+                if let Some(span) = span {
+                    out.entry(node).or_default().push(span);
+                }
+            }
+        }
+        for spans in out.values_mut() {
+            spans.sort();
+            spans.dedup();
+        }
+        out
     }
 
     pub fn remove(&mut self, id: u64) {
@@ -101,5 +142,22 @@ mod tests {
 
         store.clear();
         assert_eq!(store.all_edges().count(), 0);
+    }
+
+    #[test]
+    fn selected_spans_cover_both_ends_of_edges_touching_the_selection() {
+        let span = |start, end| LineSpan { start, end };
+        let mut store = EdgeStore::default();
+        store.add_spanned(1, 2, None, Some(span(4, 4)), Some(span(0, 2)));
+        store.add_spanned(1, 2, None, Some(span(9, 9)), Some(span(0, 2)));
+        store.add_spanned(1, 3, None, Some(span(1, 1)), None);
+        store.add_spanned(4, 5, None, Some(span(7, 7)), Some(span(8, 8)));
+
+        let spans = store.selected_spans(&HashSet::from([2]));
+        assert_eq!(spans[&1], [span(4, 4), span(9, 9)]);
+        assert_eq!(spans[&2], [span(0, 2)], "shared definition listed once");
+        assert_eq!(spans.len(), 2, "edge 1->3 and 4->5 do not touch node 2");
+
+        assert!(store.selected_spans(&HashSet::new()).is_empty());
     }
 }

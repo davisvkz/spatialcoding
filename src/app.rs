@@ -21,6 +21,9 @@ pub struct SpatialCodingApp {
     minimap: Minimap,
     /// Fit the view to all nodes on the next frame, once the canvas size is known.
     pending_fit: bool,
+    /// `--layout` was asked: lay out again once the language servers have
+    /// answered, since the dependency edges arrive in the background.
+    layout_when_indexed: bool,
 }
 
 impl SpatialCodingApp {
@@ -31,6 +34,7 @@ impl SpatialCodingApp {
             highlighter: Highlighter::new(),
             minimap: Minimap::default(),
             pending_fit: false,
+            layout_when_indexed: false,
         }
     }
 
@@ -72,13 +76,18 @@ impl SpatialCodingApp {
         }
         workspace::open_files(&mut self.state, &opts.open_paths());
         if opts.layout {
-            crate::layout::hierarchical::apply_layout(
-                &mut self.state.node_store,
-                &self.state.edge_store,
-                &self.state.layout_settings,
-            );
+            self.apply_layout();
+            self.layout_when_indexed = self.state.deps.is_waiting();
         }
         self.pending_fit = !self.state.node_store.file_nodes.is_empty();
+    }
+
+    fn apply_layout(&mut self) {
+        crate::layout::hierarchical::apply_layout(
+            &mut self.state.node_store,
+            &self.state.edge_store,
+            &self.state.layout_settings,
+        );
     }
 
     fn draw_canvas(&mut self, ui: &mut egui::Ui) {
@@ -220,6 +229,10 @@ impl SpatialCodingApp {
         let node_width = self.state.settings.node_width;
         let font_size = self.state.settings.font_size;
         let visible_world = self.state.viewport.visible_world_rect(canvas_rect);
+        let selected_ids: std::collections::HashSet<u64> = self.state.selection.selected_ids().collect();
+        let edge_spans = self.state.edge_store.selected_spans(&selected_ids);
+        let [r, g, b] = self.state.edge_style.base_color.map(|c| (c * 255.0) as u8);
+        let edge_highlight = egui::Color32::from_rgb(r, g, b).gamma_multiply(0.18);
 
         for node in self.state.node_store.file_nodes.values() {
             let world_rect = node.world_rect(node_width, font_size);
@@ -308,19 +321,28 @@ impl SpatialCodingApp {
             let line_h = line_height(font_size) * zoom;
             let code_clip = painter.with_clip_rect(screen_rect.intersect(painter.clip_rect()));
 
-            // Under the code text: the lines of the CST or LSP row under the
+            // Under the code text: the statements joined by the edges of the
+            // selected nodes, the lines of the CST or LSP row under the
             // pointer, and the line of the last reference jumped to.
             let lsp_target = self
                 .state
                 .lsp
                 .target
                 .filter(|t| self.state.selection.primary == Some(t.node_id));
-            let highlights = [
+            let edge_lines = edge_spans
+                .get(&node.id)
+                .into_iter()
+                .flatten()
+                .map(|s| (node.id, s.start, s.end, edge_highlight));
+            let pointer_lines = [
                 self.state.cst.hovered.map(|h| (h.node_id, h.start_line, h.end_line, 0.25)),
                 self.state.lsp.hovered.map(|h| (h.node_id, h.start_line, h.end_line, 0.25)),
                 lsp_target.map(|t| (t.node_id, t.start_line, t.end_line, 0.4)),
-            ];
-            for (_, start, end, alpha) in highlights.into_iter().flatten().filter(|h| h.0 == node.id) {
+            ]
+            .into_iter()
+            .flatten()
+            .map(|(id, start, end, alpha)| (id, start, end, theme.selection.gamma_multiply(alpha)));
+            for (_, start, end, color) in edge_lines.chain(pointer_lines).filter(|h| h.0 == node.id) {
                 if let Some(rect) = cst_panel::highlight_rect(
                     egui::pos2(screen_rect.left(), code_origin.y),
                     screen_rect.width(),
@@ -329,7 +351,7 @@ impl SpatialCodingApp {
                     end,
                     node.visible_lines(),
                 ) {
-                    code_clip.rect_filled(rect, 0.0, theme.selection.gamma_multiply(alpha));
+                    code_clip.rect_filled(rect, 0.0, color);
                 }
             }
 
@@ -379,6 +401,15 @@ impl SpatialCodingApp {
 impl eframe::App for SpatialCodingApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         input::handle_shortcuts(ctx, &mut self.state);
+        crate::workspace::poll_lsp(&mut self.state);
+        // The indexer's requests carry no context to wake the UI: check back
+        // while answers are on their way.
+        if self.state.deps.is_waiting() {
+            ctx.request_repaint_after(std::time::Duration::from_millis(100));
+        } else if std::mem::take(&mut self.layout_when_indexed) {
+            self.apply_layout();
+            self.pending_fit = true;
+        }
 
         if self.state.loaded_dir.is_some() && self.file_tree.is_none() {
             if let Some(ref dir) = self.state.loaded_dir {

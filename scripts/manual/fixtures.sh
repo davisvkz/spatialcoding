@@ -10,10 +10,10 @@ put() {
 }
 
 # Rust crate: mod declarations, #[path], nested modules, use crate/super, pub use.
-# Expected edges (checked by tests/e2e/manual_fixtures.rs):
-# main→config, main→net/mod, main→net/client, main→util, config→util,
-# net/mod→client, net/mod→server, client→server, client→config,
-# server→util, util→helpers/strings.
+# Edges come from the language server (checked by tests/e2e/manual_fixtures.rs):
+# client.rs lines 5 and 10 (1-based) → server.rs `pub struct Server` (lines
+# 3-5), line 10 → `pub fn bind`, line 14 → `pub fn addr`; main.rs
+# `util::shout` → helpers/strings.rs (util.rs only re-exports it).
 fixture_rust() {
   local d=$1
   put "$d" Cargo.toml <<'EOF'
@@ -111,7 +111,7 @@ EOF
 
 # TypeScript/JS: relative imports, index resolution, tsconfig paths,
 # .js→.ts mapping, require and dynamic import.
-# Expected edges: index→components/index, index→lib/math (@lib alias),
+# With typescript-language-server: index→components/index, index→lib/math (@lib alias),
 # components/index→Button, Button→lib/math, Button→lib/format (.js→.ts),
 # legacy.js→lib/math (require), lazy→lib/format (dynamic import).
 fixture_ts() {
@@ -171,7 +171,7 @@ EOF
 }
 
 # Python (src layout): absolute, relative and package imports.
-# Expected edges: cart→models, cart→pricing, pricing→models, cli→cart,
+# With a Python server: cart→models, cart→pricing, pricing→models, cli→cart,
 # __init__→cart.
 fixture_python() {
   local d=$1
@@ -223,7 +223,7 @@ EOF
 }
 
 # Go module: module-local package imports (stdlib imports are ignored).
-# Expected edges: main→pkg/api, main→internal/store, api→internal/store.
+# With gopls: main→pkg/api, main→internal/store, api→internal/store.
 fixture_go() {
   local d=$1
   put "$d" go.mod <<'EOF'

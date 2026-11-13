@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 
+use crate::analysis::dependencies::indexer::DependencyIndexer;
 use crate::canvas::viewport::Viewport;
 use crate::edges::edge_store::EdgeStore;
 use crate::edges::style::EdgeStyleConfig;
@@ -59,6 +60,9 @@ pub struct AppState {
     pub cst: CstPanelState,
     /// LSP tab: language servers, symbols of the selected node, references.
     pub lsp: LspPanelState,
+    /// Dependency edges from the language servers, computed in the background
+    /// on `lsp.manager`.
+    pub deps: DependencyIndexer,
     /// World point the canvas centers on next frame (set when jumping to a
     /// reference; the canvas size is only known while drawing).
     pub pending_focus: Option<egui::Pos2>,
@@ -113,6 +117,7 @@ impl Default for AppState {
             settings: AppSettings::default(),
             cst: CstPanelState::default(),
             lsp: LspPanelState::default(),
+            deps: DependencyIndexer::default(),
             pending_focus: None,
         }
     }

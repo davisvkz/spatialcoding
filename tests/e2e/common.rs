@@ -7,6 +7,8 @@ use egui_kittest::Harness;
 use spatialcoding::app::SpatialCodingApp;
 use spatialcoding::state::AppState;
 
+use crate::fake_lsp;
+
 pub type App = Harness<'static, SpatialCodingApp>;
 
 /// A point well inside the canvas: right of the left sidebar, below the
@@ -60,7 +62,9 @@ pub fn fixture() -> Fixture {
 /// kittest's default frame time: long enough that animations finish in one frame.
 pub const DEFAULT_STEP_DT: f32 = 1.0 / 4.0;
 
-/// The real app in a 1400x900 window, with nothing loaded.
+/// The real app in a 1400x900 window, with nothing loaded. Its language
+/// servers are the in-process fake of `fake_lsp.rs`, so no test starts a real
+/// one.
 pub fn app() -> App {
     app_stepping(DEFAULT_STEP_DT)
 }
@@ -72,6 +76,7 @@ pub fn app_stepping(step_dt: f32) -> App {
         .with_size(Vec2::new(1400.0, 900.0))
         .with_step_dt(step_dt)
         .build_eframe(|cc| SpatialCodingApp::new(cc));
+    harness.state_mut().state_mut().lsp.manager.set_launcher(fake_lsp::launcher());
     harness.run();
     harness
 }
@@ -91,8 +96,12 @@ pub fn app_with_stepping(fx: &Fixture, step_dt: f32) -> App {
 pub trait AppExt {
     fn app_state(&self) -> &AppState;
     fn app_state_mut(&mut self) -> &mut AppState;
-    /// Opens a file of the workspace the same way a click in the tree does.
+    /// Opens a file of the workspace the same way a click in the tree does,
+    /// and waits for the dependency edges.
     fn open(&mut self, path: &Path) -> u64;
+    /// Steps frames until the language servers answered every question of
+    /// the dependency indexer.
+    fn settle_edges(&mut self);
     /// World-space center of a file node.
     fn node_center(&self, id: u64) -> Pos2;
     /// Pans the view so `world` shows at screen position `screen`.
@@ -112,8 +121,20 @@ impl AppExt for App {
 
     fn open(&mut self, path: &Path) -> u64 {
         let id = spatialcoding::workspace::open_file(self.app_state_mut(), path);
-        self.run();
+        self.settle_edges();
         id
+    }
+
+    fn settle_edges(&mut self) {
+        // `run()` gives up while the app repaints for pending answers: step.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        self.step();
+        while self.app_state().deps.is_waiting() {
+            assert!(std::time::Instant::now() < deadline, "timed out waiting for the dependency edges");
+            std::thread::sleep(std::time::Duration::from_millis(5));
+            self.step();
+        }
+        self.run();
     }
 
     fn node_center(&self, id: u64) -> Pos2 {

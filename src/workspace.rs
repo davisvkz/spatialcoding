@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 
 use crate::fs::loader::{load_directory, read_file_content};
 use crate::fs::tree::TreeNode;
-use crate::nodes::file_node::{line_height, CODE_PADDING, HEADER_HEIGHT};
+use crate::analysis::dependencies::OpenFiles;
 use crate::state::AppState;
 use crate::ui::lsp_panel::LineHighlight;
 
@@ -157,7 +157,7 @@ pub fn focus_location(state: &mut AppState, path: &Path, line: usize) -> u64 {
         let rect = node.world_rect(state.settings.node_width, font_size);
         // Lines past the node's visible ones are not drawn: aim at the last one.
         let shown = line.min(node.visible_lines().saturating_sub(1));
-        let y = rect.top() + HEADER_HEIGHT + CODE_PADDING + (shown as f32 + 0.5) * line_height(font_size);
+        let y = node.line_anchor_y(shown, font_size).unwrap_or(rect.center().y);
         state.pending_focus = Some(egui::pos2(rect.center().x, y));
     }
     id
@@ -177,35 +177,49 @@ fn find_file_node(state: &AppState, path: &Path) -> Option<u64> {
         .map(|n| n.id)
 }
 
-/// Recomputes every dependency edge between the open file nodes.
+/// Hands the open file nodes to the dependency indexer, which asks their
+/// language servers in the background, and redraws the edges known so far.
+/// New edges arrive through [`poll_lsp`].
 pub fn rebuild_edges(state: &mut AppState) {
-    let root = match state.loaded_dir {
-        Some(ref dir) => dir.clone(),
-        None => return,
+    let Some(root) = state.loaded_dir.clone() else {
+        return;
     };
-    let files: Vec<PathBuf> = state
+    let files: Vec<(&Path, &str)> = state
         .node_store
         .file_nodes
         .values()
-        .map(|n| n.path.clone())
+        .map(|n| (n.path.as_path(), n.content.as_str()))
         .collect();
-    let deps = crate::analysis::dependencies::analyze_dependencies(&root, &files);
+    state.deps.rebuild(&mut state.lsp.manager, &root, &files);
+    apply_dependency_edges(state);
+}
 
+/// Hands the language servers' answers to the LSP tab and the dependency
+/// indexer, and updates the edges when the indexer learned something. Called
+/// every frame.
+pub fn poll_lsp(state: &mut AppState) {
+    for (id, response) in state.lsp.manager.poll() {
+        if let Some(response) = state.lsp.receive(id, response) {
+            state.deps.receive(&mut state.lsp.manager, id, response);
+        }
+    }
+    state.deps.tick(&mut state.lsp.manager);
+    if state.deps.take_changed() {
+        apply_dependency_edges(state);
+    }
+}
+
+/// Replaces the edges with one per link the indexer knows between open files.
+fn apply_dependency_edges(state: &mut AppState) {
+    let nodes = &state.node_store.file_nodes;
+    let open = OpenFiles::new(nodes.values().map(|n| (n.path.as_path(), n.content.as_str())));
+    let ids: HashMap<&Path, u64> = nodes.values().map(|n| (n.path.as_path(), n.id)).collect();
     state.edge_store.clear();
-
-    let path_to_id: HashMap<PathBuf, u64> = state
-        .node_store
-        .file_nodes
-        .values()
-        .map(|n| (n.path.clone(), n.id))
-        .collect();
-
-    for dep in deps {
-        if let (Some(&src_id), Some(&tgt_id)) =
-            (path_to_id.get(&dep.source), path_to_id.get(&dep.target))
-        {
-            let label = format!("{:?}", dep.kind);
-            state.edge_store.add(src_id, tgt_id, Some(label));
+    for link in state.deps.links(&open) {
+        if let (Some(&src), Some(&tgt)) = (ids.get(link.source.as_path()), ids.get(link.target.as_path())) {
+            state
+                .edge_store
+                .add_spanned(src, tgt, Some(link.label), Some(link.usage), Some(link.definition));
         }
     }
 }
@@ -213,6 +227,7 @@ pub fn rebuild_edges(state: &mut AppState) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::nodes::file_node::{line_height, CODE_PADDING, HEADER_HEIGHT};
 
     fn write(dir: &Path, rel: &str, content: &str) -> PathBuf {
         let p = dir.join(rel);
@@ -221,39 +236,39 @@ mod tests {
         p
     }
 
-    #[test]
-    fn rebuild_edges_links_dependent_file_nodes() {
-        let dir = tempfile::tempdir().unwrap();
-        write(dir.path(), "Cargo.toml", "[package]\nname = \"x\"\n");
-        let main_rs = write(dir.path(), "src/main.rs", "mod util;\n");
-        let util_rs = write(dir.path(), "src/util.rs", "");
-        let app_ts = write(dir.path(), "web/app.ts", "import { a } from './a';\n");
-        let a_ts = write(dir.path(), "web/a.ts", "");
-
+    /// A state for `dir` whose language servers fail to start at once, so
+    /// unit tests never spawn a real one (the e2e tests use a fake server).
+    fn state_in(dir: &Path) -> AppState {
         let mut state = AppState {
-            loaded_dir: Some(dir.path().to_path_buf()),
+            loaded_dir: Some(dir.to_path_buf()),
             ..Default::default()
         };
-        let mut ids = HashMap::new();
-        for p in [&main_rs, &util_rs, &app_ts, &a_ts] {
-            let id = state.node_store.add_file(p.clone(), String::new(), egui::Pos2::ZERO);
-            ids.insert(p.clone(), id);
-        }
+        state
+            .lsp
+            .manager
+            .set_launcher(std::sync::Arc::new(|_, _| Err("no server in unit tests".into())));
+        state
+    }
+
+    #[test]
+    fn rebuild_edges_asks_the_language_servers_in_the_background() {
+        let dir = tempfile::tempdir().unwrap();
+        let main_rs = write(dir.path(), "src/main.rs", "mod util;\n");
+        let mut state = state_in(dir.path());
+        state.node_store.add_file(main_rs, "mod util;\n".into(), egui::Pos2::ZERO);
 
         rebuild_edges(&mut state);
+        assert!(state.deps.is_waiting(), "symbols requested");
 
-        let mut edges: Vec<(u64, u64, Option<String>)> = state
-            .edge_store
-            .all_edges()
-            .map(|e| (e.source_node, e.target_node, e.label.clone()))
-            .collect();
-        edges.sort();
-        let mut expected = vec![
-            (ids[&main_rs], ids[&util_rs], Some("Module".to_string())),
-            (ids[&app_ts], ids[&a_ts], Some("Import".to_string())),
-        ];
-        expected.sort();
-        assert_eq!(edges, expected);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while state.deps.is_waiting() {
+            assert!(std::time::Instant::now() < deadline, "the indexer never settled");
+            poll_lsp(&mut state);
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        assert_eq!(state.edge_store.all_edges().count(), 0);
+        let progress = state.deps.progress(&state.lsp.manager);
+        assert_eq!(progress[0].error.as_deref(), Some("no server in unit tests"));
     }
 
     #[test]
@@ -264,10 +279,7 @@ mod tests {
             .collect();
         let other = write(dir.path(), "lib/g.py", "");
 
-        let mut state = AppState {
-            loaded_dir: Some(dir.path().to_path_buf()),
-            ..Default::default()
-        };
+        let mut state = state_in(dir.path());
         let ids: Vec<u64> = paths.iter().map(|p| open_file(&mut state, p)).collect();
         open_file(&mut state, &other);
 
@@ -310,10 +322,7 @@ mod tests {
         let bin = dir.path().join("src/blob.bin");
         std::fs::write(&bin, b"\0\0").unwrap();
 
-        let mut state = AppState {
-            loaded_dir: Some(dir.path().to_path_buf()),
-            ..Default::default()
-        };
+        let mut state = state_in(dir.path());
         let first = open_file(&mut state, &main_rs);
         let ids = open_files(
             &mut state,
@@ -322,12 +331,7 @@ mod tests {
 
         assert_eq!(ids.len(), 1, "only util.rs is new and readable");
         assert_eq!(state.node_store.file_nodes.len(), 2);
-        let edges: Vec<(u64, u64)> = state
-            .edge_store
-            .all_edges()
-            .map(|e| (e.source_node, e.target_node))
-            .collect();
-        assert_eq!(edges, [(first, ids[0])]);
+        assert_ne!(first, ids[0]);
     }
 
     #[test]
@@ -372,7 +376,8 @@ mod tests {
         write(dir.path(), ".hidden/secret.txt", "dot folder");
         std::fs::write(dir.path().join("logo.png"), b"\x89PNG\0").unwrap();
 
-        let mut state = AppState::default();
+        let mut state = state_in(dir.path());
+        state.loaded_dir = None;
         assert!(open_all_files(&mut state).is_empty(), "no folder loaded");
 
         state.loaded_dir = Some(dir.path().to_path_buf());

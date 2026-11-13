@@ -67,7 +67,7 @@ fn ctrl_shift_o_opens_all_text_files() {
     app.open(&fx.path("src/main.rs"));
 
     app.press_key_modifiers(Modifiers::COMMAND | Modifiers::SHIFT, Key::O);
-    app.run();
+    app.settle_edges();
 
     let s = app.app_state();
     let mut names: Vec<&str> = s.node_store.file_nodes.values().map(|n| n.file_name()).collect();

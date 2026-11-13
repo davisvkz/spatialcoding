@@ -1,16 +1,25 @@
-//! Keeps scripts/manual honest: generates each fixture with the real
-//! `fixtures.sh` and checks the dependency edges that `04-edges.sh` and the
-//! comments in `fixtures.sh` promise. Update all three together.
+//! Keeps scripts/manual honest: generates a fixture with the real
+//! `fixtures.sh` and checks the dependency edges that `04-edges.sh` promises.
+//! Edges come from language servers: the fake one of `fake_lsp.rs` here, and
+//! the real rust-analyzer in an ignored test.
 
-use std::path::Path;
+use std::collections::HashSet;
+use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::time::{Duration, Instant};
 
+use spatialcoding::analysis::dependencies::LineSpan;
+use spatialcoding::analysis::lsp::manager::Launcher;
 use spatialcoding::state::AppState;
 use spatialcoding::workspace;
 
-/// Runs `fixture_<name>` from scripts/manual/fixtures.sh into a temp dir and
-/// returns the edges as sorted "source -> target" paths relative to it.
-fn edges_of(name: &str) -> Vec<String> {
+use crate::fake_lsp;
+
+/// Runs `fixture_<name>` from scripts/manual/fixtures.sh into a temp dir,
+/// opens every file of it with `launcher` as the language servers and waits
+/// up to `timeout` for the dependency edges. Returns the temp dir guard, the
+/// state and the root.
+fn open_fixture(name: &str, launcher: Option<Launcher>, timeout: Duration) -> (tempfile::TempDir, AppState, PathBuf) {
     let dir = tempfile::tempdir().unwrap();
     let script = Path::new(env!("CARGO_MANIFEST_DIR")).join("scripts/manual/fixtures.sh");
     let status = Command::new("bash")
@@ -29,85 +38,96 @@ fn edges_of(name: &str) -> Vec<String> {
         loaded_dir: Some(root.clone()),
         ..Default::default()
     };
+    if let Some(launcher) = launcher {
+        state.lsp.manager.set_launcher(launcher);
+    }
     workspace::open_all_files(&mut state);
+    let deadline = Instant::now() + timeout;
+    while state.deps.is_waiting() {
+        assert!(Instant::now() < deadline, "the language server did not answer in time");
+        std::thread::sleep(Duration::from_millis(10));
+        workspace::poll_lsp(&mut state);
+    }
+    (dir, state, root)
+}
 
-    let rel = |id: u64| {
-        let path = &state.node_store.get_file(id).unwrap().path;
-        path.strip_prefix(&root).unwrap().to_string_lossy().into_owned()
-    };
-    let mut edges: Vec<String> = state
+fn node_id(state: &AppState, root: &Path, rel: &str) -> u64 {
+    let path = root.join(rel);
+    state
+        .node_store
+        .file_nodes
+        .values()
+        .find(|n| n.path == path)
+        .unwrap_or_else(|| panic!("{rel} is not open"))
+        .id
+}
+
+/// `(usage, definition)` lines of the edges from `source` to `target`, sorted.
+fn spans(state: &AppState, root: &Path, source: &str, target: &str) -> Vec<(LineSpan, LineSpan)> {
+    let (src, tgt) = (node_id(state, root, source), node_id(state, root, target));
+    let mut out: Vec<_> = state
         .edge_store
         .all_edges()
-        .map(|e| format!("{} -> {}", rel(e.source_node), rel(e.target_node)))
+        .filter(|e| e.source_node == src && e.target_node == tgt)
+        .map(|e| (e.source_span.unwrap(), e.target_span.unwrap()))
         .collect();
-    edges.sort();
-    edges
+    out.sort();
+    out
 }
 
-fn sorted(edges: &[&str]) -> Vec<String> {
-    let mut v: Vec<String> = edges.iter().map(|s| s.to_string()).collect();
-    v.sort();
-    v
-}
-
-#[test]
-fn rust_fixture_edges() {
-    assert_eq!(
-        edges_of("rust"),
-        sorted(&[
-            "src/main.rs -> src/config.rs",
-            "src/main.rs -> src/net/mod.rs",
-            "src/main.rs -> src/net/client.rs",
-            "src/main.rs -> src/util.rs",
-            "src/config.rs -> src/util.rs",
-            "src/net/mod.rs -> src/net/client.rs",
-            "src/net/mod.rs -> src/net/server.rs",
-            "src/net/client.rs -> src/net/server.rs",
-            "src/net/client.rs -> src/config.rs",
-            "src/net/server.rs -> src/util.rs",
-            "src/util.rs -> src/helpers/strings.rs",
-        ])
-    );
+fn span(start: usize, end: usize) -> LineSpan {
+    LineSpan { start, end }
 }
 
 #[test]
-fn ts_fixture_edges() {
+fn rust_fixture_links_usage_statements_to_definitions_and_highlights_them() {
+    let (_dir, mut state, root) = open_fixture("rust", Some(fake_lsp::launcher()), Duration::from_secs(10));
+
+    // client.rs uses `Server` in a field (line 4) and in `Server::bind(..)`
+    // (line 9), which also calls `bind` (line 7 of server.rs), and calls
+    // `addr` (line 13 → 11). The `use super::server::Server;` import is not an
+    // edge since the file uses `Server` elsewhere. The fake server's symbols
+    // span one line.
     assert_eq!(
-        edges_of("ts"),
-        sorted(&[
-            "src/index.ts -> src/components/index.ts",
-            "src/index.ts -> src/lib/math.ts",
-            "src/components/index.ts -> src/components/Button.tsx",
-            "src/components/Button.tsx -> src/lib/math.ts",
-            "src/components/Button.tsx -> src/lib/format.ts",
-            "src/legacy.js -> src/lib/math.ts",
-            "src/lazy.ts -> src/lib/format.ts",
-        ])
+        spans(&state, &root, "src/net/client.rs", "src/net/server.rs"),
+        [
+            (span(4, 4), span(2, 2)),
+            (span(9, 9), span(2, 2)),
+            (span(9, 9), span(7, 7)),
+            (span(13, 13), span(11, 11)),
+        ]
     );
+
+    // Selecting client.rs highlights its usages and the definitions.
+    let client = node_id(&state, &root, "src/net/client.rs");
+    let server = node_id(&state, &root, "src/net/server.rs");
+    state.selection.select(client);
+    let selected: HashSet<u64> = state.selection.selected_ids().collect();
+    let highlights = state.edge_store.selected_spans(&selected);
+    for line in [4, 9, 13] {
+        assert!(highlights[&client].contains(&span(line, line)), "client.rs line {line}");
+    }
+    for line in [2, 7, 11] {
+        assert!(highlights[&server].contains(&span(line, line)), "server.rs line {line}");
+    }
 }
 
+/// The same fixture against the real rust-analyzer:
+/// `cargo test --test e2e -- --ignored rust_fixture_with_rust_analyzer`.
 #[test]
-fn python_fixture_edges() {
-    assert_eq!(
-        edges_of("python"),
-        sorted(&[
-            "src/shop/__init__.py -> src/shop/cart.py",
-            "src/shop/cart.py -> src/shop/models.py",
-            "src/shop/cart.py -> src/shop/pricing.py",
-            "src/shop/pricing.py -> src/shop/models.py",
-            "src/shop/cli.py -> src/shop/cart.py",
-        ])
-    );
-}
-
-#[test]
-fn go_fixture_edges() {
-    assert_eq!(
-        edges_of("go"),
-        sorted(&[
-            "main.go -> pkg/api/api.go",
-            "main.go -> internal/store/store.go",
-            "pkg/api/api.go -> internal/store/store.go",
-        ])
-    );
+#[ignore = "needs rust-analyzer on PATH and takes up to a few minutes"]
+fn rust_fixture_with_rust_analyzer() {
+    let (_dir, state, root) = open_fixture("rust", None, Duration::from_secs(300));
+    let progress = state.deps.progress(&state.lsp.manager);
+    let edges = spans(&state, &root, "src/net/client.rs", "src/net/server.rs");
+    // `server: Server,` and `Server::bind(..)` → `pub struct Server { … }`
+    // (lines 2-4); `Server::bind(..)` → `pub fn bind(..) { … }` (lines 7-9).
+    for expected in [(span(4, 4), span(2, 4)), (span(9, 9), span(2, 4)), (span(9, 9), span(7, 9))] {
+        assert!(edges.contains(&expected), "{expected:?} missing from {edges:?}; {progress:?}");
+    }
+    // main.rs calls `config::Config::load`, `Client::new` and `util::shout`,
+    // which util.rs only re-exports: it is defined in helpers/strings.rs.
+    for target in ["src/config.rs", "src/net/client.rs", "src/helpers/strings.rs"] {
+        assert!(!spans(&state, &root, "src/main.rs", target).is_empty(), "main.rs -> {target}");
+    }
 }

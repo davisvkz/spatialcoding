@@ -125,6 +125,13 @@ pub fn parse_cst(path: &Path, content: &str) -> Option<CstTree> {
     parse_cst_limited(path, content, MAX_CST_NODES)
 }
 
+/// The raw tree-sitter tree of `content`, for analyses that walk it directly.
+pub(crate) fn parse_tree(path: &Path, content: &str) -> Option<(CstLanguage, tree_sitter::Tree)> {
+    let language = CstLanguage::from_path(path)?;
+    let tree = language.parser()?.parse(content, None)?;
+    Some((language, tree))
+}
+
 fn parse_cst_limited(path: &Path, content: &str, max_nodes: usize) -> Option<CstTree> {
     let language = CstLanguage::from_path(path)?;
     let tree = language.parser()?.parse(content, None)?;
