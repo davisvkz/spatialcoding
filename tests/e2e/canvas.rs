@@ -91,6 +91,42 @@ fn plain_wheel_pans() {
 }
 
 #[test]
+fn shift_f_fits_every_node_on_screen() {
+    let (mut app, _fx, a, b, _, _) = two_nodes();
+    app.show_at(Pos2::new(50_000.0, 50_000.0), CANVAS_SPOT);
+
+    app.press_key_modifiers(Modifiers::SHIFT, egui::Key::F);
+    app.run();
+
+    let s = app.app_state();
+    let screen = egui::Rect::from_min_size(Pos2::ZERO, Vec2::new(1400.0, 900.0));
+    let visible = s.viewport.visible_world_rect(screen);
+    for id in [a, b] {
+        let rect = s
+            .node_store
+            .get_file(id)
+            .unwrap()
+            .world_rect(s.settings.node_width, s.settings.font_size);
+        assert!(visible.contains_rect(rect), "node {id} off screen");
+    }
+}
+
+#[test]
+fn f_centers_the_view_on_the_point_under_the_mouse() {
+    let (mut app, _fx, _, _, _, _) = two_nodes();
+    let mouse = Pos2::new(1000.0, 300.0);
+    let target = app.app_state().viewport.screen_to_world(mouse);
+    app.input_mut().events.push(egui::Event::PointerMoved(mouse));
+    app.step();
+
+    app.press_key(egui::Key::F);
+    app.run();
+
+    let center = Pos2::new(700.0, 450.0); // window is 1400x900
+    assert_close(app.app_state().viewport.world_to_screen(target), center);
+}
+
+#[test]
 fn escape_clears_the_selection() {
     let (mut app, _fx, a, _, sa, _) = two_nodes();
     click_at(&mut app, sa, Modifiers::NONE);

@@ -7,6 +7,9 @@ use crate::state::AppState;
 pub fn handle_shortcuts(ctx: &egui::Context, state: &mut AppState) -> bool {
     let mut consumed = false;
     let mut open_all = false;
+    // Read before `ctx.input`: calling back into `ctx` inside that closure
+    // re-locks the context and deadlocks.
+    let screen_rect = ctx.screen_rect();
 
     ctx.input(|i| {
         // Ctrl+Shift+O: Open all files (file IO runs after the input lock is released)
@@ -21,17 +24,17 @@ pub fn handle_shortcuts(ctx: &egui::Context, state: &mut AppState) -> bool {
         // Shift+F: Fit to screen
         if i.key_pressed(egui::Key::F) && i.modifiers.shift {
             if let Some(world_rect) = compute_nodes_bounding_rect(state) {
-                state.viewport.fit_to_rect(world_rect, ctx.screen_rect());
+                state.viewport.fit_to_rect(world_rect, screen_rect);
             }
             consumed = true;
         }
 
-        // F: Focus on mouse
+        // F: Focus on mouse — move the world point under the cursor to the screen center
         if i.key_pressed(egui::Key::F) && !i.modifiers.shift && !i.modifiers.ctrl {
-            // Focus viewport on cursor position
             if let Some(pos) = i.pointer.hover_pos() {
-                let world_pos = state.viewport.screen_to_world(pos);
-                state.viewport.offset = world_pos.to_vec2() - ctx.screen_rect().center().to_vec2();
+                let vp = &mut state.viewport;
+                let world_pos = vp.screen_to_world(pos);
+                vp.offset = screen_rect.center().to_vec2() / vp.zoom - world_pos.to_vec2();
             }
             consumed = true;
         }
