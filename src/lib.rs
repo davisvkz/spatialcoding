@@ -6,6 +6,7 @@
 pub mod analysis;
 pub mod app;
 pub mod canvas;
+pub mod cli;
 pub mod edges;
 pub mod fs;
 pub mod git;

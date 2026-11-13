@@ -2,10 +2,11 @@
 //!
 //! Everything here works on [`AppState`] only, so it can be tested without a UI.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
-use crate::fs::loader::read_file_content;
+use crate::fs::loader::{load_directory, read_file_content};
+use crate::fs::tree::TreeNode;
 use crate::state::AppState;
 
 /// Newly opened files are placed on a grid until a layout is applied.
@@ -20,6 +21,60 @@ pub fn open_file(state: &mut AppState, path: &Path) -> u64 {
     let id = add_file_node(state, path, content);
     rebuild_edges(state);
     id
+}
+
+/// Opens each path that is not already on the canvas and rebuilds the edges
+/// once. Unreadable and binary files are skipped. Returns the new node ids.
+pub fn open_files(state: &mut AppState, paths: &[PathBuf]) -> Vec<u64> {
+    let mut open: HashSet<PathBuf> = state
+        .node_store
+        .file_nodes
+        .values()
+        .map(|n| n.path.clone())
+        .collect();
+    let mut ids = Vec::new();
+    for path in paths {
+        if !open.insert(path.clone()) {
+            continue;
+        }
+        match read_file_content(path) {
+            Ok(content) => ids.push(add_file_node(state, path, content)),
+            Err(e) => log::warn!("Skipping {}: {e}", path.display()),
+        }
+    }
+    if !ids.is_empty() {
+        rebuild_edges(state);
+    }
+    ids
+}
+
+/// Opens every text file of the loaded folder (Ctrl+Shift+O), honoring the
+/// same skip rules as the file tree. Returns the new node ids.
+pub fn open_all_files(state: &mut AppState) -> Vec<u64> {
+    let Some(dir) = state.loaded_dir.clone() else {
+        return Vec::new();
+    };
+    let tree = match load_directory(&dir, state.settings.show_dot_folders) {
+        Ok(tree) => tree,
+        Err(e) => {
+            log::error!("Failed to load {}: {e}", dir.display());
+            return Vec::new();
+        }
+    };
+    let mut paths = Vec::new();
+    collect_files(&tree, &mut paths);
+    open_files(state, &paths)
+}
+
+fn collect_files(node: &TreeNode, out: &mut Vec<PathBuf>) {
+    match node {
+        TreeNode::File { path, .. } => out.push(path.clone()),
+        TreeNode::Dir { children, .. } => {
+            for child in children {
+                collect_files(child, out);
+            }
+        }
+    }
 }
 
 fn add_file_node(state: &mut AppState, path: &Path, content: String) -> u64 {
@@ -173,5 +228,61 @@ mod tests {
         let mut state = AppState::default();
         let id = open_file(&mut state, &bin);
         assert_eq!(state.node_store.get_file(id).unwrap().content, "");
+    }
+
+    #[test]
+    fn open_files_skips_duplicates_already_open_and_binary_files() {
+        let dir = tempfile::tempdir().unwrap();
+        write(dir.path(), "Cargo.toml", "[package]\nname = \"x\"\n");
+        let main_rs = write(dir.path(), "src/main.rs", "mod util;\n");
+        let util_rs = write(dir.path(), "src/util.rs", "");
+        let bin = dir.path().join("src/blob.bin");
+        std::fs::write(&bin, b"\0\0").unwrap();
+
+        let mut state = AppState {
+            loaded_dir: Some(dir.path().to_path_buf()),
+            ..Default::default()
+        };
+        let first = open_file(&mut state, &main_rs);
+        let ids = open_files(
+            &mut state,
+            &[main_rs.clone(), util_rs.clone(), util_rs.clone(), bin],
+        );
+
+        assert_eq!(ids.len(), 1, "only util.rs is new and readable");
+        assert_eq!(state.node_store.file_nodes.len(), 2);
+        let edges: Vec<(u64, u64)> = state
+            .edge_store
+            .all_edges()
+            .map(|e| (e.source_node, e.target_node))
+            .collect();
+        assert_eq!(edges, [(first, ids[0])]);
+    }
+
+    #[test]
+    fn open_all_files_opens_text_files_of_the_loaded_folder() {
+        let dir = tempfile::tempdir().unwrap();
+        write(dir.path(), "src/a.py", "import b\n");
+        write(dir.path(), "src/b.py", "");
+        write(dir.path(), "README.md", "# hi\n");
+        write(dir.path(), "target/out.txt", "build output");
+        write(dir.path(), ".hidden/secret.txt", "dot folder");
+        std::fs::write(dir.path().join("logo.png"), b"\x89PNG\0").unwrap();
+
+        let mut state = AppState::default();
+        assert!(open_all_files(&mut state).is_empty(), "no folder loaded");
+
+        state.loaded_dir = Some(dir.path().to_path_buf());
+        assert_eq!(open_all_files(&mut state).len(), 3);
+        let mut names: Vec<&str> = state
+            .node_store
+            .file_nodes
+            .values()
+            .map(|n| n.file_name())
+            .collect();
+        names.sort();
+        assert_eq!(names, ["README.md", "a.py", "b.py"]);
+
+        assert!(open_all_files(&mut state).is_empty(), "second run opens nothing new");
     }
 }

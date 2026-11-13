@@ -1,6 +1,7 @@
 use std::path::PathBuf;
 
 use crate::canvas::minimap::Minimap;
+use crate::cli::StartupOptions;
 use crate::canvas::renderer::CanvasRenderer;
 use crate::edges::renderer as edge_renderer;
 use crate::fs::tree::TreeNode;
@@ -10,12 +11,15 @@ use crate::nodes::file_node::{line_height, CODE_PADDING, HEADER_HEIGHT};
 use crate::nodes::lod::LodLevel;
 use crate::state::{AppState, Tool};
 use crate::ui;
+use crate::workspace;
 
 pub struct SpatialCodingApp {
     state: AppState,
     file_tree: Option<TreeNode>,
     highlighter: Highlighter,
     minimap: Minimap,
+    /// Fit the view to all nodes on the next frame, once the canvas size is known.
+    pending_fit: bool,
 }
 
 impl SpatialCodingApp {
@@ -25,6 +29,7 @@ impl SpatialCodingApp {
             file_tree: None,
             highlighter: Highlighter::new(),
             minimap: Minimap::default(),
+            pending_fit: false,
         }
     }
 
@@ -56,9 +61,36 @@ impl SpatialCodingApp {
         self.state.loaded_dir = Some(dir);
     }
 
+    /// Applies command-line options: open the folder, open files, optionally
+    /// lay them out, then fit the view to them on the first frame.
+    pub fn apply_startup(&mut self, opts: &StartupOptions) {
+        let Some(dir) = opts.dir.clone() else {
+            return;
+        };
+        self.open_folder(dir);
+        if opts.open_all {
+            workspace::open_all_files(&mut self.state);
+        }
+        workspace::open_files(&mut self.state, &opts.open_paths());
+        if opts.layout {
+            crate::layout::hierarchical::apply_layout(
+                &mut self.state.node_store,
+                &self.state.edge_store,
+                &self.state.layout_settings,
+            );
+        }
+        self.pending_fit = !self.state.node_store.file_nodes.is_empty();
+    }
+
     fn draw_canvas(&mut self, ui: &mut egui::Ui) {
         let canvas_rect = ui.available_rect_before_wrap();
         let response = ui.allocate_rect(canvas_rect, egui::Sense::click_and_drag());
+
+        if std::mem::take(&mut self.pending_fit)
+            && let Some(world_rect) = input::compute_nodes_bounding_rect(&self.state)
+        {
+            self.state.viewport.fit_to_rect(world_rect, canvas_rect);
+        }
 
         self.state
             .viewport

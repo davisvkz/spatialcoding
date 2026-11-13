@@ -6,8 +6,15 @@ use crate::state::AppState;
 /// Returns true if a shortcut was consumed.
 pub fn handle_shortcuts(ctx: &egui::Context, state: &mut AppState) -> bool {
     let mut consumed = false;
+    let mut open_all = false;
 
     ctx.input(|i| {
+        // Ctrl+Shift+O: Open all files (file IO runs after the input lock is released)
+        if i.key_pressed(egui::Key::O) && i.modifiers.command && i.modifiers.shift {
+            open_all = true;
+            consumed = true;
+        }
+
         // Space held detection for pan mode
         state.space_held = i.key_down(egui::Key::Space);
 
@@ -68,10 +75,14 @@ pub fn handle_shortcuts(ctx: &egui::Context, state: &mut AppState) -> bool {
         }
     });
 
+    if open_all {
+        crate::workspace::open_all_files(state);
+    }
+
     consumed
 }
 
-fn compute_nodes_bounding_rect(state: &AppState) -> Option<egui::Rect> {
+pub(crate) fn compute_nodes_bounding_rect(state: &AppState) -> Option<egui::Rect> {
     let mut rects = Vec::new();
     for id in state.node_store.all_file_ids() {
         if let Some(node) = state.node_store.get_file(id) {
