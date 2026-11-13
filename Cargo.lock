@@ -3291,10 +3291,12 @@ dependencies = [
  "env_logger",
  "log",
  "petgraph",
+ "regex",
  "rfd",
  "serde",
  "serde_json",
  "syntect",
+ "tempfile",
 ]
 
 [[package]]

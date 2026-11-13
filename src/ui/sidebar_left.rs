@@ -176,3 +176,47 @@ fn rebuild_edges(state: &mut AppState) {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rebuild_edges_links_dependent_file_nodes() {
+        let dir = tempfile::tempdir().unwrap();
+        let write = |rel: &str, content: &str| {
+            let p = dir.path().join(rel);
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(&p, content).unwrap();
+            p
+        };
+        write("Cargo.toml", "[package]\nname = \"x\"\n");
+        let main_rs = write("src/main.rs", "mod util;\n");
+        let util_rs = write("src/util.rs", "");
+        let app_ts = write("web/app.ts", "import { a } from './a';\n");
+        let a_ts = write("web/a.ts", "");
+
+        let mut state = AppState::default();
+        state.loaded_dir = Some(dir.path().to_path_buf());
+        let mut ids = std::collections::HashMap::new();
+        for p in [&main_rs, &util_rs, &app_ts, &a_ts] {
+            let id = state.node_store.add_file(p.clone(), String::new(), egui::Pos2::ZERO);
+            ids.insert(p.clone(), id);
+        }
+
+        rebuild_edges(&mut state);
+
+        let mut edges: Vec<(u64, u64, Option<String>)> = state
+            .edge_store
+            .all_edges()
+            .map(|e| (e.source_node, e.target_node, e.label.clone()))
+            .collect();
+        edges.sort();
+        let mut expected = vec![
+            (ids[&main_rs], ids[&util_rs], Some("Module".to_string())),
+            (ids[&app_ts], ids[&a_ts], Some("Import".to_string())),
+        ];
+        expected.sort();
+        assert_eq!(edges, expected);
+    }
+}
