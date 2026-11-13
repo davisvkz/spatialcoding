@@ -96,6 +96,13 @@ impl Viewport {
             let prev_zoom = self.zoom;
             self.zoom += (self.target_zoom - self.zoom) * t;
 
+            // Snap before anchoring, so the offset is computed for the final zoom
+            // and the point under the cursor does not drift on the last frame.
+            let settled = (self.zoom - self.target_zoom).abs() < 0.001;
+            if settled {
+                self.zoom = self.target_zoom;
+            }
+
             if let Some(center) = self.zoom_center {
                 let world_point = Pos2::new(
                     center.x / prev_zoom - self.offset.x,
@@ -107,8 +114,7 @@ impl Viewport {
                 );
             }
 
-            if (self.zoom - self.target_zoom).abs() < 0.001 {
-                self.zoom = self.target_zoom;
+            if settled {
                 self.zoom_center = None;
             }
         } else {
@@ -273,9 +279,6 @@ mod tests {
         }
         assert_eq!(vp.zoom, 2.0);
         assert!(vp.zoom_center.is_none());
-        // The final snap to `target_zoom` happens after the offset is anchored,
-        // so allow a sub-pixel drift on screen.
-        let drift = (vp.world_to_screen(anchored) - center).length();
-        assert!(drift < 0.5, "cursor drifted {drift}px");
+        assert_close(vp.screen_to_world(center), anchored);
     }
 }
