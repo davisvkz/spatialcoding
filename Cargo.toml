@@ -19,6 +19,7 @@ regex = "1"
 
 [dev-dependencies]
 tempfile = "3"
+egui_kittest = { version = "0.31.1", features = ["eframe"] }
 
 [profile.release]
 opt-level = 2
