@@ -7,6 +7,7 @@
 mod common;
 
 mod canvas;
+mod cst_panel;
 mod file_tree;
 mod manual_fixtures;
 mod settings;

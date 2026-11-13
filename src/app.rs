@@ -11,6 +11,7 @@ use crate::nodes::file_node::{line_height, CODE_PADDING, HEADER_HEIGHT};
 use crate::nodes::lod::LodLevel;
 use crate::state::{AppState, Tool};
 use crate::ui;
+use crate::ui::cst_panel;
 use crate::workspace;
 
 pub struct SpatialCodingApp {
@@ -295,6 +296,20 @@ impl SpatialCodingApp {
             );
             let line_h = line_height(font_size) * zoom;
             let code_clip = painter.with_clip_rect(screen_rect.intersect(painter.clip_rect()));
+
+            if let Some(hover) = self.state.cst.hovered.filter(|h| h.node_id == node.id) {
+                // Under the code text: the lines of the CST row under the pointer.
+                if let Some(rect) = cst_panel::highlight_rect(
+                    egui::pos2(screen_rect.left(), code_origin.y),
+                    screen_rect.width(),
+                    line_h,
+                    hover.start_line,
+                    hover.end_line,
+                    node.visible_lines(),
+                ) {
+                    code_clip.rect_filled(rect, 0.0, theme.selection.gamma_multiply(0.25));
+                }
+            }
 
             match lod {
                 LodLevel::Full => {

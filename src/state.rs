@@ -7,6 +7,7 @@ use crate::edges::style::EdgeStyleConfig;
 use crate::layout::settings::LayoutSettings;
 use crate::nodes::node_store::NodeStore;
 use crate::nodes::selection::Selection;
+use crate::ui::cst_panel::CstPanelState;
 use crate::ui::theme::Theme;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -53,6 +54,8 @@ pub struct AppState {
     pub file_contents: HashMap<PathBuf, String>,
     pub space_held: bool,
     pub settings: AppSettings,
+    /// CST tab: cached syntax tree of the selected node and the hovered row.
+    pub cst: CstPanelState,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -102,6 +105,7 @@ impl Default for AppState {
             file_contents: HashMap::new(),
             space_held: false,
             settings: AppSettings::default(),
+            cst: CstPanelState::default(),
         }
     }
 }

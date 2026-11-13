@@ -21,6 +21,7 @@ scripts/manual/04-edges.sh python
 | `08-ui-panels.sh` | Toolbar, sidebars, Settings, atalhos (TASK-8) | `rust` | todos os arquivos + layout |
 | `09-minimap.sh` | Minimap (TASK-9) | `large` | ~150 arquivos + layout |
 | `10-open-all-and-clear.sh` | Ctrl+Shift+O, Clear All/Selected, Shift+X | `mixed` | só a pasta (canvas vazio) |
+| `11-cst.sh` | Aba CST: árvore tree-sitter e destaque de linhas (TASK-11) | `mixed` | um arquivo por linguagem + README e JSON |
 
 ## Fixtures
 

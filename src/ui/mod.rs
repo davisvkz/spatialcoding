@@ -7,3 +7,4 @@ pub mod shortcuts_dialog;
 pub mod command_palette;
 pub mod search_panel;
 pub mod changes_panel;
+pub mod cst_panel;

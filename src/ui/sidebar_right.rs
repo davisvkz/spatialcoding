@@ -1,6 +1,7 @@
 use crate::edges::style::{EdgeStyle, OpacityMode};
 use crate::layout::settings::{HAlign, SortMode, VAlign};
 use crate::state::{AppState, RightPanel};
+use crate::ui::cst_panel;
 
 const PANELS: &[(&str, RightPanel)] = &[
     ("Layout", RightPanel::Layout),
@@ -14,6 +15,11 @@ const PANELS: &[(&str, RightPanel)] = &[
 ];
 
 pub fn draw_sidebar_right(ctx: &egui::Context, state: &mut AppState) {
+    if state.right_panel != Some(RightPanel::Cst) {
+        // The CST panel resets this each frame it draws; nothing else does.
+        state.cst.hovered = None;
+    }
+
     if state.right_panel.is_none() {
         egui::SidePanel::right("sidebar_right_collapsed")
             .exact_width(32.0)
@@ -51,6 +57,7 @@ pub fn draw_sidebar_right(ctx: &egui::Context, state: &mut AppState) {
                 match state.right_panel {
                     Some(RightPanel::Layout) => draw_layout_panel(ui, state),
                     Some(RightPanel::DependencyEdges) => draw_edges_panel(ui, state),
+                    Some(RightPanel::Cst) => cst_panel::draw_cst_panel(ui, state),
                     Some(_) => {
                         ui.label("Coming soon");
                     }
