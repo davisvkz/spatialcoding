@@ -41,8 +41,7 @@ pub fn draw_toolbar(ui: &mut egui::Ui, state: &mut AppState) {
             .add_enabled(has_nodes, egui::Button::new("Clear All"))
             .clicked()
         {
-            state.node_store.clear();
-            state.selection.clear();
+            crate::workspace::clear_canvas(state);
         }
 
         let has_selection = state.selection.count() > 0;

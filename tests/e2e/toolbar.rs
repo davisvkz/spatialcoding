@@ -32,3 +32,22 @@ fn clear_buttons_are_disabled_until_there_is_something_to_clear() {
     app.run();
     assert!(!app.get_by_label("Clear Selected").is_disabled());
 }
+
+#[test]
+fn clear_all_removes_nodes_folders_edges_and_selection() {
+    let fx = fixture();
+    let mut app = app_with(&fx);
+    let main = app.open(&fx.path("src/main.rs"));
+    app.open(&fx.path("src/util.rs"));
+    app.app_state_mut().selection.select(main);
+    app.run();
+
+    app.get_by_label("Clear All").click();
+    app.run();
+
+    let s = app.app_state();
+    assert!(s.node_store.file_nodes.is_empty());
+    assert!(s.node_store.folder_nodes.is_empty());
+    assert_eq!(s.edge_store.all_edges().count(), 0, "no dangling edges");
+    assert_eq!(s.selection.count(), 0);
+}

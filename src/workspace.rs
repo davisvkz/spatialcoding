@@ -106,6 +106,13 @@ fn find_or_create_folder(state: &mut AppState, dir: &Path) -> u64 {
     existing.unwrap_or_else(|| state.node_store.add_folder(dir.to_path_buf(), 0))
 }
 
+/// Removes every node, folder, edge and the selection from the canvas.
+pub fn clear_canvas(state: &mut AppState) {
+    state.node_store.clear();
+    state.edge_store.clear();
+    state.selection.clear();
+}
+
 /// Recomputes every dependency edge between the open file nodes.
 pub fn rebuild_edges(state: &mut AppState) {
     let root = match state.loaded_dir {

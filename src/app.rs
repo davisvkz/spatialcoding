@@ -47,9 +47,7 @@ impl SpatialCodingApp {
 
     /// Loads `dir` as the workspace, replacing whatever is on the canvas.
     pub fn open_folder(&mut self, dir: PathBuf) {
-        self.state.node_store.clear();
-        self.state.edge_store.clear();
-        self.state.selection.clear();
+        workspace::clear_canvas(&mut self.state);
         self.file_tree =
             match crate::fs::loader::load_directory(&dir, self.state.settings.show_dot_folders) {
                 Ok(tree) => Some(tree),

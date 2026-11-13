@@ -53,9 +53,7 @@ pub fn handle_shortcuts(ctx: &egui::Context, state: &mut AppState) -> bool {
 
         // Shift+X: Clear canvas
         if i.key_pressed(egui::Key::X) && i.modifiers.shift {
-            state.node_store.clear();
-            state.edge_store.clear();
-            state.selection.clear();
+            crate::workspace::clear_canvas(state);
             consumed = true;
         }
 
