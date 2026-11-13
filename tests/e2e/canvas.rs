@@ -1,4 +1,4 @@
-use egui::{Modifiers, Pos2, Vec2};
+use egui::{Key, Modifiers, PointerButton, Pos2, Vec2};
 
 use crate::common::*;
 
@@ -60,6 +60,32 @@ fn dragging_moves_the_selected_node_in_world_units() {
     assert!(moved.x > 150.0 && moved.x <= 200.0 + 1e-3, "moved {moved:?}");
     assert!(moved.y > 75.0 && moved.y <= 100.0 + 1e-3, "moved {moved:?}");
     assert_eq!(app.node_position(b), other_before, "unselected node stays put");
+}
+
+#[test]
+fn right_drag_pans_without_moving_the_selected_node() {
+    let (mut app, _fx, a, _, sa, _) = two_nodes();
+    click_at(&mut app, sa, Modifiers::NONE);
+    let (node_before, offset_before) = (app.node_position(a), app.app_state().viewport.offset);
+
+    drag_with(&mut app, PointerButton::Secondary, sa, sa + Vec2::new(100.0, 50.0));
+
+    assert_ne!(app.app_state().viewport.offset, offset_before, "view panned");
+    assert_eq!(app.node_position(a), node_before, "selected node stays put");
+}
+
+#[test]
+fn space_drag_pans_without_moving_the_selected_node() {
+    let (mut app, _fx, a, _, sa, _) = two_nodes();
+    click_at(&mut app, sa, Modifiers::NONE);
+    let (node_before, offset_before) = (app.node_position(a), app.app_state().viewport.offset);
+
+    hold_key(&mut app, Key::Space, true);
+    drag(&mut app, sa, sa + Vec2::new(100.0, 50.0));
+    hold_key(&mut app, Key::Space, false);
+
+    assert_ne!(app.app_state().viewport.offset, offset_before, "view panned");
+    assert_eq!(app.node_position(a), node_before, "selected node stays put");
 }
 
 #[test]

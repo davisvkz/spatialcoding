@@ -135,11 +135,15 @@ fn send(harness: &mut App, event: Event) {
 }
 
 fn button(harness: &mut App, pos: Pos2, pressed: bool, modifiers: Modifiers) {
+    press(harness, pos, PointerButton::Primary, pressed, modifiers);
+}
+
+fn press(harness: &mut App, pos: Pos2, button: PointerButton, pressed: bool, modifiers: Modifiers) {
     send(
         harness,
         Event::PointerButton {
             pos,
-            button: PointerButton::Primary,
+            button,
             pressed,
             modifiers,
         },
@@ -158,15 +162,34 @@ pub fn click_at(harness: &mut App, pos: Pos2, modifiers: Modifiers) {
 
 /// Left-button drag from `from` to `to` in several small moves.
 pub fn drag(harness: &mut App, from: Pos2, to: Pos2) {
+    drag_with(harness, PointerButton::Primary, from, to);
+}
+
+/// Drag with any mouse button from `from` to `to` in several small moves.
+pub fn drag_with(harness: &mut App, button: PointerButton, from: Pos2, to: Pos2) {
     send(harness, Event::PointerMoved(from));
-    button(harness, from, true, Modifiers::NONE);
+    press(harness, from, button, true, Modifiers::NONE);
     const STEPS: usize = 10;
     for i in 1..=STEPS {
         let t = i as f32 / STEPS as f32;
         send(harness, Event::PointerMoved(from + (to - from) * t));
     }
-    button(harness, to, false, Modifiers::NONE);
+    press(harness, to, button, false, Modifiers::NONE);
     harness.run();
+}
+
+/// Holds or releases a key across frames (unlike `press_key`, which taps it).
+pub fn hold_key(harness: &mut App, key: egui::Key, down: bool) {
+    send(
+        harness,
+        Event::Key {
+            key,
+            physical_key: None,
+            pressed: down,
+            repeat: false,
+            modifiers: Modifiers::NONE,
+        },
+    );
 }
 
 /// Mouse wheel over `pos`, holding `modifiers`.

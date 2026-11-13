@@ -135,7 +135,11 @@ impl SpatialCodingApp {
             }
         }
 
-        if response.dragged() && self.state.active_tool == Tool::Select {
+        // Only a plain left-drag moves the node; right-drag and Space+drag pan the view.
+        let dragging_node = response.dragged_by(egui::PointerButton::Primary)
+            && !self.state.space_held
+            && self.state.active_tool == Tool::Select;
+        if dragging_node {
             if let Some(id) = self.state.selection.primary {
                 let delta = response.drag_delta() / self.state.viewport.zoom;
                 if let Some(node) = self.state.node_store.get_file_mut(id) {
