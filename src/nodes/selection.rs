@@ -56,3 +56,68 @@ impl Selection {
         self.selected.iter().copied()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn sorted(sel: &Selection) -> Vec<u64> {
+        let mut ids: Vec<u64> = sel.selected_ids().collect();
+        ids.sort();
+        ids
+    }
+
+    #[test]
+    fn select_replaces_the_selection() {
+        let mut sel = Selection::default();
+        sel.select(1);
+        sel.select(2);
+
+        assert_eq!(sorted(&sel), [2]);
+        assert_eq!(sel.primary, Some(2));
+        assert!(!sel.is_selected(1));
+    }
+
+    #[test]
+    fn toggle_adds_and_removes_and_moves_primary() {
+        let mut sel = Selection::default();
+        sel.toggle(1);
+        sel.toggle(2);
+        assert_eq!(sorted(&sel), [1, 2]);
+        assert_eq!(sel.primary, Some(2));
+
+        sel.toggle(2);
+        assert_eq!(sorted(&sel), [1]);
+        assert_eq!(sel.primary, Some(1), "primary falls back to a remaining id");
+
+        sel.toggle(1);
+        assert_eq!(sel.count(), 0);
+        assert_eq!(sel.primary, None);
+    }
+
+    #[test]
+    fn toggling_off_a_non_primary_keeps_primary() {
+        let mut sel = Selection::default();
+        sel.select(1);
+        sel.toggle(2);
+        sel.toggle(1);
+        assert_eq!(sel.primary, Some(2));
+    }
+
+    #[test]
+    fn select_all_and_clear() {
+        let mut sel = Selection::default();
+        sel.select(9);
+        sel.select_all([3, 4, 5]);
+        assert_eq!(sorted(&sel), [3, 4, 5]);
+        assert!(sel.primary.is_some_and(|p| sel.is_selected(p)));
+
+        sel.select_all([]);
+        assert_eq!(sel.primary, None);
+
+        sel.select(1);
+        sel.clear();
+        assert_eq!(sel.count(), 0);
+        assert_eq!(sel.primary, None);
+    }
+}

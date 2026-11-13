@@ -98,3 +98,69 @@ impl Highlighter {
         job
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use syntect::highlighting::{Color, FontStyle};
+
+    fn joined(lines: &[Vec<(Style, String)>]) -> String {
+        lines.iter().flatten().map(|(_, text)| text.as_str()).collect()
+    }
+
+    #[test]
+    fn highlight_file_returns_one_entry_per_line_preserving_text() {
+        let mut hl = Highlighter::new();
+        let content = "fn main() {\n    let x = 1;\n}\n";
+        let lines = hl.highlight_file(Path::new("main.rs"), content);
+
+        assert_eq!(lines.len(), 3);
+        assert_eq!(joined(lines), content);
+        assert!(lines[0].len() > 1, "Rust code should get several styled spans");
+    }
+
+    #[test]
+    fn unknown_extension_falls_back_to_plain_text() {
+        let mut hl = Highlighter::new();
+        let content = "just some text\nmore\n";
+        let lines = hl.highlight_file(Path::new("notes.unknownext"), content);
+        assert_eq!(lines.len(), 2);
+        assert_eq!(joined(lines), content);
+    }
+
+    #[test]
+    fn results_are_cached_by_path_until_cleared() {
+        let mut hl = Highlighter::new();
+        let path = Path::new("a.py");
+        hl.highlight_file(path, "x = 1\n");
+
+        assert_eq!(joined(hl.highlight_file(path, "y = 2\n")), "x = 1\n");
+        hl.clear_cache();
+        assert_eq!(joined(hl.highlight_file(path, "y = 2\n")), "y = 2\n");
+    }
+
+    #[test]
+    fn style_to_egui_color_copies_foreground() {
+        let style = Style {
+            foreground: Color { r: 10, g: 20, b: 30, a: 255 },
+            background: Color::WHITE,
+            font_style: FontStyle::empty(),
+        };
+        assert_eq!(
+            Highlighter::style_to_egui_color(&style),
+            egui::Color32::from_rgb(10, 20, 30)
+        );
+    }
+
+    #[test]
+    fn layout_job_respects_max_lines() {
+        let mut hl = Highlighter::new();
+        let lines = hl.highlight_file(Path::new("a.txt"), "a\nb\nc\n").to_vec();
+
+        let job = Highlighter::highlighted_lines_to_layout_job(&lines, 12.0, 2);
+        assert_eq!(job.text, "a\nb\n");
+
+        let all = Highlighter::highlighted_lines_to_layout_job(&lines, 12.0, 100);
+        assert_eq!(all.text, "a\nb\nc\n");
+    }
+}

@@ -87,3 +87,34 @@ fn compute_nodes_bounding_rect(state: &AppState) -> Option<egui::Rect> {
     }
     Some(combined)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    #[test]
+    fn bounding_rect_is_none_without_nodes() {
+        assert!(compute_nodes_bounding_rect(&AppState::default()).is_none());
+    }
+
+    #[test]
+    fn bounding_rect_unions_all_file_nodes() {
+        let mut state = AppState::default();
+        let a = state
+            .node_store
+            .add_file(PathBuf::from("a.rs"), "x\n".into(), egui::pos2(0.0, 0.0));
+        let b = state
+            .node_store
+            .add_file(PathBuf::from("b.rs"), "x\n".into(), egui::pos2(1000.0, 500.0));
+
+        let rect = compute_nodes_bounding_rect(&state).unwrap();
+
+        let (w, f) = (state.settings.node_width, state.settings.font_size);
+        let expected = state.node_store.get_file(a).unwrap().world_rect(w, f)
+            .union(state.node_store.get_file(b).unwrap().world_rect(w, f));
+        assert_eq!(rect, expected);
+        assert_eq!(rect.min, egui::pos2(0.0, 0.0));
+        assert_eq!(rect.max.x, 1000.0 + w);
+    }
+}

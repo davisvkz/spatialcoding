@@ -472,3 +472,17 @@ fn bar(
 fn visual_width(s: &str) -> usize {
     s.chars().map(|c| if c == '\t' { 4 } else { 1 }).sum()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn visual_width_counts_tabs_as_four_columns() {
+        assert_eq!(visual_width(""), 0);
+        assert_eq!(visual_width("abc"), 3);
+        assert_eq!(visual_width("\tx"), 5);
+        assert_eq!(visual_width("\t\t"), 8);
+        assert_eq!(visual_width("olá"), 3, "counts chars, not bytes");
+    }
+}

@@ -43,3 +43,38 @@ impl FolderNode {
         );
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use egui::{pos2, Rect};
+
+    #[test]
+    fn label_comes_from_the_last_path_component() {
+        assert_eq!(FolderNode::new(1, PathBuf::from("/a/b/components"), 3).label, "components");
+        assert_eq!(FolderNode::new(1, PathBuf::from("/"), 0).label, "folder");
+    }
+
+    #[test]
+    fn update_bounds_wraps_children_with_padding_and_header() {
+        let mut folder = FolderNode::new(1, PathBuf::from("src"), 2);
+        let children = [
+            Rect::from_min_max(pos2(0.0, 0.0), pos2(10.0, 10.0)),
+            Rect::from_min_max(pos2(20.0, 30.0), pos2(40.0, 50.0)),
+        ];
+
+        folder.update_bounds(&children, 5.0);
+
+        assert_eq!(
+            folder.bounds,
+            Rect::from_min_max(pos2(-5.0, -5.0 - 28.0), pos2(45.0, 55.0))
+        );
+    }
+
+    #[test]
+    fn update_bounds_without_children_keeps_previous_bounds() {
+        let mut folder = FolderNode::new(1, PathBuf::from("src"), 0);
+        folder.update_bounds(&[], 5.0);
+        assert_eq!(folder.bounds, Rect::NOTHING);
+    }
+}

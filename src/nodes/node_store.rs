@@ -88,3 +88,73 @@ impl NodeStore {
         None
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn add_file(store: &mut NodeStore, name: &str, at: egui::Pos2) -> u64 {
+        store.add_file(PathBuf::from(name), "line\n".into(), at)
+    }
+
+    #[test]
+    fn files_and_folders_share_one_id_sequence() {
+        let mut store = NodeStore::default();
+        let a = add_file(&mut store, "a.rs", egui::Pos2::ZERO);
+        let f = store.add_folder(PathBuf::from("src"), 1);
+        let b = add_file(&mut store, "b.rs", egui::Pos2::ZERO);
+
+        assert_eq!((a, f, b), (1, 2, 3));
+        assert_eq!(store.get_file(a).unwrap().id, a);
+        assert_eq!(store.get_folder(f).unwrap().id, f);
+        assert!(store.get_file(f).is_none());
+        let mut files = store.all_file_ids();
+        files.sort();
+        assert_eq!(files, [a, b]);
+        assert_eq!(store.all_folder_ids(), [f]);
+    }
+
+    #[test]
+    fn remove_node_handles_both_kinds_and_unknown_ids() {
+        let mut store = NodeStore::default();
+        let a = add_file(&mut store, "a.rs", egui::Pos2::ZERO);
+        let f = store.add_folder(PathBuf::from("src"), 1);
+
+        store.remove_node(a);
+        store.remove_node(f);
+        store.remove_node(999);
+
+        assert!(store.all_file_ids().is_empty());
+        assert!(store.all_folder_ids().is_empty());
+    }
+
+    #[test]
+    fn clear_resets_ids() {
+        let mut store = NodeStore::default();
+        add_file(&mut store, "a.rs", egui::Pos2::ZERO);
+        store.add_folder(PathBuf::from("src"), 1);
+        store.clear();
+
+        assert!(store.all_file_ids().is_empty());
+        assert_eq!(add_file(&mut store, "b.rs", egui::Pos2::ZERO), 1);
+    }
+
+    #[test]
+    fn get_file_mut_edits_in_place() {
+        let mut store = NodeStore::default();
+        let a = add_file(&mut store, "a.rs", egui::Pos2::ZERO);
+        store.get_file_mut(a).unwrap().position = egui::pos2(3.0, 4.0);
+        assert_eq!(store.get_file(a).unwrap().position, egui::pos2(3.0, 4.0));
+    }
+
+    #[test]
+    fn node_at_position_hit_tests_file_rects() {
+        let mut store = NodeStore::default();
+        let a = add_file(&mut store, "a.rs", egui::pos2(100.0, 100.0));
+
+        assert_eq!(store.node_at_position(egui::pos2(150.0, 120.0), 700.0, 12.0), Some(a));
+        assert_eq!(store.node_at_position(egui::pos2(799.0, 101.0), 700.0, 12.0), Some(a));
+        assert_eq!(store.node_at_position(egui::pos2(50.0, 50.0), 700.0, 12.0), None);
+        assert_eq!(store.node_at_position(egui::pos2(150.0, 1000.0), 700.0, 12.0), None);
+    }
+}

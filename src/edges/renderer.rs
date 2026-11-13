@@ -141,3 +141,49 @@ fn draw_arrow_head(painter: &egui::Painter, from: Pos2, to: Pos2, color: Color32
         Stroke::NONE,
     ));
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::edges::edge_store::Edge;
+
+    fn edge(source: u64, target: u64) -> Edge {
+        Edge {
+            id: 1,
+            source_node: source,
+            target_node: target,
+            label: None,
+        }
+    }
+
+    fn config(only_selected: bool, opacity_mode: OpacityMode) -> EdgeStyleConfig {
+        EdgeStyleConfig {
+            only_selected,
+            opacity_mode,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn only_selected_dims_unconnected_edges() {
+        let selected = HashSet::from([7]);
+        let cfg = config(true, OpacityMode::Full);
+        assert_eq!(compute_alpha(&cfg, &edge(1, 2), &selected), 8);
+        assert_eq!(compute_alpha(&cfg, &edge(7, 2), &selected), 200);
+        assert_eq!(compute_alpha(&cfg, &edge(1, 7), &selected), 200);
+    }
+
+    #[test]
+    fn full_opacity_ignores_selection() {
+        let cfg = config(false, OpacityMode::Full);
+        assert_eq!(compute_alpha(&cfg, &edge(1, 2), &HashSet::new()), 200);
+    }
+
+    #[test]
+    fn depth_opacity_fades_unconnected_edges() {
+        let selected = HashSet::from([1]);
+        let cfg = config(false, OpacityMode::Depth);
+        assert_eq!(compute_alpha(&cfg, &edge(1, 2), &selected), 200);
+        assert_eq!(compute_alpha(&cfg, &edge(3, 4), &selected), 60);
+    }
+}

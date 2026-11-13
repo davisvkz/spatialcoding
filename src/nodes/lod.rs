@@ -24,3 +24,18 @@ impl LodLevel {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn from_zoom_thresholds() {
+        assert_eq!(LodLevel::from_zoom(0.05), LodLevel::TitleOnly);
+        assert_eq!(LodLevel::from_zoom(0.119), LodLevel::TitleOnly);
+        assert_eq!(LodLevel::from_zoom(0.12), LodLevel::Minified);
+        assert_eq!(LodLevel::from_zoom(0.499), LodLevel::Minified);
+        assert_eq!(LodLevel::from_zoom(0.5), LodLevel::Full);
+        assert_eq!(LodLevel::from_zoom(5.0), LodLevel::Full);
+    }
+}
