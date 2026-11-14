@@ -35,10 +35,10 @@ fn edges_panel_changes_edge_style() {
     app.run();
     assert_eq!(app.app_state().edge_style.style, EdgeStyle::Step);
 
-    assert!(app.app_state().edge_style.show_arrow_heads);
+    assert!(!app.app_state().edge_style.show_arrow_heads);
     app.get_by_label("Arrow Heads").click();
     app.run();
-    assert!(!app.app_state().edge_style.show_arrow_heads);
+    assert!(app.app_state().edge_style.show_arrow_heads);
 }
 
 #[test]

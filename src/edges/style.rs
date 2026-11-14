@@ -75,12 +75,13 @@ impl Default for EdgeStyleConfig {
             show_all: false,
             highlight_backwards: false,
             show_connection_markers: false,
-            show_arrow_heads: true,
+            show_arrow_heads: false,
             only_selected: true,
             scale_arrow_heads: false,
             min_size_pct: 0.5,
             use_gradient: false,
-            base_color: [0.5, 0.5, 0.5],
+            // Warm cream, close to v2 Code Canvas edge tone.
+            base_color: [0.88, 0.86, 0.80],
             symbol_colors: default_symbol_colors(),
         }
     }

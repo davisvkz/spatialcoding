@@ -241,26 +241,31 @@ impl SpatialCodingApp {
             let screen_rect = self.state.viewport.world_to_screen_rect(world_rect);
             let selected = self.state.selection.is_selected(node.id);
             let border_color = if selected { theme.selection } else { theme.node_border };
-            let border_width: f32 = if selected { 2.0 } else { 1.0 };
+            let border_width: f32 = if selected { 1.5 } else { 1.0 };
             let rounding = (4.0 * zoom).clamp(1.0, 4.0);
 
+            // v2 Code Canvas style: no interior header bar; the file name
+            // floats above the rectangle as a secondary label.
+            let label_anchor = screen_rect.left_top() - egui::vec2(0.0, 4.0);
+            let label_size = (font_size * zoom).max(10.0).min(14.0);
+            draw_fitted_label(
+                painter,
+                node.file_name(),
+                label_anchor,
+                egui::Align2::LEFT_BOTTOM,
+                screen_rect.width(),
+                label_size,
+                theme.text_secondary,
+            );
+
             if lod == LodLevel::TitleOnly {
-                // Far away: solid block + centered name, sized to stay readable.
-                painter.rect_filled(screen_rect, rounding, theme.node_header);
+                // Far away: solid block only — the floating label above is the name.
+                painter.rect_filled(screen_rect, rounding, theme.node_bg);
                 painter.rect_stroke(
                     screen_rect,
                     rounding,
                     egui::Stroke::new(border_width, border_color),
                     egui::StrokeKind::Outside,
-                );
-                draw_fitted_label(
-                    painter,
-                    node.file_name(),
-                    screen_rect.center(),
-                    egui::Align2::CENTER_CENTER,
-                    screen_rect.width(),
-                    14.0,
-                    theme.text_primary,
                 );
                 continue;
             }
@@ -273,38 +278,12 @@ impl SpatialCodingApp {
                 egui::StrokeKind::Outside,
             );
 
+            // Reserve the top of the body as padding (where the header bar used to sit),
+            // so code lines line up with the edge anchors driven by HEADER_HEIGHT.
             let header_rect = egui::Rect::from_min_size(
                 screen_rect.left_top(),
                 egui::vec2(screen_rect.width(), HEADER_HEIGHT * zoom),
             );
-            let r = rounding as u8;
-            painter.rect_filled(
-                header_rect,
-                egui::CornerRadius { nw: r, ne: r, sw: 0, se: 0 },
-                theme.node_header,
-            );
-
-            let title_px = font_size * zoom;
-            if title_px >= 8.0 {
-                painter.text(
-                    header_rect.left_center() + egui::vec2(8.0 * zoom, 0.0),
-                    egui::Align2::LEFT_CENTER,
-                    node.file_name(),
-                    egui::FontId::monospace(title_px),
-                    theme.text_primary,
-                );
-            } else {
-                // Header text would be illegible: float a fixed-size label above the node.
-                draw_fitted_label(
-                    painter,
-                    node.file_name(),
-                    screen_rect.left_top() - egui::vec2(0.0, 2.0),
-                    egui::Align2::LEFT_BOTTOM,
-                    screen_rect.width(),
-                    11.0,
-                    theme.text_secondary,
-                );
-            }
 
             if node.content.is_empty() {
                 continue;
@@ -337,12 +316,12 @@ impl SpatialCodingApp {
                         hl_origin, screen_rect.width(), line_h,
                         hl.span.start, hl.span.end, node.visible_lines(),
                     ) {
-                        code_clip.rect_filled(rect, 0.0, color.gamma_multiply(0.12));
+                        code_clip.rect_filled(rect, 0.0, color.gamma_multiply(0.07));
                         let border = egui::Rect::from_min_size(
                             rect.left_top(),
-                            egui::vec2(3.0 * zoom, rect.height()),
+                            egui::vec2(2.0 * zoom, rect.height()),
                         );
-                        code_clip.rect_filled(border, 0.0, color.gamma_multiply(0.7));
+                        code_clip.rect_filled(border, 0.0, color.gamma_multiply(0.85));
                     }
                     let name_x = hl.name_span.filter(|ns| ns.line < node.visible_lines()).and_then(|ns| {
                         let spans = lines.get(ns.line)?;
@@ -355,7 +334,7 @@ impl SpatialCodingApp {
                             egui::pos2(code_origin.x + x0, y),
                             egui::pos2(code_origin.x + x1, y + line_h),
                         );
-                        code_clip.rect_filled(name_rect, 2.0, color.gamma_multiply(0.35));
+                        code_clip.rect_filled(name_rect, 1.5, color.gamma_multiply(0.30));
                     }
                 }
             }
