@@ -20,7 +20,8 @@ checklist "04 · Arestas de dependência via LSP ($lang)" \
   "Observar o canvas sem nada selecionado|arestas quase invisíveis: 'Only Selected' vem ligado" \
   "Clicar num arquivo|as arestas dele (entrando e saindo) aparecem fortes, com ponta de seta no destino" \
   "Aproximar (Ctrl+roda) um arquivo selecionado|cada aresta sai da lateral do nó na linha do statement que USA o símbolo e chega na linha da DEFINIÇÃO no outro arquivo (função, struct, método); vários usos geram várias arestas" \
-  "Com o arquivo selecionado, olhar o código dos dois lados|os statements de uso e as definições inteiras ficam destacados na cor das arestas" \
+  "Com o arquivo selecionado, olhar o código dos dois lados|os statements de uso e as definições inteiras ficam destacados na cor do tipo do símbolo (fn, struct…, editável na aba Edges), com uma barra na borda esquerda" \
+  "Na definição, olhar o nome do símbolo (ex.: 'pub struct Server', 'pub fn bind') em zooms diferentes|a marca mais forte cobre exatamente o nome, sem começar no meio dele nem passar para o '{' ou o '('" \
   "Conferir as arestas|esperado: $expected" \
   "Um import cujo símbolo é usado no arquivo|não gera aresta própria; um import sem uso liga a linha do import à definição" \
   "Painel direito → Edges → desmarcar Only Selected|todas as arestas visíveis; as do nó selecionado mais fortes (Opacity: Depth)" \

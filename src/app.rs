@@ -328,7 +328,6 @@ impl SpatialCodingApp {
                 .target
                 .filter(|t| self.state.selection.primary == Some(t.node_id));
             let hl_origin = egui::pos2(screen_rect.left(), code_origin.y);
-            let char_width = font_size * zoom * 0.6;
 
             // Edge highlights: block + left border + optional name highlight.
             if let Some(highlights) = edge_spans.get(&node.id) {
@@ -345,17 +344,18 @@ impl SpatialCodingApp {
                         );
                         code_clip.rect_filled(border, 0.0, color.gamma_multiply(0.7));
                     }
-                    if let Some(ns) = hl.name_span {
-                        if ns.line < node.visible_lines() {
-                            let y = code_origin.y + ns.line as f32 * line_h;
-                            let x = code_origin.x + ns.start_byte as f32 * char_width;
-                            let w = (ns.end_byte - ns.start_byte) as f32 * char_width;
-                            let name_rect = egui::Rect::from_min_size(
-                                egui::pos2(x, y),
-                                egui::vec2(w, line_h),
-                            );
-                            code_clip.rect_filled(name_rect, 2.0, color.gamma_multiply(0.35));
-                        }
+                    let name_x = hl.name_span.filter(|ns| ns.line < node.visible_lines()).and_then(|ns| {
+                        let spans = lines.get(ns.line)?;
+                        let x = name_x_range(&code_clip, lod, spans, ns.start_byte, ns.end_byte, font_size * zoom)?;
+                        Some((ns.line, x))
+                    });
+                    if let Some((line, (x0, x1))) = name_x {
+                        let y = code_origin.y + line as f32 * line_h;
+                        let name_rect = egui::Rect::from_min_max(
+                            egui::pos2(code_origin.x + x0, y),
+                            egui::pos2(code_origin.x + x1, y + line_h),
+                        );
+                        code_clip.rect_filled(name_rect, 2.0, color.gamma_multiply(0.35));
                     }
                 }
             }
@@ -526,7 +526,7 @@ fn draw_code_text(
     line_h: f32,
     font_px: f32,
 ) {
-    let font = egui::FontId::monospace(font_px * 0.85);
+    let font = code_font(font_px);
     let bottom = painter.clip_rect().bottom();
     for (i, spans) in lines.iter().enumerate() {
         let y = origin.y + i as f32 * line_h;
@@ -560,7 +560,7 @@ fn draw_code_bars(
     line_h: f32,
     font_px: f32,
 ) {
-    let char_w = font_px * 0.85 * MONO_ADVANCE;
+    let char_w = code_char_width(font_px);
     let bar_h = (line_h * 0.6).max(1.0);
     let per_token = line_h >= 4.0;
     let bottom = painter.clip_rect().bottom();
@@ -621,6 +621,63 @@ fn visual_width(s: &str) -> usize {
     s.chars().map(|c| if c == '\t' { 4 } else { 1 }).sum()
 }
 
+/// Font of the code text inside a file node, for a node font size of `font_px`.
+fn code_font(font_px: f32) -> egui::FontId {
+    egui::FontId::monospace(font_px * 0.85)
+}
+
+/// Approximate column width of the code font, as the minified bars use it.
+fn code_char_width(font_px: f32) -> f32 {
+    font_px * 0.85 * MONO_ADVANCE
+}
+
+/// Horizontal range, relative to the code origin, of bytes `start..end` of a
+/// highlighted line as the current LOD draws it: measured span by span with
+/// the real code font at full LOD (the same layout as [`draw_code_text`]),
+/// in bar columns when minified. `None` when the range is not in the line.
+fn name_x_range(
+    painter: &egui::Painter,
+    lod: LodLevel,
+    spans: &HighlightedLine,
+    start: usize,
+    end: usize,
+    font_px: f32,
+) -> Option<(f32, f32)> {
+    let char_w = code_char_width(font_px);
+    let width = |s: &str| -> f32 {
+        let s = s.trim_end_matches(['\n', '\r']);
+        if s.is_empty() {
+            return 0.0;
+        }
+        match lod {
+            LodLevel::Full => painter
+                .layout_no_wrap(s.to_string(), code_font(font_px), egui::Color32::PLACEHOLDER)
+                .size()
+                .x,
+            _ => visual_width(s) as f32 * char_w,
+        }
+    };
+    let x0 = x_at_byte(spans, start, &width)?;
+    let x1 = x_at_byte(spans, end, &width)?;
+    (x1 > x0).then_some((x0, x1))
+}
+
+/// x offset of byte `at` of the line made of `spans`: the width of every
+/// span before it plus the part of the span it falls in. `None` when `at`
+/// is past the line or not on a char boundary.
+fn x_at_byte(spans: &HighlightedLine, at: usize, width: &dyn Fn(&str) -> f32) -> Option<f32> {
+    let mut x = 0.0;
+    let mut offset = 0;
+    for (_, text) in spans {
+        if at <= offset + text.len() {
+            return Some(x + width(text.get(..at - offset)?));
+        }
+        x += width(text);
+        offset += text.len();
+    }
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -632,5 +689,46 @@ mod tests {
         assert_eq!(visual_width("\tx"), 5);
         assert_eq!(visual_width("\t\t"), 8);
         assert_eq!(visual_width("olá"), 3, "counts chars, not bytes");
+    }
+
+    #[test]
+    fn x_at_byte_sums_spans_before_the_byte_and_part_of_its_span() {
+        let style = syntect::highlighting::Style::default();
+        let line: HighlightedLine = vec![
+            (style, "pub ".into()),
+            (style, "struct".into()),
+            (style, " Café {\n".into()),
+        ];
+        let cols = |s: &str| visual_width(s.trim_end_matches(['\n', '\r'])) as f32;
+        assert_eq!(x_at_byte(&line, 0, &cols), Some(0.0));
+        assert_eq!(x_at_byte(&line, 4, &cols), Some(4.0), "span boundary");
+        assert_eq!(x_at_byte(&line, 6, &cols), Some(6.0), "inside a span");
+        assert_eq!(x_at_byte(&line, 11, &cols), Some(11.0));
+        assert_eq!(x_at_byte(&line, 16, &cols), Some(15.0), "é is one column, two bytes");
+        assert_eq!(x_at_byte(&line, 15, &cols), None, "not a char boundary");
+        assert_eq!(x_at_byte(&line, 99, &cols), None, "past the line");
+    }
+
+    #[test]
+    fn name_mark_lines_up_with_the_drawn_glyphs() {
+        let style = syntect::highlighting::Style::default();
+        let text = "    pub struct SpatialCodingApp {\n";
+        let line: HighlightedLine = ["    ", "pub", " ", "struct", " ", "SpatialCodingApp", " {\n"]
+            .into_iter()
+            .map(|s| (style, s.to_string()))
+            .collect();
+        let (start, end) = (15, 31);
+        let font_px = 23.0;
+        let ctx = egui::Context::default();
+        let _ = ctx.run(egui::RawInput::default(), |ctx| {
+            let painter = egui::Painter::new(ctx.clone(), egui::LayerId::background(), egui::Rect::EVERYTHING);
+            let (x0, x1) = name_x_range(&painter, LodLevel::Full, &line, start, end, font_px).unwrap();
+            let galley = painter.layout_no_wrap(text.trim_end().to_string(), code_font(font_px), egui::Color32::WHITE);
+            // Whole-line glyphs snap to pixels while the drawn spans are
+            // summed, so allow 1 px; the old 0.6-advance guess was ~40 px off.
+            let glyph_x = |i| galley.pos_from_ccursor(egui::text::CCursor::new(i)).min.x;
+            assert!((x0 - glyph_x(start)).abs() <= 1.0, "start {x0} vs glyph {}", glyph_x(start));
+            assert!((x1 - glyph_x(end)).abs() <= 1.0, "end {x1} vs glyph {}", glyph_x(end));
+        });
     }
 }
