@@ -160,3 +160,53 @@ fn a_missing_server_explains_how_to_configure_it() {
 
     app.get_by_label_contains("No Rust language server found on PATH (tried rust-analyzer)");
 }
+
+#[test]
+fn scrolled_lsp_rows_keep_correct_hover_and_pointer_click_bounds() {
+    let fx = fixture();
+    let content: String = (0..35)
+        .map(|i| format!("pub fn symbol_{i}() {{}}\n"))
+        .collect();
+    std::fs::write(fx.path("src/util.rs"), content).unwrap();
+    let mut app = app_with_fake_lsp(&fx);
+    let node = app.open(&fx.path("src/util.rs"));
+    app.set_size(egui::vec2(1400.0, 400.0));
+    app.app_state_mut().left_panel = None;
+    app.app_state_mut().selection.select(node);
+    app.app_state_mut().right_panel = Some(RightPanel::LspSymbols);
+    settle(&mut app);
+
+    wheel(
+        &mut app,
+        Pos2::new(1200.0, 250.0),
+        egui::vec2(0.0, -10000.0),
+        Modifiers::NONE,
+    );
+    let label = "fn symbol_34  L35";
+    let bounds = app.get_by_label(label).raw_bounds().unwrap();
+    assert!(
+        bounds.y0 > 60.0 && bounds.y1 < 400.0,
+        "last symbol is visible: {bounds:?}"
+    );
+    app.get_by_label(label).hover();
+    app.run();
+    assert_eq!(
+        app.app_state().lsp.hovered,
+        Some(LineHighlight {
+            node_id: node,
+            start_line: 34,
+            end_line: 34,
+        })
+    );
+
+    let center = Pos2::new(
+        ((bounds.x0 + bounds.x1) * 0.5) as f32,
+        ((bounds.y0 + bounds.y1) * 0.5) as f32,
+    );
+    click_at(&mut app, center, Modifiers::NONE);
+    settle(&mut app);
+    assert_eq!(
+        app.app_state().lsp.references.as_ref().unwrap().symbol,
+        "symbol_34"
+    );
+}

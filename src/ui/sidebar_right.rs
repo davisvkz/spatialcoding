@@ -1,5 +1,5 @@
 //! Right side: thin icon rail (Layout / LSP / Edges / Folders / Files / CST /
-//! Agent / Perf) plus a floating overlay panel for the active entry.
+//! Agent / Perf) plus a docked panel with a fixed header and scrollable body.
 
 use crate::analysis::dependencies::indexer::ServerProgress;
 use crate::analysis::lsp::manager::ServerStatus;
@@ -7,7 +7,9 @@ use crate::edges::style::{EdgeStyle, GradientGapMode, OpacityMode};
 use crate::layout::settings::{HAlign, SortMode, VAlign};
 use crate::state::{AppState, RightPanel};
 use crate::ui::icons;
-use crate::ui::panel::{bubble_frame, panel_header, panel_slot_frame, rail_frame, section, PANEL_WIDTH, RAIL_WIDTH};
+use crate::ui::panel::{
+    bubble_frame, panel_header, panel_slot_frame, rail_frame, section, PANEL_WIDTH, RAIL_WIDTH,
+};
 use crate::ui::{agent_panel, cst_panel, files_panel, folders_panel, lsp_panel, performance_panel};
 
 const PANELS: &[(&str, &str, RightPanel)] = &[
@@ -72,18 +74,23 @@ pub fn draw_sidebar_right(ctx: &egui::Context, state: &mut AppState) {
                 if panel_header(ui, icon_ch, title) {
                     state.right_panel = None;
                 }
-                // No outer ScrollArea (decision-18): it broke AccessKit hover
-                // bounds on LSP rows. Each panel scrolls on its own.
-                match panel {
-                    RightPanel::Layout => draw_layout_panel(ui, state),
-                    RightPanel::LspSymbols => lsp_panel::draw_lsp_panel(ui, state),
-                    RightPanel::DependencyEdges => draw_edges_panel(ui, state),
-                    RightPanel::Folders => folders_panel::draw_folders_panel(ui, state),
-                    RightPanel::FileNodes => files_panel::draw_files_panel(ui, state),
-                    RightPanel::Cst => cst_panel::draw_cst_panel(ui, state),
-                    RightPanel::AgentNotes => agent_panel::draw_agent_panel(ui, state),
-                    RightPanel::Performance => performance_panel::draw_performance_panel(ui, state),
-                }
+                // Each tab keeps its own offset. The header stays outside the
+                // scroll area, and the docked SidePanel captures wheel input.
+                egui::ScrollArea::vertical()
+                    .id_salt(("right_panel_body", title))
+                    .auto_shrink([false, false])
+                    .show(ui, |ui| match panel {
+                        RightPanel::Layout => draw_layout_panel(ui, state),
+                        RightPanel::LspSymbols => lsp_panel::draw_lsp_panel(ui, state),
+                        RightPanel::DependencyEdges => draw_edges_panel(ui, state),
+                        RightPanel::Folders => folders_panel::draw_folders_panel(ui, state),
+                        RightPanel::FileNodes => files_panel::draw_files_panel(ui, state),
+                        RightPanel::Cst => cst_panel::draw_cst_panel(ui, state),
+                        RightPanel::AgentNotes => agent_panel::draw_agent_panel(ui, state),
+                        RightPanel::Performance => {
+                            performance_panel::draw_performance_panel(ui, state)
+                        }
+                    });
             });
         });
 }
@@ -161,7 +168,9 @@ pub fn progress_line(p: &ServerProgress) -> (String, bool) {
         Some(ServerStatus::Starting) | None => format!("{name}: starting\u{2026} {counts}"),
         Some(ServerStatus::Indexing) => format!("{name}: indexing\u{2026} {counts}"),
         Some(ServerStatus::Failed(ref err)) => return (format!("{name}: {err}"), true),
-        Some(ServerStatus::Ready) if p.done == p.files => format!("{name}: {} files analyzed", p.files),
+        Some(ServerStatus::Ready) if p.done == p.files => {
+            format!("{name}: {} files analyzed", p.files)
+        }
         Some(ServerStatus::Ready) => format!("{name}: {counts}"),
     };
     (text, false)
@@ -194,15 +203,29 @@ fn draw_edges_panel(ui: &mut egui::Ui, state: &mut AppState) {
 
     section(ui, "Opacity", |ui| {
         ui.horizontal(|ui| {
-            ui.radio_value(&mut state.edge_style.opacity_mode, OpacityMode::Full, "Full");
-            ui.radio_value(&mut state.edge_style.opacity_mode, OpacityMode::Depth, "Depth");
+            ui.radio_value(
+                &mut state.edge_style.opacity_mode,
+                OpacityMode::Full,
+                "Full",
+            );
+            ui.radio_value(
+                &mut state.edge_style.opacity_mode,
+                OpacityMode::Depth,
+                "Depth",
+            );
         });
     });
 
     section(ui, "Visibility", |ui| {
         ui.checkbox(&mut state.edge_style.show_all, "Show All");
-        ui.checkbox(&mut state.edge_style.highlight_backwards, "Highlight Backwards");
-        ui.checkbox(&mut state.edge_style.show_connection_markers, "Connection Markers");
+        ui.checkbox(
+            &mut state.edge_style.highlight_backwards,
+            "Highlight Backwards",
+        );
+        ui.checkbox(
+            &mut state.edge_style.show_connection_markers,
+            "Connection Markers",
+        );
         ui.checkbox(&mut state.edge_style.show_arrow_heads, "Arrow Heads");
         ui.checkbox(&mut state.edge_style.only_selected, "Only Selected")
             .on_hover_text("Arrow heads only on the edges of the selection");
@@ -210,24 +233,41 @@ fn draw_edges_panel(ui: &mut egui::Ui, state: &mut AppState) {
             .on_hover_text("Symbol name at both ends of the selection's edges");
         ui.checkbox(&mut state.edge_style.scale_arrow_heads, "Scale Arrow Heads");
         ui.label("Min Size %");
-        ui.add(egui::Slider::new(&mut state.edge_style.min_size_pct, 0.0..=1.0));
+        ui.add(egui::Slider::new(
+            &mut state.edge_style.min_size_pct,
+            0.0..=1.0,
+        ));
     });
 
     section(ui, "Gradient", |ui| {
         ui.checkbox(&mut state.edge_style.use_gradient, "Use Gradient");
         if state.edge_style.use_gradient {
             ui.horizontal(|ui| {
-                ui.radio_value(&mut state.edge_style.gradient_gap_mode, GradientGapMode::Percent, "%");
-                ui.radio_value(&mut state.edge_style.gradient_gap_mode, GradientGapMode::Fixed, "Fixed");
+                ui.radio_value(
+                    &mut state.edge_style.gradient_gap_mode,
+                    GradientGapMode::Percent,
+                    "%",
+                );
+                ui.radio_value(
+                    &mut state.edge_style.gradient_gap_mode,
+                    GradientGapMode::Fixed,
+                    "Fixed",
+                );
             });
             match state.edge_style.gradient_gap_mode {
                 GradientGapMode::Percent => {
                     ui.label("Gap %");
-                    ui.add(egui::Slider::new(&mut state.edge_style.gradient_gap_pct, 0.0..=1.0));
+                    ui.add(egui::Slider::new(
+                        &mut state.edge_style.gradient_gap_pct,
+                        0.0..=1.0,
+                    ));
                 }
                 GradientGapMode::Fixed => {
                     ui.label("Min Dist (px)");
-                    ui.add(egui::Slider::new(&mut state.edge_style.gradient_min_dist_px, 0.0..=1000.0));
+                    ui.add(egui::Slider::new(
+                        &mut state.edge_style.gradient_min_dist_px,
+                        0.0..=1000.0,
+                    ));
                 }
             }
         }
@@ -254,7 +294,8 @@ fn draw_edges_panel(ui: &mut egui::Ui, state: &mut AppState) {
     egui::CollapsingHeader::new("Symbol Colors")
         .default_open(true)
         .show(ui, |ui| {
-            let mut counts: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
+            let mut counts: std::collections::HashMap<&str, usize> =
+                std::collections::HashMap::new();
             for e in state.edge_store.all_edges() {
                 if let Some(label) = &e.label {
                     *counts.entry(label.as_str()).or_default() += 1;
@@ -293,7 +334,10 @@ mod tests {
         let mut canvas = egui::Rect::NOTHING;
         for _ in 0..3 {
             let input = egui::RawInput {
-                screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1280.0, 800.0))),
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(1280.0, 800.0),
+                )),
                 ..Default::default()
             };
             let _ = ctx.run(input, |ctx| {
@@ -329,12 +373,28 @@ mod tests {
     #[test]
     fn progress_line_reports_indexing_counts_and_errors() {
         let name = ServerId::Rust.name();
-        assert_eq!(progress_line(&progress(1, Some(ServerStatus::Indexing), None)), (format!("{name}: indexing\u{2026} 1/3 files"), false));
-        assert_eq!(progress_line(&progress(0, None, None)).0, format!("{name}: starting\u{2026} 0/3 files"));
-        assert_eq!(progress_line(&progress(3, Some(ServerStatus::Ready), None)).0, format!("{name}: 3 files analyzed"));
-        assert_eq!(progress_line(&progress(2, Some(ServerStatus::Ready), None)).0, format!("{name}: 2/3 files"));
         assert_eq!(
-            progress_line(&progress(3, Some(ServerStatus::Failed("x".into())), Some("not found\nhint"))),
+            progress_line(&progress(1, Some(ServerStatus::Indexing), None)),
+            (format!("{name}: indexing\u{2026} 1/3 files"), false)
+        );
+        assert_eq!(
+            progress_line(&progress(0, None, None)).0,
+            format!("{name}: starting\u{2026} 0/3 files")
+        );
+        assert_eq!(
+            progress_line(&progress(3, Some(ServerStatus::Ready), None)).0,
+            format!("{name}: 3 files analyzed")
+        );
+        assert_eq!(
+            progress_line(&progress(2, Some(ServerStatus::Ready), None)).0,
+            format!("{name}: 2/3 files")
+        );
+        assert_eq!(
+            progress_line(&progress(
+                3,
+                Some(ServerStatus::Failed("x".into())),
+                Some("not found\nhint")
+            )),
             (format!("{name}: not found"), true)
         );
     }
