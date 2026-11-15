@@ -300,10 +300,12 @@ impl DependencyIndexer {
                     symbol.name_end,
                 );
                 for (source, usage) in usages(target, references, open, &mut finder) {
+                    let source_label = self.enclosing_symbol_label(&source, usage.start);
                     out.push(DependencyLink {
                         source,
                         target: target.clone(),
                         label: symbol.label.clone(),
+                        source_label,
                         usage,
                         definition: symbol.definition,
                         name_span,
@@ -312,6 +314,29 @@ impl DependencyIndexer {
             }
         }
         out
+    }
+
+    /// Kind label of the picked symbol in `source` whose definition encloses
+    /// `line`, for the bi-color gradient. Innermost wins (a method inside a
+    /// struct), falling back to the enclosing top-level symbol.
+    fn enclosing_symbol_label(&self, source: &Path, line: usize) -> Option<String> {
+        let entry = self.files.get(source)?;
+        let Some(Ok(symbols)) = &entry.symbols else {
+            return None;
+        };
+        let mut best: Option<&SymbolEntry> = None;
+        for sym in symbols {
+            if sym.definition.start <= line && line <= sym.definition.end {
+                let span = sym.definition.end.saturating_sub(sym.definition.start);
+                let best_span = best
+                    .map(|b| b.definition.end.saturating_sub(b.definition.start))
+                    .unwrap_or(usize::MAX);
+                if span <= best_span {
+                    best = Some(sym);
+                }
+            }
+        }
+        best.map(|s| s.label.clone())
     }
 
     /// Converts the symbol's selection_range (UTF-16 positions) to

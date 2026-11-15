@@ -16,6 +16,17 @@ pub enum OpacityMode {
     Depth,
 }
 
+/// How the gradient fade length is measured, matching the v2 Code Canvas
+/// "Gradient Gap" control.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum GradientGapMode {
+    /// Percentage of the edge's drawn length (0..=1).
+    Percent,
+    /// Drop by a fixed world-pixel amount from the total; edges shorter than
+    /// `gradient_min_dist_px` are drawn solid in the target color.
+    Fixed,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EdgeStyleConfig {
     pub style: EdgeStyle,
@@ -28,9 +39,48 @@ pub struct EdgeStyleConfig {
     pub scale_arrow_heads: bool,
     pub min_size_pct: f32,
     pub use_gradient: bool,
+    #[serde(default = "default_gradient_gap_mode")]
+    pub gradient_gap_mode: GradientGapMode,
+    #[serde(default = "default_gradient_gap_pct")]
+    pub gradient_gap_pct: f32,
+    #[serde(default = "default_gradient_min_dist_px")]
+    pub gradient_min_dist_px: f32,
     pub base_color: [f32; 3],
     #[serde(default = "default_symbol_colors")]
     pub symbol_colors: HashMap<String, [f32; 3]>,
+    #[serde(default = "default_true")]
+    pub show_reexport_edges: bool,
+    #[serde(default = "default_true")]
+    pub show_barrel_edges: bool,
+    #[serde(default)]
+    pub highlight_reexport: bool,
+    #[serde(default)]
+    pub highlight_barrel: bool,
+    #[serde(default = "default_reexport_color")]
+    pub reexport_color: [f32; 3],
+    #[serde(default = "default_barrel_color")]
+    pub barrel_color: [f32; 3],
+}
+
+fn default_gradient_gap_mode() -> GradientGapMode {
+    GradientGapMode::Percent
+}
+fn default_gradient_gap_pct() -> f32 {
+    0.8
+}
+fn default_gradient_min_dist_px() -> f32 {
+    40.0
+}
+fn default_true() -> bool {
+    true
+}
+fn default_reexport_color() -> [f32; 3] {
+    // Warm amber: lifted from v2's re-export highlight hue.
+    [0.98, 0.72, 0.30]
+}
+fn default_barrel_color() -> [f32; 3] {
+    // Cool cyan: distinct from re-export amber so the two highlight at once.
+    [0.37, 0.80, 0.98]
 }
 
 pub fn default_symbol_colors() -> HashMap<String, [f32; 3]> {
@@ -80,9 +130,18 @@ impl Default for EdgeStyleConfig {
             scale_arrow_heads: false,
             min_size_pct: 0.5,
             use_gradient: false,
+            gradient_gap_mode: default_gradient_gap_mode(),
+            gradient_gap_pct: default_gradient_gap_pct(),
+            gradient_min_dist_px: default_gradient_min_dist_px(),
             // Warm cream, close to v2 Code Canvas edge tone.
             base_color: [0.88, 0.86, 0.80],
             symbol_colors: default_symbol_colors(),
+            show_reexport_edges: true,
+            show_barrel_edges: true,
+            highlight_reexport: false,
+            highlight_barrel: false,
+            reexport_color: default_reexport_color(),
+            barrel_color: default_barrel_color(),
         }
     }
 }

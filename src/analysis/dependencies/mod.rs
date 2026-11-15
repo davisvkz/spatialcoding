@@ -5,6 +5,7 @@
 //! A reference in another open file becomes a link from the statement around
 //! it ([`statements`]) to the symbol's definition.
 
+pub mod classify;
 pub mod indexer;
 mod statements;
 
@@ -50,6 +51,9 @@ pub struct DependencyLink {
     pub target: PathBuf,
     /// The symbol's kind, e.g. `fn` or `struct`.
     pub label: String,
+    /// Kind of the picked symbol in `source` that contains `usage`; `None`
+    /// when the usage is at file scope. Feeds the bi-color gradient.
+    pub source_label: Option<String>,
     pub usage: LineSpan,
     pub definition: LineSpan,
     /// The symbol name's position: `(line, start_byte, end_byte)` within the

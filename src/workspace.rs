@@ -210,23 +210,50 @@ pub fn poll_lsp(state: &mut AppState) {
 }
 
 /// Replaces the edges with one per link the indexer knows between open files.
+/// Classifies each link as Direct / ReExport / Barrel for the v2-aligned
+/// Dependency Edges panel.
 fn apply_dependency_edges(state: &mut AppState) {
+    use crate::analysis::dependencies::classify::{classify_link, promote_barrels};
+    use crate::edges::edge_store::NameSpan;
+
     let nodes = &state.node_store.file_nodes;
     let open = OpenFiles::new(nodes.values().map(|n| (n.path.as_path(), n.content.as_str())));
     let ids: HashMap<&Path, u64> = nodes.values().map(|n| (n.path.as_path(), n.id)).collect();
+    let texts: HashMap<&Path, &str> = nodes
+        .values()
+        .map(|n| (n.path.as_path(), n.content.as_str()))
+        .collect();
+
+    let links = state.deps.links(&open);
+    // Per-link classification, then a barrel promotion pass.
+    let mut kinds: Vec<_> = links
+        .iter()
+        .map(|link| match texts.get(link.source.as_path()) {
+            Some(text) => classify_link(link, text),
+            None => crate::edges::edge_store::EdgeKind::Direct,
+        })
+        .collect();
+    let sources: Vec<&Path> = links.iter().map(|l| l.source.as_path()).collect();
+    kinds = promote_barrels(&kinds, &sources);
+
     state.edge_store.clear();
-    for link in state.deps.links(&open) {
+    for (link, kind) in links.into_iter().zip(kinds) {
         if let (Some(&src), Some(&tgt)) = (ids.get(link.source.as_path()), ids.get(link.target.as_path())) {
-            let name_span = link.name_span.map(|(line, start, end)| {
-                crate::edges::edge_store::NameSpan {
-                    line,
-                    start_byte: start,
-                    end_byte: end,
-                }
+            let name_span = link.name_span.map(|(line, start, end)| NameSpan {
+                line,
+                start_byte: start,
+                end_byte: end,
             });
-            state
-                .edge_store
-                .add_spanned(src, tgt, Some(link.label), Some(link.usage), Some(link.definition), name_span);
+            state.edge_store.add_full(
+                src,
+                tgt,
+                Some(link.label),
+                link.source_label,
+                Some(link.usage),
+                Some(link.definition),
+                name_span,
+                kind,
+            );
         }
     }
 }

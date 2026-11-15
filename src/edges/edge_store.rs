@@ -11,18 +11,40 @@ pub struct NameSpan {
     pub end_byte: usize,
 }
 
+/// Classification of a dependency edge for the "Re-export & Barrel" toggles
+/// of the v2 Code Canvas Dependency Edges panel.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum EdgeKind {
+    /// Ordinary reference: the source statement names the target symbol.
+    #[default]
+    Direct,
+    /// Source statement is a re-export of the target (`pub use`,
+    /// `export ... from`, `from X import Y` with `__all__`).
+    ReExport,
+    /// Source file is a barrel (`index.{ts,tsx,js,jsx,mjs,cjs}`,
+    /// `mod.rs`, `__init__.py`) and accumulates several re-exports.
+    Barrel,
+}
+
 #[derive(Debug, Clone)]
 pub struct Edge {
     pub id: u64,
     pub source_node: u64,
     pub target_node: u64,
+    /// Kind of the symbol defined in the target file.
     pub label: Option<String>,
+    /// Kind of the symbol containing the source statement, for the v2
+    /// bi-color gradient (source-kind → target-kind). `None` when the usage
+    /// is not inside a picked symbol.
+    pub source_label: Option<String>,
     /// Statement of the source the edge starts at; `None`: the whole node.
     pub source_span: Option<LineSpan>,
     /// Statement of the target the edge ends at; `None`: the node header.
     pub target_span: Option<LineSpan>,
     /// Column span of the symbol name on the definition side.
     pub name_span: Option<NameSpan>,
+    /// Classification for the re-export / barrel toggles.
+    pub kind: EdgeKind,
 }
 
 /// One span to highlight on a file node, with the kind for color lookup
@@ -64,6 +86,33 @@ impl EdgeStore {
         target_span: Option<LineSpan>,
         name_span: Option<NameSpan>,
     ) -> u64 {
+        self.add_full(
+            source,
+            target,
+            label,
+            None,
+            source_span,
+            target_span,
+            name_span,
+            EdgeKind::Direct,
+        )
+    }
+
+    /// Adds an edge carrying every v2 Code Canvas field: the two kinds
+    /// (source/target) for the bi-color gradient, and the re-export/barrel
+    /// classification for the sidebar toggles.
+    #[allow(clippy::too_many_arguments)]
+    pub fn add_full(
+        &mut self,
+        source: u64,
+        target: u64,
+        label: Option<String>,
+        source_label: Option<String>,
+        source_span: Option<LineSpan>,
+        target_span: Option<LineSpan>,
+        name_span: Option<NameSpan>,
+        kind: EdgeKind,
+    ) -> u64 {
         let id = self.next_id;
         self.next_id += 1;
         self.edges.insert(
@@ -73,9 +122,11 @@ impl EdgeStore {
                 source_node: source,
                 target_node: target,
                 label,
+                source_label,
                 source_span,
                 target_span,
                 name_span,
+                kind,
             },
         );
         id

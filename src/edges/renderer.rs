@@ -4,8 +4,8 @@ use egui::{Color32, Pos2, Rect, Stroke, Vec2};
 
 use crate::analysis::dependencies::LineSpan;
 use crate::canvas::viewport::Viewport;
-use crate::edges::edge_store::EdgeStore;
-use crate::edges::style::{EdgeStyle, EdgeStyleConfig, OpacityMode};
+use crate::edges::edge_store::{EdgeKind, EdgeStore};
+use crate::edges::style::{EdgeStyle, EdgeStyleConfig, GradientGapMode, OpacityMode};
 use crate::nodes::file_node::{FileNode, HEADER_HEIGHT};
 use crate::nodes::node_store::NodeStore;
 
@@ -37,6 +37,11 @@ pub fn draw_edges(
     let min_len_px = config.min_size_pct * MIN_VISIBLE_LEN_PX;
 
     for edge in edges.all_edges() {
+        match edge.kind {
+            EdgeKind::ReExport if !config.show_reexport_edges => continue,
+            EdgeKind::Barrel if !config.show_barrel_edges => continue,
+            _ => {}
+        }
         let src = match nodes.get_file(edge.source_node) {
             Some(n) => n,
             None => continue,
@@ -83,19 +88,27 @@ pub fn draw_edges(
 
         let base_color = if config.highlight_backwards && is_tgt_sel && !is_src_sel {
             BACKWARDS_COLOR
+        } else if config.highlight_barrel && edge.kind == EdgeKind::Barrel {
+            rgb(config.barrel_color)
+        } else if config.highlight_reexport && edge.kind == EdgeKind::ReExport {
+            rgb(config.reexport_color)
         } else {
-            Color32::from_rgb(
-                (config.base_color[0] * 255.0) as u8,
-                (config.base_color[1] * 255.0) as u8,
-                (config.base_color[2] * 255.0) as u8,
-            )
+            rgb(config.base_color)
         };
         let color = base_color.gamma_multiply(alpha as f32 / 255.0);
         let stroke = Stroke::new(stroke_px, color);
 
         // Direction the edge arrives from, for the arrow head.
         let mut arrives_from = src_screen;
-        let use_gradient = config.use_gradient && edge.label.is_some();
+        // Gradient disabled for highlight overrides: those pick a fixed
+        // color that must stay readable end to end.
+        let highlight_override = (config.highlight_backwards && is_tgt_sel && !is_src_sel)
+            || (config.highlight_barrel && edge.kind == EdgeKind::Barrel)
+            || (config.highlight_reexport && edge.kind == EdgeKind::ReExport);
+        let use_gradient = config.use_gradient && edge.label.is_some() && !highlight_override;
+        let (start_col, end_col) = gradient_endpoints(config, edge);
+        let span_len = (tgt_screen - src_screen).length();
+        let fade_frac = gradient_fade_fraction(config, span_len);
         match config.style {
             EdgeStyle::Bezier => {
                 let [_, _, cp2, _] = bezier_points(src_screen, src_dir, tgt_screen, tgt_dir);
@@ -103,15 +116,36 @@ pub fn draw_edges(
                 if use_gradient {
                     draw_bezier_gradient(
                         painter, src_screen, src_dir, tgt_screen, tgt_dir,
-                        stroke_px, alpha, kind_color_for(config, edge.label.as_deref()),
+                        stroke_px, alpha, start_col, end_col, fade_frac,
                     );
                 } else {
                     draw_bezier(painter, src_screen, src_dir, tgt_screen, tgt_dir, stroke);
                 }
             }
-            EdgeStyle::Step => draw_step(painter, src_screen, tgt_screen, stroke),
-            EdgeStyle::Line => { painter.line_segment([src_screen, tgt_screen], stroke); }
-            EdgeStyle::Pcb => draw_pcb(painter, src_screen, tgt_screen, stroke),
+            EdgeStyle::Step => {
+                if use_gradient {
+                    draw_polyline_gradient(painter, &step_points(src_screen, tgt_screen),
+                        stroke_px, alpha, start_col, end_col, fade_frac);
+                } else {
+                    draw_step(painter, src_screen, tgt_screen, stroke);
+                }
+            }
+            EdgeStyle::Line => {
+                if use_gradient {
+                    draw_polyline_gradient(painter, &[src_screen, tgt_screen],
+                        stroke_px, alpha, start_col, end_col, fade_frac);
+                } else {
+                    painter.line_segment([src_screen, tgt_screen], stroke);
+                }
+            }
+            EdgeStyle::Pcb => {
+                if use_gradient {
+                    draw_polyline_gradient(painter, &pcb_points(src_screen, tgt_screen),
+                        stroke_px, alpha, start_col, end_col, fade_frac);
+                } else {
+                    draw_pcb(painter, src_screen, tgt_screen, stroke);
+                }
+            }
         }
 
         if config.show_connection_markers {
@@ -166,12 +200,48 @@ fn compute_alpha(config: &EdgeStyleConfig, is_connected: bool, nothing_selected:
 fn kind_color_for(config: &EdgeStyleConfig, label: Option<&str>) -> Color32 {
     match label {
         Some(l) => config.kind_color(l),
-        None => Color32::from_rgb(
-            (config.base_color[0] * 255.0) as u8,
-            (config.base_color[1] * 255.0) as u8,
-            (config.base_color[2] * 255.0) as u8,
-        ),
+        None => rgb(config.base_color),
     }
+}
+
+fn rgb(c: [f32; 3]) -> Color32 {
+    Color32::from_rgb((c[0] * 255.0) as u8, (c[1] * 255.0) as u8, (c[2] * 255.0) as u8)
+}
+
+/// Source and target colors for the bi-color gradient. The source color
+/// falls back to the base (edge cream) when the source symbol kind is
+/// unknown, so the fade still starts somewhere visible.
+fn gradient_endpoints(
+    config: &EdgeStyleConfig,
+    edge: &crate::edges::edge_store::Edge,
+) -> (Color32, Color32) {
+    let end = kind_color_for(config, edge.label.as_deref());
+    let start = match edge.source_label.as_deref() {
+        Some(l) => config.kind_color(l),
+        None => rgb(config.base_color),
+    };
+    (start, end)
+}
+
+/// Fraction of the drawn span that fades between start and end colors. The
+/// solid tail at each end gets `(1 - frac) / 2` of the length, matching the
+/// v2 Code Canvas Gradient Gap control.
+pub(crate) fn gradient_fade_fraction(config: &EdgeStyleConfig, span_len_px: f32) -> f32 {
+    if !config.use_gradient || span_len_px <= 0.0 {
+        return 1.0;
+    }
+    let raw = match config.gradient_gap_mode {
+        GradientGapMode::Percent => config.gradient_gap_pct,
+        GradientGapMode::Fixed => {
+            if span_len_px <= config.gradient_min_dist_px {
+                // Edges shorter than the min distance draw solid in the
+                // target color: the gradient would be imperceptible anyway.
+                return 0.0;
+            }
+            (span_len_px - config.gradient_min_dist_px) / span_len_px
+        }
+    };
+    raw.clamp(0.0, 1.0)
 }
 
 /// Cubic bezier leaving `from` and entering `to` horizontally, each control
@@ -215,10 +285,11 @@ fn draw_bezier(
     painter.add(bezier);
 }
 
-/// Segmented bezier: each segment interpolates the kind color from
-/// `end_color` (always the source-side tone here, since v2 shows the edge
-/// settling into the target tone) to itself, giving a soft two-tone fade
-/// when the base color differs from the kind color.
+/// Segmented bezier: interpolates `start_color` → `end_color` across 32
+/// segments. `fade_frac` is the portion of the span that carries the fade;
+/// outside it the tone stays solid (source at the start, target at the end),
+/// matching the v2 Code Canvas Gradient Gap control.
+#[allow(clippy::too_many_arguments)]
 fn draw_bezier_gradient(
     painter: &egui::Painter,
     from: Pos2,
@@ -227,20 +298,81 @@ fn draw_bezier_gradient(
     to_dir: f32,
     stroke_px: f32,
     alpha: u8,
+    start_color: Color32,
     end_color: Color32,
+    fade_frac: f32,
 ) {
     const SEGMENTS: usize = 32;
     let pts = bezier_points(from, from_dir, to, to_dir);
-    let start = Color32::from_rgba_unmultiplied(end_color.r(), end_color.g(), end_color.b(), 0);
-    let end = Color32::from_rgba_unmultiplied(end_color.r(), end_color.g(), end_color.b(), alpha);
     let mut prev = pts[0];
     for i in 1..=SEGMENTS {
         let t = i as f32 / SEGMENTS as f32;
         let p = cubic(pts, t);
-        let c = lerp_color(start, end, t);
+        let c = gradient_sample(start_color, end_color, alpha, t, fade_frac);
         painter.line_segment([prev, p], Stroke::new(stroke_px, c));
         prev = p;
     }
+}
+
+/// Same gradient semantics as `draw_bezier_gradient` but across the segments
+/// of a straight polyline (`[A, corner, …, Z]`). `t` is taken by arc length
+/// so the fade lands at the right spot on L-shaped Step/PCB edges.
+fn draw_polyline_gradient(
+    painter: &egui::Painter,
+    pts: &[Pos2],
+    stroke_px: f32,
+    alpha: u8,
+    start_color: Color32,
+    end_color: Color32,
+    fade_frac: f32,
+) {
+    if pts.len() < 2 {
+        return;
+    }
+    let total: f32 = pts
+        .windows(2)
+        .map(|w| (w[1] - w[0]).length())
+        .sum();
+    if total <= 0.0 {
+        return;
+    }
+    let mut travelled = 0.0;
+    for w in pts.windows(2) {
+        let (a, b) = (w[0], w[1]);
+        let seg_len = (b - a).length();
+        let t0 = travelled / total;
+        let t1 = (travelled + seg_len) / total;
+        let c0 = gradient_sample(start_color, end_color, alpha, t0, fade_frac);
+        let c1 = gradient_sample(start_color, end_color, alpha, t1, fade_frac);
+        let mid = Pos2::new((a.x + b.x) * 0.5, (a.y + b.y) * 0.5);
+        let mid_col = lerp_color(c0, c1, 0.5);
+        // Draw two halves to keep the fade smooth across the corner.
+        painter.line_segment([a, mid], Stroke::new(stroke_px, c0));
+        painter.line_segment([mid, b], Stroke::new(stroke_px, mid_col));
+        let _ = c1;
+        travelled += seg_len;
+    }
+}
+
+/// Sample the bi-color fade at parameter `t ∈ [0,1]`. The fade lives in the
+/// centered window of width `fade_frac`; outside stays solid (start before,
+/// end after). All colors carry the edge's base `alpha`.
+pub(crate) fn gradient_sample(start: Color32, end: Color32, alpha: u8, t: f32, fade_frac: f32) -> Color32 {
+    let frac = fade_frac.clamp(0.0, 1.0);
+    let half_gap = (1.0 - frac) * 0.5;
+    let fade_start = half_gap;
+    let fade_end = 1.0 - half_gap;
+    let local = if t <= fade_start {
+        0.0
+    } else if t >= fade_end {
+        1.0
+    } else if (fade_end - fade_start) > f32::EPSILON {
+        (t - fade_start) / (fade_end - fade_start)
+    } else {
+        1.0
+    };
+    let mixed = lerp_color(start, end, local);
+    Color32::from_rgba_unmultiplied(mixed.r(), mixed.g(), mixed.b(), alpha)
 }
 
 fn lerp_color(a: Color32, b: Color32, t: f32) -> Color32 {
@@ -248,22 +380,28 @@ fn lerp_color(a: Color32, b: Color32, t: f32) -> Color32 {
     Color32::from_rgba_unmultiplied(l(a.r(), b.r()), l(a.g(), b.g()), l(a.b(), b.b()), l(a.a(), b.a()))
 }
 
-fn draw_step(painter: &egui::Painter, from: Pos2, to: Pos2, stroke: Stroke) {
+fn step_points(from: Pos2, to: Pos2) -> [Pos2; 4] {
     let mid_x = (from.x + to.x) * 0.5;
-    let p1 = Pos2::new(mid_x, from.y);
-    let p2 = Pos2::new(mid_x, to.y);
-    painter.line_segment([from, p1], stroke);
-    painter.line_segment([p1, p2], stroke);
-    painter.line_segment([p2, to], stroke);
+    [from, Pos2::new(mid_x, from.y), Pos2::new(mid_x, to.y), to]
+}
+
+fn pcb_points(from: Pos2, to: Pos2) -> [Pos2; 4] {
+    let mid_y = (from.y + to.y) * 0.5;
+    [from, Pos2::new(from.x, mid_y), Pos2::new(to.x, mid_y), to]
+}
+
+fn draw_step(painter: &egui::Painter, from: Pos2, to: Pos2, stroke: Stroke) {
+    let pts = step_points(from, to);
+    for w in pts.windows(2) {
+        painter.line_segment([w[0], w[1]], stroke);
+    }
 }
 
 fn draw_pcb(painter: &egui::Painter, from: Pos2, to: Pos2, stroke: Stroke) {
-    let mid_y = (from.y + to.y) * 0.5;
-    let p1 = Pos2::new(from.x, mid_y);
-    let p2 = Pos2::new(to.x, mid_y);
-    painter.line_segment([from, p1], stroke);
-    painter.line_segment([p1, p2], stroke);
-    painter.line_segment([p2, to], stroke);
+    let pts = pcb_points(from, to);
+    for w in pts.windows(2) {
+        painter.line_segment([w[0], w[1]], stroke);
+    }
 }
 
 fn draw_arrow_head(painter: &egui::Painter, from: Pos2, to: Pos2, color: Color32, arrow_size: f32) {
@@ -348,6 +486,45 @@ mod tests {
     fn full_opacity_ignores_selection() {
         let cfg = config(false, OpacityMode::Full);
         assert_eq!(compute_alpha(&cfg, false, true), 200);
+    }
+
+    #[test]
+    fn gradient_fade_percent_mode_returns_the_ratio_directly() {
+        let mut cfg = EdgeStyleConfig::default();
+        cfg.use_gradient = true;
+        cfg.gradient_gap_mode = GradientGapMode::Percent;
+        cfg.gradient_gap_pct = 0.6;
+        assert!((gradient_fade_fraction(&cfg, 200.0) - 0.6).abs() < 1e-5);
+    }
+
+    #[test]
+    fn gradient_fade_fixed_mode_drops_min_dist_then_normalizes() {
+        let mut cfg = EdgeStyleConfig::default();
+        cfg.use_gradient = true;
+        cfg.gradient_gap_mode = GradientGapMode::Fixed;
+        cfg.gradient_min_dist_px = 40.0;
+        // 200 - 40 = 160 of fade over 200 of span = 0.8
+        assert!((gradient_fade_fraction(&cfg, 200.0) - 0.8).abs() < 1e-5);
+        // span shorter than the min distance: fade collapses so the edge
+        // draws solid in the target color.
+        assert_eq!(gradient_fade_fraction(&cfg, 30.0), 0.0);
+    }
+
+    #[test]
+    fn gradient_fade_disabled_when_use_gradient_off() {
+        let cfg = EdgeStyleConfig::default();
+        assert_eq!(gradient_fade_fraction(&cfg, 200.0), 1.0);
+    }
+
+    #[test]
+    fn gradient_sample_is_start_before_fade_and_end_after() {
+        let a = Color32::from_rgb(200, 0, 0);
+        let b = Color32::from_rgb(0, 0, 200);
+        // fade_frac 0.5: solid A on 0..0.25, fade on 0.25..0.75, solid B on 0.75..1.
+        assert_eq!(gradient_sample(a, b, 255, 0.1, 0.5), Color32::from_rgba_unmultiplied(200, 0, 0, 255));
+        assert_eq!(gradient_sample(a, b, 255, 0.9, 0.5), Color32::from_rgba_unmultiplied(0, 0, 200, 255));
+        let mid = gradient_sample(a, b, 255, 0.5, 0.5);
+        assert_eq!(mid, Color32::from_rgba_unmultiplied(100, 0, 100, 255));
     }
 
     #[test]
