@@ -1,60 +1,112 @@
+//! Left side: a thin always-visible icon rail (Workspace / Changes / Search /
+//! Local Server) plus a floating overlay panel for the active entry. Footer of
+//! the rail holds Bug / Help / Settings / User shortcuts.
+
 use crate::fs::tree::TreeNode;
 use crate::state::{AppState, LeftPanel};
+use crate::ui::icons;
+use crate::ui::panel::{overlay_frame, panel_header, PANEL_WIDTH, RAIL_WIDTH};
+use crate::ui::{changes_panel, local_server_panel, search_panel};
+
+const PANELS: &[(&str, &str, LeftPanel)] = &[
+    (icons::FOLDER_TREE, "Workspace", LeftPanel::Workspace),
+    (icons::GIT_BRANCH, "Changes", LeftPanel::Changes),
+    (icons::SEARCH, "Search", LeftPanel::Search),
+    (icons::SERVER, "Local Server", LeftPanel::LocalServer),
+];
 
 pub fn draw_sidebar_left(
     ctx: &egui::Context,
     state: &mut AppState,
     tree: &mut Option<TreeNode>,
 ) {
-    egui::SidePanel::left("sidebar_left")
-        .default_width(280.0)
-        .width_range(180.0..=500.0)
-        .resizable(true)
+    // 1. The always-visible icon rail.
+    egui::SidePanel::left("sidebar_left_rail")
+        .exact_width(RAIL_WIDTH)
+        .resizable(false)
+        .show_separator_line(false)
         .show(ctx, |ui| {
-            ui.horizontal(|ui| {
-                for &tab in &[
-                    LeftPanel::Workspace,
-                    LeftPanel::Changes,
-                    LeftPanel::Search,
-                    LeftPanel::LocalServer,
-                ] {
-                    let label = match tab {
-                        LeftPanel::Workspace => "Workspace",
-                        LeftPanel::Changes => "Changes",
-                        LeftPanel::Search => "Search",
-                        LeftPanel::LocalServer => "Server",
-                    };
-                    let selected = state.left_panel == Some(tab);
-                    if ui.selectable_label(selected, label).clicked() {
-                        state.left_panel = Some(tab);
-                    }
+            ui.spacing_mut().item_spacing.y = 2.0;
+            ui.add_space(6.0);
+            for &(ch, label, panel) in PANELS {
+                let active = state.left_panel == Some(panel);
+                if icons::rail_icon_button(ui, ch, label, active).clicked() {
+                    state.left_panel = if active { None } else { Some(panel) };
                 }
-            });
-
-            ui.separator();
-
-            match state.left_panel {
-                Some(LeftPanel::Workspace) => {
-                    if let Some(root) = tree {
-                        egui::ScrollArea::vertical().show(ui, |ui| {
-                            draw_tree_node(ui, root, state);
-                        });
-                    } else {
-                        ui.label("No folder loaded");
-                    }
-                }
-                Some(LeftPanel::Changes) => {
-                    super::changes_panel::draw_changes_panel(ui);
-                }
-                Some(LeftPanel::Search) => {
-                    super::search_panel::draw_search_panel(ui);
-                }
-                Some(LeftPanel::LocalServer) => {
-                    ui.label("Not implemented");
-                }
-                None => {}
             }
+
+            // Footer actions at the bottom of the rail. Labels are
+            // rail-specific so they don't collide with the toolbar's own
+            // Settings/Help buttons in accessibility queries.
+            ui.with_layout(egui::Layout::bottom_up(egui::Align::Center), |ui| {
+                ui.add_space(6.0);
+                if icons::rail_icon_button(ui, icons::USER, "Account", false).clicked() {
+                    // TODO: user/account dialog.
+                }
+                if icons::rail_icon_button(ui, icons::SETTINGS, "App Preferences", state.show_settings)
+                    .clicked()
+                {
+                    state.show_settings = !state.show_settings;
+                }
+                if icons::rail_icon_button(ui, icons::HELP, "Help & Shortcuts", state.show_shortcuts).clicked()
+                {
+                    state.show_shortcuts = !state.show_shortcuts;
+                }
+                icons::rail_icon_button(ui, icons::BUG, "Report Bug", false);
+            });
         });
+
+    // 2. The floating overlay when a panel is active.
+    let Some(panel) = state.left_panel else {
+        return;
+    };
+    let theme = state.theme.clone();
+    let (icon_ch, title, _) = PANELS
+        .iter()
+        .copied()
+        .find(|(_, _, p)| *p == panel)
+        .expect("PANELS covers every LeftPanel variant");
+
+    egui::Area::new(egui::Id::new("sidebar_left_overlay"))
+        .fixed_pos(egui::pos2(RAIL_WIDTH + 4.0, 8.0))
+        .order(egui::Order::Foreground)
+        .show(ctx, |ui| {
+            ui.set_width(PANEL_WIDTH);
+            overlay_frame(&theme).show(ui, |ui| {
+                if panel_header(ui, icon_ch, title) {
+                    state.left_panel = None;
+                }
+                egui::ScrollArea::vertical()
+                    .max_height(ctx.screen_rect().height() - 60.0)
+                    .show(ui, |ui| match panel {
+                        LeftPanel::Workspace => draw_workspace(ui, state, tree),
+                        LeftPanel::Changes => changes_panel::draw_changes_panel(ui),
+                        LeftPanel::Search => search_panel::draw_search_panel(ui),
+                        LeftPanel::LocalServer => local_server_panel::draw_local_server_panel(ui, state),
+                    });
+            });
+        });
+}
+
+fn draw_workspace(ui: &mut egui::Ui, state: &mut AppState, tree: &mut Option<TreeNode>) {
+    let Some(root) = tree else {
+        ui.weak("No folder loaded");
+        return;
+    };
+    // v2 shows an "Open All N" CTA at the top of the Workspace panel.
+    let count = count_files_root(root);
+    if ui.button(format!("Open All {count}")).clicked() {
+        crate::workspace::open_all_files(state);
+    }
+    ui.add_space(6.0);
+    draw_tree_node(ui, root, state);
+}
+
+fn count_files_root(node: &TreeNode) -> usize {
+    match node {
+        TreeNode::File { .. } => 1,
+        TreeNode::Dir { children, .. } => count_files(children),
+    }
 }
 
 fn draw_tree_node(ui: &mut egui::Ui, node: &mut TreeNode, state: &mut AppState) {
@@ -70,7 +122,6 @@ fn draw_tree_node(ui: &mut egui::Ui, node: &mut TreeNode, state: &mut AppState) 
 
             let file_count = count_files(children);
             let header = format!("{name} ({file_count})");
-            // Keyed by path: folders with the same name must not share state.
             let id = ui.make_persistent_id(&*path);
             let (_, header_response, _) =
                 CollapsingState::load_with_default_open(ui.ctx(), id, *expanded)
@@ -81,8 +132,6 @@ fn draw_tree_node(ui: &mut egui::Ui, node: &mut TreeNode, state: &mut AppState) 
                         }
                     });
 
-            // The name toggles the folder too, not only the arrow. The open
-            // state lives in egui memory, so toggle it there.
             if let Some(mut collapsing) = CollapsingState::load(ui.ctx(), id) {
                 if header_response.inner {
                     collapsing.toggle(ui);

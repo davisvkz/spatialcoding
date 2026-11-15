@@ -68,6 +68,80 @@ pub struct AppState {
     pub pending_focus: Option<egui::Pos2>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum PerformanceMode {
+    Eager,
+    OnOpen,
+    Lazy,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct PerformanceSettings {
+    pub auto: bool,
+    pub mode: PerformanceMode,
+    pub use_sqlite: bool,
+    pub cst_depth_limit: Option<usize>,
+}
+
+impl Default for PerformanceSettings {
+    fn default() -> Self {
+        Self {
+            auto: true,
+            mode: PerformanceMode::Eager,
+            use_sqlite: false,
+            cst_depth_limit: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct FoldersSettings {
+    pub open_collapsed_by_default: bool,
+    pub auto_open: bool,
+    pub hide_folders: bool,
+    pub merge_empty: bool,
+    pub merge_overlapping_labels: bool,
+    pub show_folder_names: bool,
+    pub min_size_pct: f32,
+    pub diff_highlight: bool,
+}
+
+impl Default for FoldersSettings {
+    fn default() -> Self {
+        Self {
+            open_collapsed_by_default: false,
+            auto_open: true,
+            hide_folders: false,
+            merge_empty: true,
+            merge_overlapping_labels: true,
+            show_folder_names: true,
+            min_size_pct: 0.6,
+            diff_highlight: true,
+        }
+    }
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct FilesSettings {
+    pub skip_imports: bool,
+    pub collapse_long: bool,
+    pub long_max_lines: usize,
+    pub show_names: bool,
+    pub min_size_pct: f32,
+}
+
+impl Default for FilesSettings {
+    fn default() -> Self {
+        Self {
+            skip_imports: true,
+            collapse_long: false,
+            long_max_lines: 1000,
+            show_names: false,
+            min_size_pct: 0.5,
+        }
+    }
+}
+
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct AppSettings {
     pub smooth_zoom: bool,
@@ -78,6 +152,12 @@ pub struct AppSettings {
     pub font_size: f32,
     pub node_width: f32,
     pub show_dot_folders: bool,
+    #[serde(default)]
+    pub performance: PerformanceSettings,
+    #[serde(default)]
+    pub folders: FoldersSettings,
+    #[serde(default)]
+    pub files: FilesSettings,
 }
 
 impl Default for AppSettings {
@@ -91,6 +171,9 @@ impl Default for AppSettings {
             font_size: 12.0,
             node_width: 700.0,
             show_dot_folders: false,
+            performance: PerformanceSettings::default(),
+            folders: FoldersSettings::default(),
+            files: FilesSettings::default(),
         }
     }
 }

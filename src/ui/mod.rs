@@ -1,4 +1,6 @@
 pub mod theme;
+pub mod icons;
+pub mod panel;
 pub mod sidebar_left;
 pub mod sidebar_right;
 pub mod toolbar;
@@ -9,3 +11,8 @@ pub mod search_panel;
 pub mod changes_panel;
 pub mod cst_panel;
 pub mod lsp_panel;
+pub mod folders_panel;
+pub mod files_panel;
+pub mod agent_panel;
+pub mod performance_panel;
+pub mod local_server_panel;

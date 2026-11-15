@@ -1,83 +1,98 @@
+//! Right side: thin icon rail (Layout / LSP / Edges / Folders / Files / CST /
+//! Agent / Perf) plus a floating overlay panel for the active entry.
+
 use crate::analysis::dependencies::indexer::ServerProgress;
 use crate::analysis::lsp::manager::ServerStatus;
-use crate::edges::style::{EdgeStyle, OpacityMode};
+use crate::edges::style::{EdgeStyle, GradientGapMode, OpacityMode};
 use crate::layout::settings::{HAlign, SortMode, VAlign};
 use crate::state::{AppState, RightPanel};
-use crate::ui::{cst_panel, lsp_panel};
+use crate::ui::icons;
+use crate::ui::panel::{overlay_frame, panel_header, section, PANEL_WIDTH, RAIL_WIDTH};
+use crate::ui::{agent_panel, cst_panel, files_panel, folders_panel, lsp_panel, performance_panel};
 
-const PANELS: &[(&str, RightPanel)] = &[
-    ("Layout", RightPanel::Layout),
-    ("LSP", RightPanel::LspSymbols),
-    ("Edges", RightPanel::DependencyEdges),
-    ("Folders", RightPanel::Folders),
-    ("Files", RightPanel::FileNodes),
-    ("CST", RightPanel::Cst),
-    ("Agent", RightPanel::AgentNotes),
-    ("Perf", RightPanel::Performance),
+const PANELS: &[(&str, &str, RightPanel)] = &[
+    (icons::LAYOUT, "Layout", RightPanel::Layout),
+    (icons::SYMBOLS, "LSP", RightPanel::LspSymbols),
+    (icons::EDGES, "Edges", RightPanel::DependencyEdges),
+    (icons::FOLDERS, "Folders", RightPanel::Folders),
+    (icons::FILE_NODES, "Files", RightPanel::FileNodes),
+    (icons::CST_TREE, "CST", RightPanel::Cst),
+    (icons::AGENT_NOTES, "Agent", RightPanel::AgentNotes),
+    (icons::PERF_GAUGE, "Perf", RightPanel::Performance),
 ];
 
 pub fn draw_sidebar_right(ctx: &egui::Context, state: &mut AppState) {
+    // Cross-panel housekeeping: these highlight-caches only live while their
+    // panel is open.
     if state.right_panel != Some(RightPanel::Cst) {
-        // The CST panel resets this each frame it draws; nothing else does.
         state.cst.hovered = None;
     }
     if state.right_panel != Some(RightPanel::LspSymbols) {
         state.lsp.hovered = None;
     }
 
-    if state.right_panel.is_none() {
-        egui::SidePanel::right("sidebar_right_collapsed")
-            .exact_width(32.0)
-            .show(ctx, |ui| {
-                ui.vertical_centered(|ui| {
-                    if ui.selectable_label(false, "\u{25c0}").clicked() {
-                        state.right_panel = Some(RightPanel::Layout);
-                    }
-                });
-            });
-        return;
-    }
-
-    egui::SidePanel::right("sidebar_right")
-        .default_width(280.0)
-        .width_range(200.0..=500.0)
-        .resizable(true)
+    // 1. Always-visible icon rail.
+    egui::SidePanel::right("sidebar_right_rail")
+        .exact_width(RAIL_WIDTH)
+        .resizable(false)
+        .show_separator_line(false)
         .show(ctx, |ui| {
-            ui.horizontal_wrapped(|ui| {
-                for &(label, panel) in PANELS {
-                    let active = state.right_panel == Some(panel);
-                    if ui.selectable_label(active, label).clicked() {
-                        if active {
-                            state.right_panel = None;
-                        } else {
-                            state.right_panel = Some(panel);
-                        }
-                    }
+            ui.spacing_mut().item_spacing.y = 2.0;
+            ui.add_space(6.0);
+            for &(ch, label, panel) in PANELS {
+                let active = state.right_panel == Some(panel);
+                if icons::rail_icon_button(ui, ch, label, active).clicked() {
+                    state.right_panel = if active { None } else { Some(panel) };
                 }
-            });
+            }
+        });
 
-            ui.separator();
+    // 2. Floating overlay.
+    let Some(panel) = state.right_panel else {
+        return;
+    };
+    let (icon_ch, title, _) = PANELS
+        .iter()
+        .copied()
+        .find(|(_, _, p)| *p == panel)
+        .expect("PANELS covers every RightPanel variant");
+    let theme = state.theme.clone();
+    let screen_w = ctx.screen_rect().width();
 
-            egui::ScrollArea::vertical().show(ui, |ui| {
-                match state.right_panel {
-                    Some(RightPanel::Layout) => draw_layout_panel(ui, state),
-                    Some(RightPanel::DependencyEdges) => draw_edges_panel(ui, state),
-                    Some(RightPanel::Cst) => cst_panel::draw_cst_panel(ui, state),
-                    Some(RightPanel::LspSymbols) => lsp_panel::draw_lsp_panel(ui, state),
-                    Some(_) => {
-                        ui.label("Coming soon");
-                    }
-                    None => {}
+    egui::Area::new(egui::Id::new("sidebar_right_overlay"))
+        .fixed_pos(egui::pos2(screen_w - RAIL_WIDTH - PANEL_WIDTH - 4.0, 8.0))
+        .order(egui::Order::Foreground)
+        .show(ctx, |ui| {
+            ui.set_width(PANEL_WIDTH);
+            overlay_frame(&theme).show(ui, |ui| {
+                if panel_header(ui, icon_ch, title) {
+                    state.right_panel = None;
+                }
+                let max_h = ctx.screen_rect().height() - 60.0;
+                // Intentionally no outer ScrollArea on the right overlay —
+                // see decision-18: an outer ScrollArea over Area breaks
+                // AccessKit hover bounds on children (LSP row hover). Each
+                // panel manages its own scrolling as needed.
+                ui.set_max_height(max_h);
+                match panel {
+                    RightPanel::Layout => draw_layout_panel(ui, state),
+                    RightPanel::LspSymbols => lsp_panel::draw_lsp_panel(ui, state),
+                    RightPanel::DependencyEdges => draw_edges_panel(ui, state),
+                    RightPanel::Folders => folders_panel::draw_folders_panel(ui, state),
+                    RightPanel::FileNodes => files_panel::draw_files_panel(ui, state),
+                    RightPanel::Cst => cst_panel::draw_cst_panel(ui, state),
+                    RightPanel::AgentNotes => agent_panel::draw_agent_panel(ui, state),
+                    RightPanel::Performance => performance_panel::draw_performance_panel(ui, state),
                 }
             });
         });
 }
 
 fn draw_layout_panel(ui: &mut egui::Ui, state: &mut AppState) {
-    ui.heading("Layout");
-    ui.separator();
-
-    if ui.button("Apply Layout").clicked() {
+    if ui
+        .add(egui::Button::new("Apply Layout").min_size(egui::vec2(ui.available_width(), 28.0)))
+        .clicked()
+    {
         crate::layout::hierarchical::apply_layout(
             &mut state.node_store,
             &state.edge_store,
@@ -85,51 +100,51 @@ fn draw_layout_panel(ui: &mut egui::Ui, state: &mut AppState) {
         );
     }
 
-    ui.add_space(8.0);
-    ui.label("File Spacing");
-    ui.add(egui::Slider::new(
-        &mut state.layout_settings.file_spacing,
-        50.0..=2000.0,
-    ));
-
-    ui.label("Folder Spacing");
-    ui.add(egui::Slider::new(
-        &mut state.layout_settings.folder_spacing,
-        50.0..=2000.0,
-    ));
-
-    ui.label("Folder Padding");
-    ui.add(egui::Slider::new(
-        &mut state.layout_settings.folder_padding,
-        0.0..=500.0,
-    ));
-
-    ui.add_space(8.0);
-    ui.label("Horizontal Align");
-    ui.horizontal(|ui| {
-        ui.radio_value(&mut state.layout_settings.h_align, HAlign::Left, "Left");
-        ui.radio_value(&mut state.layout_settings.h_align, HAlign::Center, "Center");
-        ui.radio_value(&mut state.layout_settings.h_align, HAlign::Right, "Right");
+    section(ui, "Advanced Settings", |ui| {
+        ui.label("File Spacing");
+        ui.add(egui::Slider::new(
+            &mut state.layout_settings.file_spacing,
+            50.0..=2000.0,
+        ));
+        ui.label("Folder Spacing");
+        ui.add(egui::Slider::new(
+            &mut state.layout_settings.folder_spacing,
+            50.0..=2000.0,
+        ));
+        ui.label("Folder Padding");
+        ui.add(egui::Slider::new(
+            &mut state.layout_settings.folder_padding,
+            0.0..=500.0,
+        ));
     });
 
-    ui.label("Vertical Align");
-    ui.horizontal(|ui| {
-        ui.radio_value(&mut state.layout_settings.v_align, VAlign::Top, "Top");
-        ui.radio_value(&mut state.layout_settings.v_align, VAlign::Center, "Center");
-        ui.radio_value(&mut state.layout_settings.v_align, VAlign::Bottom, "Bottom");
-        ui.radio_value(&mut state.layout_settings.v_align, VAlign::Fill, "Fill");
+    section(ui, "Horizontal Align", |ui| {
+        ui.horizontal(|ui| {
+            ui.radio_value(&mut state.layout_settings.h_align, HAlign::Left, "Left");
+            ui.radio_value(&mut state.layout_settings.h_align, HAlign::Center, "Center");
+            ui.radio_value(&mut state.layout_settings.h_align, HAlign::Right, "Right");
+        });
     });
 
-    ui.add_space(8.0);
-    ui.label("Sort Mode");
-    ui.horizontal(|ui| {
-        ui.radio_value(&mut state.layout_settings.sort, SortMode::Off, "Off");
-        ui.radio_value(&mut state.layout_settings.sort, SortMode::Desc, "Desc");
-        ui.radio_value(&mut state.layout_settings.sort, SortMode::Asc, "Asc");
+    section(ui, "Vertical Align", |ui| {
+        ui.horizontal(|ui| {
+            ui.radio_value(&mut state.layout_settings.v_align, VAlign::Top, "Top");
+            ui.radio_value(&mut state.layout_settings.v_align, VAlign::Center, "Center");
+            ui.radio_value(&mut state.layout_settings.v_align, VAlign::Bottom, "Bottom");
+            ui.radio_value(&mut state.layout_settings.v_align, VAlign::Fill, "Fill");
+        });
     });
-    ui.horizontal(|ui| {
-        ui.radio_value(&mut state.layout_settings.sort, SortMode::Alt, "Alt");
-        ui.radio_value(&mut state.layout_settings.sort, SortMode::AltRev, "AltRev");
+
+    section(ui, "Sort Mode", |ui| {
+        ui.horizontal(|ui| {
+            ui.radio_value(&mut state.layout_settings.sort, SortMode::Off, "Off");
+            ui.radio_value(&mut state.layout_settings.sort, SortMode::Desc, "Desc");
+            ui.radio_value(&mut state.layout_settings.sort, SortMode::Asc, "Asc");
+        });
+        ui.horizontal(|ui| {
+            ui.radio_value(&mut state.layout_settings.sort, SortMode::Alt, "Alt");
+            ui.radio_value(&mut state.layout_settings.sort, SortMode::AltRev, "AltRev");
+        });
     });
 }
 
@@ -153,74 +168,86 @@ pub fn progress_line(p: &ServerProgress) -> (String, bool) {
 }
 
 fn draw_edges_panel(ui: &mut egui::Ui, state: &mut AppState) {
-    ui.heading("Dependency Edges");
-    ui.separator();
-
-    ui.label("Analysis (language servers)");
-    let progress = state.deps.progress(&state.lsp.manager);
-    if progress.is_empty() {
-        ui.weak("Open source files to find their dependencies.");
-    }
-    for p in &progress {
-        match progress_line(p) {
-            (text, true) => ui.colored_label(ui.visuals().error_fg_color, text),
-            (text, false) => ui.label(text),
-        };
-    }
-    ui.add_space(8.0);
-
-    ui.label("Style");
-    ui.horizontal(|ui| {
-        ui.radio_value(&mut state.edge_style.style, EdgeStyle::Bezier, "Bezier");
-        ui.radio_value(&mut state.edge_style.style, EdgeStyle::Step, "Step");
-    });
-    ui.horizontal(|ui| {
-        ui.radio_value(&mut state.edge_style.style, EdgeStyle::Line, "Line");
-        ui.radio_value(&mut state.edge_style.style, EdgeStyle::Pcb, "PCB");
+    section(ui, "Analysis (language servers)", |ui| {
+        let progress = state.deps.progress(&state.lsp.manager);
+        if progress.is_empty() {
+            ui.weak("Open source files to find their dependencies.");
+        }
+        for p in &progress {
+            match progress_line(p) {
+                (text, true) => ui.colored_label(ui.visuals().error_fg_color, text),
+                (text, false) => ui.label(text),
+            };
+        }
     });
 
-    ui.add_space(8.0);
-    ui.label("Opacity Mode");
-    ui.horizontal(|ui| {
-        ui.radio_value(
-            &mut state.edge_style.opacity_mode,
-            OpacityMode::Full,
-            "Full",
-        );
-        ui.radio_value(
-            &mut state.edge_style.opacity_mode,
-            OpacityMode::Depth,
-            "Depth",
-        );
+    section(ui, "Style", |ui| {
+        ui.horizontal(|ui| {
+            ui.radio_value(&mut state.edge_style.style, EdgeStyle::Bezier, "Bezier");
+            ui.radio_value(&mut state.edge_style.style, EdgeStyle::Step, "Step");
+        });
+        ui.horizontal(|ui| {
+            ui.radio_value(&mut state.edge_style.style, EdgeStyle::Line, "Line");
+            ui.radio_value(&mut state.edge_style.style, EdgeStyle::Pcb, "PCB");
+        });
     });
 
-    ui.add_space(8.0);
-    ui.checkbox(&mut state.edge_style.show_all, "Show All");
-    ui.checkbox(
-        &mut state.edge_style.highlight_backwards,
-        "Highlight Backwards",
-    );
-    ui.checkbox(
-        &mut state.edge_style.show_connection_markers,
-        "Connection Markers",
-    );
-    ui.checkbox(&mut state.edge_style.show_arrow_heads, "Arrow Heads");
-    ui.checkbox(&mut state.edge_style.only_selected, "Only Selected");
-    ui.checkbox(
-        &mut state.edge_style.scale_arrow_heads,
-        "Scale Arrow Heads",
-    );
-    ui.checkbox(&mut state.edge_style.use_gradient, "Use Gradient");
+    section(ui, "Opacity", |ui| {
+        ui.horizontal(|ui| {
+            ui.radio_value(&mut state.edge_style.opacity_mode, OpacityMode::Full, "Full");
+            ui.radio_value(&mut state.edge_style.opacity_mode, OpacityMode::Depth, "Depth");
+        });
+    });
 
-    ui.add_space(8.0);
-    ui.label("Min Size %");
-    ui.add(egui::Slider::new(
-        &mut state.edge_style.min_size_pct,
-        0.0..=1.0,
-    ));
+    section(ui, "Visibility", |ui| {
+        ui.checkbox(&mut state.edge_style.show_all, "Show All");
+        ui.checkbox(&mut state.edge_style.highlight_backwards, "Highlight Backwards");
+        ui.checkbox(&mut state.edge_style.show_connection_markers, "Connection Markers");
+        ui.checkbox(&mut state.edge_style.show_arrow_heads, "Arrow Heads");
+        ui.checkbox(&mut state.edge_style.only_selected, "Only Selected");
+        ui.checkbox(&mut state.edge_style.scale_arrow_heads, "Scale Arrow Heads");
+        ui.label("Min Size %");
+        ui.add(egui::Slider::new(&mut state.edge_style.min_size_pct, 0.0..=1.0));
+    });
 
-    ui.add_space(8.0);
-    ui.separator();
+    section(ui, "Gradient", |ui| {
+        ui.checkbox(&mut state.edge_style.use_gradient, "Use Gradient");
+        if state.edge_style.use_gradient {
+            ui.horizontal(|ui| {
+                ui.radio_value(&mut state.edge_style.gradient_gap_mode, GradientGapMode::Percent, "%");
+                ui.radio_value(&mut state.edge_style.gradient_gap_mode, GradientGapMode::Fixed, "Fixed");
+            });
+            match state.edge_style.gradient_gap_mode {
+                GradientGapMode::Percent => {
+                    ui.label("Gap %");
+                    ui.add(egui::Slider::new(&mut state.edge_style.gradient_gap_pct, 0.0..=1.0));
+                }
+                GradientGapMode::Fixed => {
+                    ui.label("Min Dist (px)");
+                    ui.add(egui::Slider::new(&mut state.edge_style.gradient_min_dist_px, 0.0..=1000.0));
+                }
+            }
+        }
+    });
+
+    egui::CollapsingHeader::new("Re-export & Barrel")
+        .default_open(false)
+        .show(ui, |ui| {
+            ui.checkbox(&mut state.edge_style.show_reexport_edges, "Show re-export edges");
+            ui.horizontal(|ui| {
+                ui.checkbox(&mut state.edge_style.highlight_reexport, "Highlight");
+                ui.color_edit_button_rgb(&mut state.edge_style.reexport_color);
+            });
+            ui.add_space(4.0);
+            ui.checkbox(&mut state.edge_style.show_barrel_edges, "Show barrel edges");
+            ui.horizontal(|ui| {
+                ui.checkbox(&mut state.edge_style.highlight_barrel, "Highlight");
+                ui.color_edit_button_rgb(&mut state.edge_style.barrel_color);
+            });
+            ui.add_space(4.0);
+            ui.weak("Barrel = index.{ts,tsx,js,jsx,mjs,cjs} | mod.rs | __init__.py with \u{2265} 4 re-exports.");
+        });
+
     egui::CollapsingHeader::new("Symbol Colors")
         .default_open(true)
         .show(ui, |ui| {

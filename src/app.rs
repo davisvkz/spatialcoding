@@ -27,7 +27,8 @@ pub struct SpatialCodingApp {
 }
 
 impl SpatialCodingApp {
-    pub fn new(_cc: &eframe::CreationContext<'_>) -> Self {
+    pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
+        ui::icons::install(&cc.egui_ctx);
         Self {
             state: AppState::default(),
             file_tree: None,

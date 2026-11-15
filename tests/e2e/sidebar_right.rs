@@ -5,14 +5,14 @@ use spatialcoding::state::RightPanel;
 use crate::common::*;
 
 #[test]
-fn arrow_opens_layout_panel_and_apply_layout_arranges_nodes() {
+fn layout_rail_opens_layout_panel_and_apply_layout_arranges_nodes() {
     let fx = fixture();
     let mut app = app_with(&fx);
     let util = app.open(&fx.path("src/util.rs"));
     let main = app.open(&fx.path("src/main.rs"));
     assert_eq!(app.app_state().right_panel, None);
 
-    app.get_by_label("\u{25c0}").click();
+    app.get_by_label("Layout").click();
     app.run();
     assert_eq!(app.app_state().right_panel, Some(RightPanel::Layout));
 
@@ -50,5 +50,6 @@ fn clicking_the_active_tab_collapses_the_panel() {
     app.get_by_label("Edges").click();
     app.run();
     assert_eq!(app.app_state().right_panel, None);
-    app.get_by_label("\u{25c0}");
+    // The rail is always visible now; Layout is the first rail entry.
+    app.get_by_label("Layout");
 }
