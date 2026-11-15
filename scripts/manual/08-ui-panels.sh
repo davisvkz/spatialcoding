@@ -4,6 +4,7 @@ source "$(dirname -- "${BASH_SOURCE[0]}")/lib.sh"
 
 dir=$(fixture rust)
 checklist "08 · Toolbar, painéis e diálogos" \
+  "Em build de desenvolvimento, passar o mouse sobre os controles|não aparece o inspetor de debug do egui com IDs, retângulos e pilha de widgets; tooltips normais continuam funcionando" \
   "Toolbar: botão com o nome da pasta, Select/Move, Clear All, Clear Selected, Settings|Select em negrito; Clear Selected desabilitado sem seleção" \
   "Clicar em Move e tentar arrastar um nó selecionado|o nó não se move; voltar para Select reativa o arraste" \
   "Clicar em Settings|abre o diálogo com Viewport, UI, Canvas File Nodes e Repository; Close ou Esc fecha" \

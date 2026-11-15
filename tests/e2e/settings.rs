@@ -2,6 +2,12 @@ use egui_kittest::kittest::Queryable;
 
 use crate::common::*;
 
+#[test]
+fn egui_debug_inspection_is_disabled_on_startup() {
+    let app = app();
+    assert!(!app.ctx.style().debug.debug_on_hover);
+}
+
 fn app_with_settings_open() -> App {
     let mut app = app();
     app.app_state_mut().show_settings = true;

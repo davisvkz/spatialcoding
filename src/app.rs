@@ -30,14 +30,6 @@ pub struct SpatialCodingApp {
 impl SpatialCodingApp {
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
         ui::icons::install(&cc.egui_ctx);
-        // In debug builds, turn on egui's hover inspector so pointing at any
-        // widget prints its id/rect/stack in a tooltip. No live overlays are
-        // enabled — those draw on top of the real UI and get in the way.
-        // No effect in release builds.
-        #[cfg(debug_assertions)]
-        cc.egui_ctx.style_mut(|style| {
-            style.debug.debug_on_hover = true;
-        });
         Self {
             state: AppState::default(),
             file_tree: None,
