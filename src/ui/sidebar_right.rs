@@ -7,7 +7,7 @@ use crate::edges::style::{EdgeStyle, GradientGapMode, OpacityMode};
 use crate::layout::settings::{HAlign, SortMode, VAlign};
 use crate::state::{AppState, RightPanel};
 use crate::ui::icons;
-use crate::ui::panel::{overlay_frame, panel_header, section, PANEL_WIDTH, RAIL_WIDTH};
+use crate::ui::panel::{bubble_frame, panel_header, section, PANEL_WIDTH, RAIL_WIDTH};
 use crate::ui::{agent_panel, cst_panel, files_panel, folders_panel, lsp_panel, performance_panel};
 
 const PANELS: &[(&str, &str, RightPanel)] = &[
@@ -58,41 +58,32 @@ pub fn draw_sidebar_right(ctx: &egui::Context, state: &mut AppState) {
         .expect("PANELS covers every RightPanel variant");
     let theme = state.theme.clone();
 
-    egui::Area::new(egui::Id::new("sidebar_right_overlay"))
-        // Anchor to the top-right so the card always sits flush against the
-        // right rail regardless of its content width. The negative X leaves
-        // room for the rail itself and a 6px gap.
-        .anchor(
-            egui::Align2::RIGHT_TOP,
-            egui::vec2(-(RAIL_WIDTH + 6.0), 8.0),
-        )
-        .order(egui::Order::Foreground)
+    // Docked SidePanel beside the right rail, styled as a bubble via its own
+    // Frame. SidePanel owns its scroll/click events so the canvas no longer
+    // moves while you scroll the panel body.
+    egui::SidePanel::right("sidebar_right_panel")
+        .exact_width(PANEL_WIDTH)
+        .resizable(false)
+        .show_separator_line(false)
+        .frame(bubble_frame(&theme))
         .show(ctx, |ui| {
-            overlay_frame(&theme).show(ui, |ui| {
-                // Pin to PANEL_WIDTH so the card is the same size regardless
-                // of which panel body is active.
-                ui.set_min_width(PANEL_WIDTH);
-                ui.set_max_width(PANEL_WIDTH);
-                if panel_header(ui, icon_ch, title) {
-                    state.right_panel = None;
-                }
-                let max_h = ctx.screen_rect().height() - 60.0;
-                // Intentionally no outer ScrollArea on the right overlay —
-                // see decision-18: an outer ScrollArea over Area breaks
-                // AccessKit hover bounds on children (LSP row hover). Each
-                // panel manages its own scrolling as needed.
-                ui.set_max_height(max_h);
-                match panel {
-                    RightPanel::Layout => draw_layout_panel(ui, state),
-                    RightPanel::LspSymbols => lsp_panel::draw_lsp_panel(ui, state),
-                    RightPanel::DependencyEdges => draw_edges_panel(ui, state),
-                    RightPanel::Folders => folders_panel::draw_folders_panel(ui, state),
-                    RightPanel::FileNodes => files_panel::draw_files_panel(ui, state),
-                    RightPanel::Cst => cst_panel::draw_cst_panel(ui, state),
-                    RightPanel::AgentNotes => agent_panel::draw_agent_panel(ui, state),
-                    RightPanel::Performance => performance_panel::draw_performance_panel(ui, state),
-                }
-            });
+            if panel_header(ui, icon_ch, title) {
+                state.right_panel = None;
+            }
+            // Intentionally no outer ScrollArea here — see decision-18:
+            // wrapping panel bodies in an outer ScrollArea broke AccessKit
+            // hover bounds on LSP row children. Each panel manages its own
+            // scrolling as needed.
+            match panel {
+                RightPanel::Layout => draw_layout_panel(ui, state),
+                RightPanel::LspSymbols => lsp_panel::draw_lsp_panel(ui, state),
+                RightPanel::DependencyEdges => draw_edges_panel(ui, state),
+                RightPanel::Folders => folders_panel::draw_folders_panel(ui, state),
+                RightPanel::FileNodes => files_panel::draw_files_panel(ui, state),
+                RightPanel::Cst => cst_panel::draw_cst_panel(ui, state),
+                RightPanel::AgentNotes => agent_panel::draw_agent_panel(ui, state),
+                RightPanel::Performance => performance_panel::draw_performance_panel(ui, state),
+            }
         });
 }
 

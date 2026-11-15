@@ -13,13 +13,18 @@ pub const RAIL_WIDTH: f32 = 36.0;
 /// Width of the floating panel overlay.
 pub const PANEL_WIDTH: f32 = 300.0;
 
-/// A rounded dark frame that matches the v2 panel card look.
-pub fn overlay_frame(theme: &Theme) -> egui::Frame {
+/// Frame used as the SidePanel's own frame when a panel body is docked.
+/// Looks like v2's floating "bubble" card (dark fill, 1px border, rounded
+/// corners, 8px padding) but lives inside a docked SidePanel so the canvas
+/// does not sit underneath — scrolling the panel stays inside it instead of
+/// bleeding into the canvas.
+pub fn bubble_frame(theme: &Theme) -> egui::Frame {
     egui::Frame::NONE
         .fill(theme.panel_bg)
         .stroke(egui::Stroke::new(1.0_f32, theme.panel_border))
         .corner_radius(8.0)
-        .inner_margin(egui::Margin::symmetric(10, 10))
+        .inner_margin(egui::Margin::symmetric(8, 8))
+        .outer_margin(egui::Margin { left: 6, right: 6, top: 4, bottom: 6 })
 }
 
 /// Draws the `[icon] [title] [⋮] [▶] [×]` header row. Returns `true` when

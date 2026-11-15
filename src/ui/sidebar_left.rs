@@ -5,7 +5,7 @@
 use crate::fs::tree::TreeNode;
 use crate::state::{AppState, LeftPanel};
 use crate::ui::icons;
-use crate::ui::panel::{overlay_frame, panel_header, PANEL_WIDTH, RAIL_WIDTH};
+use crate::ui::panel::{bubble_frame, panel_header, PANEL_WIDTH, RAIL_WIDTH};
 use crate::ui::{changes_panel, local_server_panel, search_panel};
 
 const PANELS: &[(&str, &str, LeftPanel)] = &[
@@ -56,7 +56,11 @@ pub fn draw_sidebar_left(
             });
         });
 
-    // 2. The floating overlay when a panel is active.
+    // 2. Docked side panel beside the rail when a panel is active. This is a
+    // real SidePanel (not a floating Area) so it reflows the canvas and
+    // consumes its own scroll/click events — scrolling the file tree no
+    // longer pans the canvas underneath. The bubble look comes from an
+    // inner Frame; the SidePanel itself is transparent.
     let Some(panel) = state.left_panel else {
         return;
     };
@@ -67,28 +71,23 @@ pub fn draw_sidebar_left(
         .find(|(_, _, p)| *p == panel)
         .expect("PANELS covers every LeftPanel variant");
 
-    egui::Area::new(egui::Id::new("sidebar_left_overlay"))
-        .fixed_pos(egui::pos2(RAIL_WIDTH + 6.0, 8.0))
-        .order(egui::Order::Foreground)
+    egui::SidePanel::left("sidebar_left_panel")
+        .exact_width(PANEL_WIDTH)
+        .resizable(false)
+        .show_separator_line(false)
+        .frame(bubble_frame(&theme))
         .show(ctx, |ui| {
-            overlay_frame(&theme).show(ui, |ui| {
-                // The Frame otherwise shrinks to the widest row, leaving the
-                // right side of the panel showing the canvas through. Pin the
-                // body to PANEL_WIDTH so the card is always the same size.
-                ui.set_min_width(PANEL_WIDTH);
-                ui.set_max_width(PANEL_WIDTH);
-                if panel_header(ui, icon_ch, title) {
-                    state.left_panel = None;
-                }
-                egui::ScrollArea::vertical()
-                    .max_height(ctx.screen_rect().height() - 60.0)
-                    .show(ui, |ui| match panel {
-                        LeftPanel::Workspace => draw_workspace(ui, state, tree),
-                        LeftPanel::Changes => changes_panel::draw_changes_panel(ui),
-                        LeftPanel::Search => search_panel::draw_search_panel(ui),
-                        LeftPanel::LocalServer => local_server_panel::draw_local_server_panel(ui, state),
-                    });
-            });
+            if panel_header(ui, icon_ch, title) {
+                state.left_panel = None;
+            }
+            egui::ScrollArea::vertical()
+                .auto_shrink([false, false])
+                .show(ui, |ui| match panel {
+                    LeftPanel::Workspace => draw_workspace(ui, state, tree),
+                    LeftPanel::Changes => changes_panel::draw_changes_panel(ui),
+                    LeftPanel::Search => search_panel::draw_search_panel(ui),
+                    LeftPanel::LocalServer => local_server_panel::draw_local_server_panel(ui, state),
+                });
         });
 }
 
