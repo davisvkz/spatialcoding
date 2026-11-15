@@ -1,6 +1,8 @@
 use std::collections::{HashMap, HashSet};
 
 use crate::analysis::dependencies::LineSpan;
+use crate::edges::style::EdgeStyleConfig;
+use crate::nodes::selection::Selection;
 
 /// Column span of the symbol name inside a line, for inline highlight.
 /// Byte offsets into the line's text, 0-based.
@@ -43,8 +45,34 @@ pub struct Edge {
     pub target_span: Option<LineSpan>,
     /// Column span of the symbol name on the definition side.
     pub name_span: Option<NameSpan>,
+    /// Exact identifier range on the usage side, including aliases.
+    pub source_name_span: Option<NameSpan>,
     /// Classification for the re-export / barrel toggles.
     pub kind: EdgeKind,
+}
+
+impl Edge {
+    pub fn is_selected(&self, selection: &Selection) -> bool {
+        if selection.symbols().is_empty() {
+            return selection.is_selected(self.source_node)
+                || selection.is_selected(self.target_node);
+        }
+        selection.symbols().iter().any(|symbol| {
+            (self.target_node == symbol.node_id && self.name_span == Some(symbol.name_span))
+                || (self.source_node == symbol.node_id
+                    && self.source_span.is_some_and(|usage| {
+                        symbol.span.start <= usage.start && usage.start <= symbol.span.end
+                    }))
+        })
+    }
+
+    pub fn is_visible(&self, config: &EdgeStyleConfig) -> bool {
+        match self.kind {
+            EdgeKind::Direct => true,
+            EdgeKind::ReExport => config.show_reexport_edges,
+            EdgeKind::Barrel => config.show_barrel_edges,
+        }
+    }
 }
 
 /// One span to highlight on a file node, with the kind for color lookup
@@ -94,6 +122,7 @@ impl EdgeStore {
             source_span,
             target_span,
             name_span,
+            None,
             EdgeKind::Direct,
         )
     }
@@ -111,6 +140,7 @@ impl EdgeStore {
         source_span: Option<LineSpan>,
         target_span: Option<LineSpan>,
         name_span: Option<NameSpan>,
+        source_name_span: Option<NameSpan>,
         kind: EdgeKind,
     ) -> u64 {
         let id = self.next_id;
@@ -126,6 +156,7 @@ impl EdgeStore {
                 source_span,
                 target_span,
                 name_span,
+                source_name_span,
                 kind,
             },
         );
@@ -133,12 +164,40 @@ impl EdgeStore {
     }
 
     /// Highlight data per node: both ends of every edge that touches a node
-    /// in `selected`, with the kind label and the name span (on the target
-    /// side only). Sorted by span, deduplicated by (span, label).
+    /// in `selected`, with kind labels and exact name spans at both ends.
+    /// Sorted and deduplicated by (statement span, kind, name span).
     pub fn selected_spans(&self, selected: &HashSet<u64>) -> HashMap<u64, Vec<SpanHighlight>> {
+        self.spans_matching(|e| {
+            selected.contains(&e.source_node) || selected.contains(&e.target_node)
+        })
+    }
+
+    /// The same focus and kind-visibility policy as edge strokes. Explicitly
+    /// picked declarations stay highlighted even without cross-file references.
+    pub fn focused_spans(
+        &self,
+        selection: &Selection,
+        config: &EdgeStyleConfig,
+    ) -> HashMap<u64, Vec<SpanHighlight>> {
+        let mut out = self.spans_matching(|e| e.is_selected(selection) && e.is_visible(config));
+        for symbol in selection.symbols() {
+            let highlight = SpanHighlight {
+                span: symbol.span,
+                label: symbol.label.clone(),
+                name_span: Some(symbol.name_span),
+            };
+            let spans = out.entry(symbol.node_id).or_default();
+            if !spans.contains(&highlight) {
+                spans.push(highlight);
+            }
+        }
+        out
+    }
+
+    fn spans_matching(&self, matches: impl Fn(&Edge) -> bool) -> HashMap<u64, Vec<SpanHighlight>> {
         let mut out: HashMap<u64, Vec<SpanHighlight>> = HashMap::new();
         for e in self.edges.values() {
-            if !selected.contains(&e.source_node) && !selected.contains(&e.target_node) {
+            if !matches(e) {
                 continue;
             }
             let label = e.label.clone().unwrap_or_default();
@@ -146,7 +205,7 @@ impl EdgeStore {
                 out.entry(e.source_node).or_default().push(SpanHighlight {
                     span,
                     label: label.clone(),
-                    name_span: None,
+                    name_span: e.source_name_span,
                 });
             }
             if let Some(span) = e.target_span {
@@ -158,8 +217,14 @@ impl EdgeStore {
             }
         }
         for highlights in out.values_mut() {
-            highlights.sort_by(|a, b| a.span.cmp(&b.span).then_with(|| a.label.cmp(&b.label)));
-            highlights.dedup_by(|a, b| a.span == b.span && a.label == b.label);
+            highlights.sort_by_key(|h| {
+                (
+                    h.span,
+                    h.label.clone(),
+                    h.name_span.map(|n| (n.line, n.start_byte, n.end_byte)),
+                )
+            });
+            highlights.dedup();
         }
         out
     }
@@ -232,8 +297,22 @@ mod tests {
     fn selected_spans_cover_both_ends_of_edges_touching_the_selection() {
         let span = |start, end| LineSpan { start, end };
         let mut store = EdgeStore::default();
-        store.add_spanned(1, 2, Some("fn".into()), Some(span(4, 4)), Some(span(0, 2)), None);
-        store.add_spanned(1, 2, Some("fn".into()), Some(span(9, 9)), Some(span(0, 2)), None);
+        store.add_spanned(
+            1,
+            2,
+            Some("fn".into()),
+            Some(span(4, 4)),
+            Some(span(0, 2)),
+            None,
+        );
+        store.add_spanned(
+            1,
+            2,
+            Some("fn".into()),
+            Some(span(9, 9)),
+            Some(span(0, 2)),
+            None,
+        );
         store.add_spanned(1, 3, Some("struct".into()), Some(span(1, 1)), None, None);
         store.add_spanned(4, 5, None, Some(span(7, 7)), Some(span(8, 8)), None);
 
@@ -245,5 +324,87 @@ mod tests {
         assert_eq!(spans.len(), 2, "edge 1->3 and 4->5 do not touch node 2");
 
         assert!(store.selected_spans(&HashSet::new()).is_empty());
+    }
+
+    #[test]
+    fn symbol_focus_excludes_other_definitions_in_the_same_file_and_hidden_edges() {
+        use crate::edges::style::EdgeStyleConfig;
+        use crate::nodes::selection::{SelectedSymbol, Selection};
+        let span = |start, end| LineSpan { start, end };
+        let name = NameSpan {
+            line: 0,
+            start_byte: 7,
+            end_byte: 12,
+        };
+        let mut store = EdgeStore::default();
+        let chosen = store.add_spanned(
+            1,
+            2,
+            Some("fn".into()),
+            Some(span(4, 4)),
+            Some(span(0, 2)),
+            Some(name),
+        );
+        store.add_spanned(
+            1,
+            2,
+            Some("fn".into()),
+            Some(span(8, 8)),
+            Some(span(5, 7)),
+            Some(NameSpan { line: 5, ..name }),
+        );
+        let mut selection = Selection::default();
+        selection.select_symbol(
+            1,
+            SelectedSymbol {
+                node_id: 2,
+                name_span: name,
+                span: span(0, 2),
+                label: "fn".into(),
+            },
+            false,
+        );
+        let mut config = EdgeStyleConfig::default();
+        let highlights = store.focused_spans(&selection, &config);
+        assert_eq!(highlights[&1].len(), 1, "unrelated symbol stays dim");
+        assert_eq!(highlights[&1][0].span, span(4, 4));
+        store.edges.get_mut(&chosen).unwrap().kind = EdgeKind::ReExport;
+        config.show_reexport_edges = false;
+        let highlights = store.focused_spans(&selection, &config);
+        assert!(
+            !highlights.contains_key(&1),
+            "hidden edges must not leave usage highlights"
+        );
+        assert_eq!(
+            highlights[&2].len(),
+            1,
+            "the selected declaration stays marked"
+        );
+    }
+
+    #[test]
+    fn selected_function_includes_outgoing_calls_but_not_other_functions_calls() {
+        use crate::nodes::selection::{SelectedSymbol, Selection};
+        let mut selection = Selection::default();
+        selection.select_symbol(
+            1,
+            SelectedSymbol {
+                node_id: 1,
+                name_span: NameSpan {
+                    line: 3,
+                    start_byte: 3,
+                    end_byte: 6,
+                },
+                span: LineSpan { start: 3, end: 7 },
+                label: "fn".into(),
+            },
+            false,
+        );
+        let mut store = EdgeStore::default();
+        let inside = store.add_spanned(1, 2, None, Some(LineSpan { start: 4, end: 4 }), None, None);
+        let outside =
+            store.add_spanned(1, 2, None, Some(LineSpan { start: 9, end: 9 }), None, None);
+        assert!(store.edges[&inside].is_selected(&selection));
+        assert!(!store.edges[&outside].is_selected(&selection));
     }
 }

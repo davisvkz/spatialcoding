@@ -59,6 +59,8 @@ pub struct DependencyLink {
     /// The symbol name's position: `(line, start_byte, end_byte)` within the
     /// target file's content.
     pub name_span: Option<(usize, usize, usize)>,
+    /// Exact reference name in the source file, in line-relative UTF-8 bytes.
+    pub source_name_span: Option<(usize, usize, usize)>,
 }
 
 /// The symbols whose references become edges: every top-level symbol except
@@ -126,10 +128,28 @@ pub fn usages(
     open: &OpenFiles,
     finder: &mut StatementFinder,
 ) -> Vec<(PathBuf, LineSpan)> {
+    usage_occurrences(target, locations, open, finder).into_iter()
+        .map(|usage| (usage.source, usage.span)).collect()
+}
+
+pub(crate) struct UsageOccurrence {
+    pub source: PathBuf,
+    pub span: LineSpan,
+    pub range: Range,
+}
+
+/// Keep the first exact LSP reference range for each linked statement instead
+/// of guessing where the referenced name occurs in that statement's text.
+pub(crate) fn usage_occurrences(
+    target: &Path,
+    locations: &[Location],
+    open: &OpenFiles,
+    finder: &mut StatementFinder,
+) -> Vec<UsageOccurrence> {
     let mut sorted: Vec<&Location> = locations.iter().collect();
     sorted.sort();
     // (source, span, is_import), in reference order per file
-    let mut found: Vec<(&Path, LineSpan, bool)> = Vec::new();
+    let mut found: Vec<(&Path, LineSpan, bool, Range)> = Vec::new();
     for loc in sorted {
         let Some((source, content)) = open.get(&loc.path) else {
             continue;
@@ -138,16 +158,16 @@ pub fn usages(
             continue;
         }
         let stmt = finder.at(source, content, loc.range.start.line, loc.range.start.character);
-        if !found.iter().any(|(s, span, _)| *s == source && *span == stmt.span) {
-            found.push((source, stmt.span, stmt.is_import));
+        if !found.iter().any(|(s, span, _, _)| *s == source && *span == stmt.span) {
+            found.push((source, stmt.span, stmt.is_import, loc.range));
         }
     }
-    let uses_outside_imports = |source: &Path| found.iter().any(|(s, _, imp)| *s == source && !imp);
+    let uses_outside_imports = |source: &Path| found.iter().any(|(s, _, imp, _)| *s == source && !imp);
     found
         .iter()
-        .filter(|(source, _, is_import)| !is_import || !uses_outside_imports(source))
+        .filter(|(source, _, is_import, _)| !is_import || !uses_outside_imports(source))
         .take(MAX_LINKS_PER_SYMBOL)
-        .map(|(source, span, _)| (source.to_path_buf(), *span))
+        .map(|(source, span, _, range)| UsageOccurrence { source: source.to_path_buf(), span: *span, range: *range })
         .collect()
 }
 

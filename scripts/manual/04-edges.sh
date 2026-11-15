@@ -19,14 +19,19 @@ checklist "04 · Arestas de dependência via LSP ($lang)" \
   "Esperar a indexação terminar (rust-analyzer: alguns segundos)|as arestas aparecem aos poucos, sem travar a interface; o layout de --layout é refeito quando a análise termina" \
   "Observar o canvas sem nada selecionado|fundo quase preto, sem grade; arestas finas azul-acinzentadas e translúcidas formando uma teia (não uma parede)" \
   "Clicar num arquivo|borda branca no nó; as arestas dele (entrando e saindo) ficam azul-claras, opacas e por cima das outras, com ponta de seta no destino; as demais continuam visíveis, mais apagadas" \
-  "Com o arquivo selecionado e zoom médio/próximo|cada aresta dele tem uma 'pílula' com o nome do símbolo nas duas pontas, dentro do nó junto da lateral; com zoom muito distante as pílulas somem" \
-  "Aproximar (Ctrl+roda) um arquivo selecionado|cada aresta sai da lateral do nó na linha do statement que USA o símbolo e chega na linha da DEFINIÇÃO no outro arquivo (função, struct, método); vários usos geram várias arestas" \
+  "Com o arquivo selecionado e zoom médio/próximo|não existem badges/etiquetas de símbolo com borda azul; as setas encostam no próprio nome no código" \
+  "Aproximar (Ctrl+roda) um arquivo selecionado|a aresta sai do identificador USADO e chega ao nome na DEFINIÇÃO, não à borda do arquivo nem à primeira linha de comentários do statement; alinhamento acompanha o zoom" \
   "Com o arquivo selecionado, olhar o código dos dois lados|os statements de uso e as definições inteiras ficam destacados na cor do tipo do símbolo (fn, struct…, editável na aba Edges), com uma barra na borda esquerda" \
   "Na definição, olhar o nome do símbolo (ex.: 'pub struct Server', 'pub fn bind') em zooms diferentes|a marca mais forte cobre exatamente o nome, sem começar no meio dele nem passar para o '{' ou o '('" \
+  "Após indexar, clicar exatamente em bind no código de server.rs (não na margem)|somente as conexões de bind e seus statements ficam destacados; Server e addr, no mesmo arquivo, não ganham destaque; a câmera não salta" \
+  "Clicar em bind no uso Server::bind de client.rs|seleciona o mesmo símbolo definido em server.rs; client.rs continua sendo o nó arrastável" \
+  "Shift+clique no nome addr; depois Shift+clique em bind|primeiro combina os símbolos; depois remove bind do destaque" \
+  "Clicar na margem vazia de um arquivo, depois selecionar um símbolo e usar Esc ou clicar no fundo|a margem volta à seleção do arquivo inteiro; Esc/fundo limpam a seleção de símbolos" \
+  "Painel LSP → clicar em um símbolo|lista referências como antes e aplica o mesmo foco por símbolo às dependências; clicar numa referência continua navegando até ela" \
   "Conferir as arestas|esperado: $expected" \
   "Um import cujo símbolo é usado no arquivo|não gera aresta própria; um import sem uso liga a linha do import à definição" \
   "Painel direito → Edges → desmarcar Only Selected|todas as arestas ganham ponta de seta, não só as da seleção" \
-  "Desmarcar Symbol Pills|as pílulas com o nome do símbolo somem" \
+  "Abrir helpers/strings.rs e navegar até o final|o bloco inclui after_fifty_lines depois da linha 50, sem truncar o arquivo" \
   "Settings → UI → Dot Grid|a grade de pontos volta a aparecer no fundo" \
   "Trocar o estilo: Bezier, Step, Line, PCB|o traçado das arestas muda de forma" \
   "Desmarcar Arrow Heads|as setas somem" \

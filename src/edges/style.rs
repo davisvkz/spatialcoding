@@ -49,9 +49,6 @@ pub struct EdgeStyleConfig {
     /// Color of edges touching the selection (v2: light blue, fully opaque).
     #[serde(default = "default_selected_color")]
     pub selected_color: [f32; 3],
-    /// Symbol-name pills at both ends of the selection's edges.
-    #[serde(default = "default_true")]
-    pub show_symbol_pills: bool,
     #[serde(default = "default_symbol_colors")]
     pub symbol_colors: HashMap<String, [f32; 3]>,
     #[serde(default = "default_true")]
@@ -94,17 +91,17 @@ fn default_barrel_color() -> [f32; 3] {
 
 pub fn default_symbol_colors() -> HashMap<String, [f32; 3]> {
     [
-        ("fn",        [0.33, 0.76, 0.98]),  // blue
-        ("method",    [0.40, 0.85, 0.72]),  // teal
-        ("struct",    [0.98, 0.73, 0.33]),  // orange
-        ("class",     [0.78, 0.56, 0.98]),  // purple
-        ("interface", [0.65, 0.50, 0.98]),  // violet
-        ("trait",     [0.65, 0.50, 0.98]),  // violet
-        ("enum",      [0.98, 0.85, 0.37]),  // yellow
-        ("const",     [0.56, 0.82, 0.49]),  // green
-        ("var",       [0.56, 0.82, 0.49]),  // green
-        ("mod",       [0.70, 0.70, 0.70]),  // grey
-        ("ctor",      [0.40, 0.85, 0.72]),  // teal
+        ("fn", [0.33, 0.76, 0.98]),        // blue
+        ("method", [0.40, 0.85, 0.72]),    // teal
+        ("struct", [0.98, 0.73, 0.33]),    // orange
+        ("class", [0.78, 0.56, 0.98]),     // purple
+        ("interface", [0.65, 0.50, 0.98]), // violet
+        ("trait", [0.65, 0.50, 0.98]),     // violet
+        ("enum", [0.98, 0.85, 0.37]),      // yellow
+        ("const", [0.56, 0.82, 0.49]),     // green
+        ("var", [0.56, 0.82, 0.49]),       // green
+        ("mod", [0.70, 0.70, 0.70]),       // grey
+        ("ctor", [0.40, 0.85, 0.72]),      // teal
     ]
     .into_iter()
     .map(|(k, v)| (k.to_string(), v))
@@ -148,7 +145,6 @@ impl Default for EdgeStyleConfig {
             // Cool blue-grey, measured from v2 Code Canvas idle edges.
             base_color: [0.55, 0.61, 0.75],
             selected_color: default_selected_color(),
-            show_symbol_pills: true,
             symbol_colors: default_symbol_colors(),
             show_reexport_edges: true,
             show_barrel_edges: true,
@@ -157,5 +153,24 @@ impl Default for EdgeStyleConfig {
             reexport_color: default_reexport_color(),
             barrel_color: default_barrel_color(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn legacy_symbol_pill_setting_is_ignored_and_not_serialized_again() {
+        let mut value = serde_json::to_value(EdgeStyleConfig::default()).unwrap();
+        value
+            .as_object_mut()
+            .unwrap()
+            .insert("show_symbol_pills".into(), serde_json::json!(true));
+        let config: EdgeStyleConfig = serde_json::from_value(value).unwrap();
+        assert!(serde_json::to_value(config)
+            .unwrap()
+            .get("show_symbol_pills")
+            .is_none());
     }
 }

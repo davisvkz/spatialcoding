@@ -16,7 +16,10 @@ use crate::fake_lsp;
 /// The app with `fx` loaded and the fake language server plugged in.
 fn app_with_fake_lsp(fx: &Fixture) -> App {
     let mut app = app_with(fx);
-    app.app_state_mut().lsp.manager.set_launcher(fake_lsp::launcher());
+    app.app_state_mut()
+        .lsp
+        .manager
+        .set_launcher(fake_lsp::launcher());
     app
 }
 
@@ -44,7 +47,10 @@ fn settle(app: &mut App) {
     let deadline = Instant::now() + Duration::from_secs(10);
     let mut quiet = 0;
     while quiet < 2 {
-        assert!(Instant::now() < deadline, "timed out waiting for the language server");
+        assert!(
+            Instant::now() < deadline,
+            "timed out waiting for the language server"
+        );
         app.step();
         if app.app_state().lsp.is_waiting() {
             quiet = 0;
@@ -55,7 +61,6 @@ fn settle(app: &mut App) {
     }
     app.run();
 }
-
 
 #[test]
 fn lsp_tab_asks_for_a_selection() {
@@ -89,11 +94,19 @@ fn lsp_tab_lists_the_symbols_of_the_selected_file() {
     app.run();
     assert_eq!(
         app.app_state().lsp.hovered,
-        Some(LineHighlight { node_id: id, start_line: 2, end_line: 2 })
+        Some(LineHighlight {
+            node_id: id,
+            start_line: 2,
+            end_line: 2
+        })
     );
     app.get_by_label("Layout").click();
     app.run();
-    assert_eq!(app.app_state().lsp.hovered, None, "other tabs drop the hover");
+    assert_eq!(
+        app.app_state().lsp.hovered,
+        None,
+        "other tabs drop the hover"
+    );
 }
 
 #[test]
@@ -104,6 +117,11 @@ fn clicking_a_symbol_lists_references_across_files_and_a_reference_focuses_its_l
 
     app.get_by_label("fn hello  L1").click();
     settle(&mut app);
+    assert_eq!(
+        app.app_state().selection.symbols().len(),
+        1,
+        "LSP rows share canvas symbol focus"
+    );
     app.get_by_label("References to hello");
     app.get_by_label("2 references in 2 files");
     app.get_by_label("src/main.rs");
@@ -121,15 +139,30 @@ fn clicking_a_symbol_lists_references_across_files_and_a_reference_focuses_its_l
     assert_eq!(s.node_store.file_nodes.len(), 2, "main.rs was opened");
     let main = s.selection.primary.unwrap();
     assert_ne!(main, util);
-    assert!(s.node_store.get_file(main).unwrap().path.ends_with("src/main.rs"));
-    assert_eq!(s.lsp.target, Some(LineHighlight { node_id: main, start_line: 3, end_line: 3 }));
+    assert!(s
+        .node_store
+        .get_file(main)
+        .unwrap()
+        .path
+        .ends_with("src/main.rs"));
+    assert_eq!(
+        s.lsp.target,
+        Some(LineHighlight {
+            node_id: main,
+            start_line: 3,
+            end_line: 3
+        })
+    );
     assert!(s.pending_focus.is_none(), "the canvas applied the focus");
 
     // Line 4 of main.rs is now in the middle of the canvas.
     let node = s.node_store.get_file(main).unwrap();
     let rect = node.world_rect(s.settings.node_width, s.settings.font_size);
-    let line_y = rect.top() + HEADER_HEIGHT + CODE_PADDING + 3.5 * line_height(s.settings.font_size);
-    let on_screen = s.viewport.world_to_screen(Pos2::new(rect.center().x, line_y));
+    let line_y =
+        rect.top() + HEADER_HEIGHT + CODE_PADDING + 3.5 * line_height(s.settings.font_size);
+    let on_screen = s
+        .viewport
+        .world_to_screen(Pos2::new(rect.center().x, line_y));
     assert!(
         (300.0..1100.0).contains(&on_screen.x) && (300.0..600.0).contains(&on_screen.y),
         "line shown near the canvas center: {on_screen:?}"
@@ -138,7 +171,11 @@ fn clicking_a_symbol_lists_references_across_files_and_a_reference_focuses_its_l
     // The references stay listed, the target line is painted on the node.
     app.get_by_label("References to hello");
     let color = s.theme.selection.gamma_multiply(0.4);
-    let painted = app.output().shapes.iter().any(|c| matches!(&c.shape, egui::Shape::Rect(r) if r.fill == color));
+    let painted = app
+        .output()
+        .shapes
+        .iter()
+        .any(|c| matches!(&c.shape, egui::Shape::Rect(r) if r.fill == color));
     assert!(painted, "target line highlighted");
 
     // Jumping back reuses the open util.rs node.
@@ -153,9 +190,12 @@ fn a_missing_server_explains_how_to_configure_it() {
     let fx = fixture();
     let mut app = app_with(&fx);
     // What the default launcher reports when nothing is on PATH.
-    app.app_state_mut().lsp.manager.set_launcher(Arc::new(|server, _| {
-        Err(resolve_command(server, |_| None, |_| false).unwrap_err())
-    }));
+    app.app_state_mut()
+        .lsp
+        .manager
+        .set_launcher(Arc::new(|server, _| {
+            Err(resolve_command(server, |_| None, |_| false).unwrap_err())
+        }));
     select_and_open_lsp(&mut app, &fx, "src/main.rs");
 
     app.get_by_label_contains("No Rust language server found on PATH (tried rust-analyzer)");

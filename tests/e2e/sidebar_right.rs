@@ -141,10 +141,10 @@ fn edges_panel_changes_edge_style() {
     app.run();
     assert!(!app.app_state().edge_style.show_arrow_heads);
 
-    assert!(app.app_state().edge_style.show_symbol_pills);
-    app.get_by_label("Symbol Pills").click();
-    app.run();
-    assert!(!app.app_state().edge_style.show_symbol_pills);
+    assert!(
+        app.query_by_label("Symbol Pills").is_none(),
+        "removed badges have no toggle"
+    );
 }
 
 #[test]

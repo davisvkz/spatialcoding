@@ -28,10 +28,7 @@ pub fn classify_link(link: &DependencyLink, source_text: &str) -> EdgeKind {
 
 /// Promotes every `ReExport` of a barrel source file to `Barrel`. Takes the
 /// (kind, source) pairs in link order and returns the updated kinds.
-pub fn promote_barrels<'a>(
-    kinds: &[EdgeKind],
-    sources: &'a [&'a Path],
-) -> Vec<EdgeKind> {
+pub fn promote_barrels<'a>(kinds: &[EdgeKind], sources: &'a [&'a Path]) -> Vec<EdgeKind> {
     assert_eq!(kinds.len(), sources.len());
     let mut reexport_count: HashMap<PathBuf, usize> = HashMap::new();
     for (kind, source) in kinds.iter().zip(sources.iter()) {
@@ -87,8 +84,8 @@ fn is_reexport_line(source_path: &Path, source_text: &str, usage: LineSpan) -> b
     match ext {
         "rs" => {
             // `pub use …` and `pub(crate) use …`.
-            trimmed.starts_with("pub use ") || trimmed.starts_with("pub(")
-                && trimmed.contains(") use ")
+            trimmed.starts_with("pub use ")
+                || trimmed.starts_with("pub(") && trimmed.contains(") use ")
         }
         "ts" | "tsx" | "js" | "jsx" | "mjs" | "cjs" => {
             // `export … from '…'` / `export * from '…'` / `export { … } from '…'`
@@ -122,6 +119,7 @@ mod tests {
             },
             definition: LineSpan { start: 0, end: 0 },
             name_span: None,
+            source_name_span: None,
         }
     }
 
@@ -129,8 +127,14 @@ mod tests {
     fn rust_pub_use_is_reexport_but_use_alone_is_not() {
         let text = "use std::io;\npub use crate::inner::Thing;\npub(crate) use foo::Bar;\n";
         assert_eq!(classify_link(&link("/p/lib.rs", 0), text), EdgeKind::Direct);
-        assert_eq!(classify_link(&link("/p/lib.rs", 1), text), EdgeKind::ReExport);
-        assert_eq!(classify_link(&link("/p/lib.rs", 2), text), EdgeKind::ReExport);
+        assert_eq!(
+            classify_link(&link("/p/lib.rs", 1), text),
+            EdgeKind::ReExport
+        );
+        assert_eq!(
+            classify_link(&link("/p/lib.rs", 2), text),
+            EdgeKind::ReExport
+        );
     }
 
     #[test]
@@ -146,7 +150,10 @@ mod tests {
         let bare = "from .a import x\nfrom .b import y\n";
         let with_all = "__all__ = ['x', 'y']\nfrom .a import x\nfrom .b import y\n";
         assert_eq!(classify_link(&link("/p/m.py", 0), bare), EdgeKind::Direct);
-        assert_eq!(classify_link(&link("/p/m.py", 1), with_all), EdgeKind::ReExport);
+        assert_eq!(
+            classify_link(&link("/p/m.py", 1), with_all),
+            EdgeKind::ReExport
+        );
     }
 
     #[test]

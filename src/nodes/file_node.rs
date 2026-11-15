@@ -4,8 +4,6 @@ use std::path::{Path, PathBuf};
 pub const HEADER_HEIGHT: f32 = 28.0;
 /// World-space vertical padding around the code area.
 pub const CODE_PADDING: f32 = 4.0;
-/// Maximum number of code lines a node shows.
-pub const MAX_VISIBLE_LINES: usize = 50;
 
 /// World-space height of one code line.
 pub fn line_height(font_size: f32) -> f32 {
@@ -46,14 +44,17 @@ impl FileNode {
     }
 
     pub fn visible_lines(&self) -> usize {
-        self.line_count.min(MAX_VISIBLE_LINES)
+        self.line_count
     }
 
     /// World-space y of the middle of code line `line` (0-based), or `None`
     /// when the node does not draw that line.
     pub fn line_anchor_y(&self, line: usize, font_size: f32) -> Option<f32> {
         (line < self.visible_lines()).then(|| {
-            self.position.y + HEADER_HEIGHT + CODE_PADDING + (line as f32 + 0.5) * line_height(font_size)
+            self.position.y
+                + HEADER_HEIGHT
+                + CODE_PADDING
+                + (line as f32 + 0.5) * line_height(font_size)
         })
     }
 
@@ -66,10 +67,7 @@ impl FileNode {
 }
 
 pub fn detect_language(path: &Path) -> String {
-    let ext = path
-        .extension()
-        .and_then(|e| e.to_str())
-        .unwrap_or("");
+    let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
     match ext {
         "rs" => "Rust",
         "ts" => "TypeScript",
@@ -107,7 +105,12 @@ mod tests {
     use super::*;
 
     fn node(path: &str, content: &str) -> FileNode {
-        FileNode::new(7, PathBuf::from(path), content.to_string(), egui::pos2(5.0, 6.0))
+        FileNode::new(
+            7,
+            PathBuf::from(path),
+            content.to_string(),
+            egui::pos2(5.0, 6.0),
+        )
     }
 
     #[test]
@@ -125,9 +128,10 @@ mod tests {
     }
 
     #[test]
-    fn visible_lines_are_capped() {
-        let long = "x\n".repeat(MAX_VISIBLE_LINES + 70);
-        assert_eq!(node("a.rs", &long).visible_lines(), MAX_VISIBLE_LINES);
+    fn visible_lines_include_the_complete_file() {
+        let long = "x\n".repeat(120);
+        assert_eq!(node("a.rs", &long).visible_lines(), 120);
+        assert!(node("a.rs", &long).line_anchor_y(119, 12.0).is_some());
         assert_eq!(node("a.rs", "x\ny").visible_lines(), 2);
     }
 

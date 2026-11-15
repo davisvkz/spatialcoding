@@ -134,9 +134,7 @@ pub fn remove_nodes(state: &mut AppState, ids: &[u64]) {
             state.edge_store.remove(edge_id);
         }
         state.node_store.remove_node(id);
-        if state.selection.is_selected(id) {
-            state.selection.toggle(id);
-        }
+        state.selection.remove_node(id);
     }
 
     // A folder stays while any open file still lives under it, so the
@@ -258,6 +256,9 @@ fn apply_dependency_edges(state: &mut AppState) {
                 start_byte: start,
                 end_byte: end,
             });
+            let source_name_span = link.source_name_span.map(|(line, start_byte, end_byte)| NameSpan {
+                line, start_byte, end_byte,
+            });
             state.edge_store.add_full(
                 src,
                 tgt,
@@ -266,6 +267,7 @@ fn apply_dependency_edges(state: &mut AppState) {
                 Some(link.usage),
                 Some(link.definition),
                 name_span,
+                source_name_span,
                 kind,
             );
         }

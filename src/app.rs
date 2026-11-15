@@ -9,6 +9,7 @@ use crate::highlight::syntect_hl::Highlighter;
 use crate::input;
 use crate::nodes::file_node::{line_height, CODE_PADDING, HEADER_HEIGHT};
 use crate::nodes::lod::LodLevel;
+use crate::nodes::selection::SelectedSymbol;
 use crate::state::{AppState, Tool};
 use crate::ui;
 use crate::ui::cst_panel;
@@ -162,7 +163,10 @@ impl SpatialCodingApp {
                     self.state.settings.node_width,
                     self.state.settings.font_size,
                 ) {
-                    if ui.input(|i| i.modifiers.shift) {
+                    let additive = ui.input(|i| i.modifiers.shift);
+                    if let Some(symbol) = self.symbol_at(&painter, id, pos) {
+                        self.state.selection.select_symbol(id, symbol, additive);
+                    } else if additive {
                         self.state.selection.toggle(id);
                     } else {
                         self.state.selection.select(id);
@@ -185,6 +189,40 @@ impl SpatialCodingApp {
                 }
             }
         }
+    }
+
+    /// Pick only the exact name returned by LSP, measured with the same token
+    /// spans and font as painting. Whitespace and keywords select the file.
+    fn symbol_at(&mut self, painter: &egui::Painter, node_id: u64, screen: egui::Pos2) -> Option<SelectedSymbol> {
+        let node = self.state.node_store.get_file(node_id)?;
+        let zoom = self.state.viewport.zoom;
+        let lod = LodLevel::from_zoom(zoom);
+        if node.collapsed || lod == LodLevel::TitleOnly {
+            return None;
+        }
+        let font_size = self.state.settings.font_size;
+        let world = self.state.viewport.screen_to_world(screen);
+        let code_y = node.position.y + HEADER_HEIGHT + CODE_PADDING;
+        if world.y < code_y { return None }
+        let line = ((world.y - code_y) / line_height(font_size)).floor() as usize;
+        if line >= node.visible_lines() { return None }
+        let spans = self.highlighter.highlight_file(&node.path, &node.content).get(line)?;
+        let code_x = self.state.viewport.world_to_screen(node.position).x + 8.0 * zoom;
+        for occurrence in self.state.deps.symbol_occurrences(&node.path, line) {
+            let (_, start, end) = occurrence.name_span;
+            let Some((x0, x1)) = name_x_range(painter, lod, spans, start, end, font_size * zoom) else { continue };
+            if screen.x < code_x + x0 || screen.x >= code_x + x1 { continue }
+            let definition = self.state.node_store.file_nodes.values()
+                .find(|n| n.path == occurrence.definition_path)?;
+            let (line, start_byte, end_byte) = occurrence.definition_name_span;
+            return Some(SelectedSymbol {
+                node_id: definition.id,
+                name_span: crate::edges::edge_store::NameSpan { line, start_byte, end_byte },
+                span: crate::analysis::dependencies::LineSpan::of_range(occurrence.symbol.range),
+                label: occurrence.symbol.kind.label().to_string(),
+            });
+        }
+        None
     }
 
     fn draw_folder_nodes(&self, painter: &egui::Painter) {
@@ -234,8 +272,7 @@ impl SpatialCodingApp {
         let node_width = self.state.settings.node_width;
         let font_size = self.state.settings.font_size;
         let visible_world = self.state.viewport.visible_world_rect(canvas_rect);
-        let selected_ids: std::collections::HashSet<u64> = self.state.selection.selected_ids().collect();
-        let edge_spans = self.state.edge_store.selected_spans(&selected_ids);
+        let edge_spans = self.state.edge_store.focused_spans(&self.state.selection, &self.state.edge_style);
 
         for node in self.state.node_store.file_nodes.values() {
             let world_rect = node.world_rect(node_width, font_size);
@@ -371,17 +408,46 @@ impl SpatialCodingApp {
         }
     }
 
-    fn draw_edges(&self, painter: &egui::Painter) {
-        let selected: std::collections::HashSet<u64> = self.state.selection.selected_ids().collect();
+    fn draw_edges(&mut self, painter: &egui::Painter) {
+        let viewport = &self.state.viewport;
+        let zoom = viewport.zoom;
+        let lod = LodLevel::from_zoom(zoom);
+        let font_size = self.state.settings.font_size;
+        let node_width = self.state.settings.node_width;
+        let highlighter = &mut self.highlighter;
+        let mut symbol_rect = |node: &crate::nodes::file_node::FileNode, name: crate::edges::edge_store::NameSpan| {
+            if node.collapsed || lod == LodLevel::TitleOnly || name.line >= node.visible_lines() {
+                return None;
+            }
+            let spans = highlighter.highlight_file(&node.path, &node.content).get(name.line)?;
+            let (x0, x1) = name_x_range(painter, lod, spans, name.start_byte, name.end_byte, font_size * zoom)?;
+            let origin = viewport.world_to_screen(node.position);
+            let line_h = line_height(font_size) * zoom;
+            let line_top = origin.y + (HEADER_HEIGHT + CODE_PADDING) * zoom + name.line as f32 * line_h;
+            let (top, height) = if lod == LodLevel::Full {
+                let text = node.content.lines().nth(name.line)?.get(name.start_byte..name.end_byte)?;
+                let height = painter.layout_no_wrap(text.to_string(), code_font(font_size * zoom), egui::Color32::PLACEHOLDER).size().y;
+                (line_top, height)
+            } else {
+                let height = (line_h * 0.6).max(1.0);
+                (line_top + (line_h - height) * 0.5, height)
+            };
+            let rect = egui::Rect::from_min_max(
+                egui::pos2(origin.x + 8.0 * zoom + x0, top),
+                egui::pos2(origin.x + 8.0 * zoom + x1, top + height),
+            );
+            viewport.world_to_screen_rect(node.world_rect(node_width, font_size)).contains_rect(rect).then_some(rect)
+        };
         edge_renderer::draw_edges(
             painter,
             &self.state.edge_store,
             &self.state.node_store,
             &self.state.viewport,
             &self.state.edge_style,
-            &selected,
+            &self.state.selection,
             self.state.settings.node_width,
             self.state.settings.font_size,
+            &mut symbol_rect,
         );
     }
 
@@ -516,12 +582,9 @@ fn draw_code_text(
     font_px: f32,
 ) {
     let font = code_font(font_px);
-    let bottom = painter.clip_rect().bottom();
-    for (i, spans) in lines.iter().enumerate() {
+    let rows = visible_code_rows(origin.y, line_h, lines.len(), painter.clip_rect());
+    for (i, spans) in lines.iter().enumerate().take(rows.end).skip(rows.start) {
         let y = origin.y + i as f32 * line_h;
-        if y > bottom {
-            break;
-        }
         let mut x = origin.x;
         for (style, text) in spans {
             let text = text.trim_end_matches(['\n', '\r']);
@@ -552,13 +615,9 @@ fn draw_code_bars(
     let char_w = code_char_width(font_px);
     let bar_h = (line_h * 0.6).max(1.0);
     let per_token = line_h >= 4.0;
-    let bottom = painter.clip_rect().bottom();
-
-    for (i, spans) in lines.iter().enumerate() {
+    let rows = visible_code_rows(origin.y, line_h, lines.len(), painter.clip_rect());
+    for (i, spans) in lines.iter().enumerate().take(rows.end).skip(rows.start) {
         let y = origin.y + i as f32 * line_h + (line_h - bar_h) * 0.5;
-        if y > bottom {
-            break;
-        }
         let mut col = 0usize;
         let mut line_span: Option<(usize, usize, egui::Color32)> = None;
         for (style, text) in spans {
@@ -585,6 +644,14 @@ fn draw_code_bars(
             bar(painter, origin.x, y, s, e, char_w, bar_h, c);
         }
     }
+}
+
+/// Files retain all their rows; only painting is restricted to the viewport.
+fn visible_code_rows(top: f32, line_h: f32, count: usize, clip: egui::Rect) -> std::ops::Range<usize> {
+    if line_h <= 0.0 { return 0..0 }
+    let start = (((clip.top() - top) / line_h).floor().max(0.0) as usize).min(count);
+    let end = (((clip.bottom() - top) / line_h).ceil().max(0.0) as usize).min(count);
+    start..end.max(start)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -670,6 +737,13 @@ fn x_at_byte(spans: &HighlightedLine, at: usize, width: &dyn Fn(&str) -> f32) ->
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_viewport_rows_are_painted_without_truncating_the_file() {
+        let clip = egui::Rect::from_min_max(egui::pos2(0.0, 1000.0), egui::pos2(700.0, 1100.0));
+        assert_eq!(visible_code_rows(0.0, 10.0, 10000, clip), 100..110);
+        assert_eq!(visible_code_rows(0.0, 10.0, 105, clip), 100..105);
+    }
 
     #[test]
     fn visual_width_counts_tabs_as_four_columns() {

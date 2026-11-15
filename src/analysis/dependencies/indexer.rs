@@ -14,14 +14,15 @@ use std::collections::{HashMap, VecDeque};
 use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
 
-use super::{DependencyLink, LineSpan, OpenFiles, StatementFinder, byte_offset, pick_symbols, usages};
+use super::{DependencyLink, LineSpan, OpenFiles, StatementFinder, byte_offset, pick_symbols, usage_occurrences};
 use crate::analysis::lsp::manager::{LspManager, LspRequest, LspResponse, RequestId, ServerStatus};
-use crate::analysis::lsp::{Location, Position, ServerId, server_for};
+use crate::analysis::lsp::{Location, LspSymbol, Position, ServerId, server_for};
 
 /// Requests of the indexer waiting on one server at a time.
 pub const MAX_IN_FLIGHT: usize = 4;
 
 struct SymbolEntry {
+    symbol: LspSymbol,
     label: String,
     definition: LineSpan,
     position: Position,
@@ -76,6 +77,15 @@ pub struct ServerProgress {
     pub status: Option<ServerStatus>,
     /// Why the symbols of a file could not be read (a missing server).
     pub error: Option<String>,
+}
+
+/// An exact definition or reference name from LSP, with UTF-16 converted to
+/// byte columns for the canvas's measured glyph layout. No text-name guessing.
+pub struct SymbolOccurrence<'a> {
+    pub definition_path: &'a Path,
+    pub symbol: &'a LspSymbol,
+    pub name_span: (usize, usize, usize),
+    pub definition_name_span: (usize, usize, usize),
 }
 
 #[derive(Default)]
@@ -159,6 +169,7 @@ impl DependencyIndexer {
                     let picked: Vec<SymbolEntry> = pick_symbols(&symbols)
                         .into_iter()
                         .map(|s| SymbolEntry {
+                            symbol: s.clone(),
                             label: s.kind.label().to_string(),
                             definition: LineSpan::of_range(s.range),
                             position: s.selection_range.start,
@@ -281,6 +292,48 @@ impl DependencyIndexer {
         std::mem::take(&mut self.changed)
     }
 
+    /// Names on one displayed line. Definitions are available even when there
+    /// are no cross-file edges; references retain the server's exact ranges
+    /// (including import aliases). Called on a canvas click, not every frame.
+    pub fn symbol_occurrences(&self, path: &Path, line: usize) -> Vec<SymbolOccurrence<'_>> {
+        let Some(source) = self.files.get(path) else { return Vec::new() };
+        let canonical = std::fs::canonicalize(path).ok();
+        let same_path = |other: &Path| other == path || canonical.as_deref() == Some(other);
+        let mut out = Vec::new();
+        for (definition_path, entry) in &self.files {
+            let Some(Ok(symbols)) = &entry.symbols else { continue };
+            for symbol in symbols {
+                let Some(definition_name_span) = Self::name_byte_span(
+                    &entry.text, symbol.position, symbol.name_end,
+                ) else { continue };
+                let mut push = |name_span| out.push(SymbolOccurrence {
+                    definition_path,
+                    symbol: &symbol.symbol,
+                    name_span,
+                    definition_name_span,
+                });
+                if same_path(definition_path) && symbol.position.line == line {
+                    push(definition_name_span);
+                }
+                for reference in symbol.references.iter().flatten() {
+                    if reference.range.start.line == line && same_path(&reference.path)
+                        && let Some(span) = Self::name_byte_span(
+                            &source.text, reference.range.start, reference.range.end,
+                        )
+                    {
+                        push(span);
+                    }
+                }
+            }
+        }
+        // A declaration may also be returned as a reference by the server.
+        out.sort_by_key(|o| (o.name_span, o.definition_path, o.definition_name_span));
+        out.dedup_by(|a, b| a.name_span == b.name_span
+            && a.definition_path == b.definition_path
+            && a.definition_name_span == b.definition_name_span);
+        out
+    }
+
     /// Every link between the open files known so far.
     pub fn links(&self, open: &OpenFiles) -> Vec<DependencyLink> {
         let mut finder = StatementFinder::default();
@@ -299,16 +352,19 @@ impl DependencyIndexer {
                     symbol.position,
                     symbol.name_end,
                 );
-                for (source, usage) in usages(target, references, open, &mut finder) {
-                    let source_label = self.enclosing_symbol_label(&source, usage.start);
+                for usage in usage_occurrences(target, references, open, &mut finder) {
+                    let source_label = self.enclosing_symbol_label(&usage.source, usage.range.start.line);
+                    let source_name_span = open.get(&usage.source).and_then(|(_, text)|
+                        Self::name_byte_span(text, usage.range.start, usage.range.end));
                     out.push(DependencyLink {
-                        source,
+                        source: usage.source,
                         target: target.clone(),
                         label: symbol.label.clone(),
                         source_label,
-                        usage,
+                        usage: usage.span,
                         definition: symbol.definition,
                         name_span,
+                        source_name_span,
                     });
                 }
             }
@@ -468,5 +524,48 @@ mod tests {
         assert_eq!(indexer.queue.len(), 10 - MAX_IN_FLIGHT);
         drain(&mut indexer, &mut manager);
         assert_eq!(indexer.progress(&manager)[0].done, 10);
+    }
+
+    #[test]
+    fn occurrence_picking_uses_exact_utf16_reference_ranges_even_for_an_alias() {
+        use crate::analysis::lsp::{Range, SymbolKind};
+        let range = |start, end| Range {
+            start: Position { line: 0, character: start },
+            end: Position { line: 0, character: end },
+        };
+        let symbol = LspSymbol {
+            name: "greet".into(), detail: None, kind: SymbolKind::Function,
+            range: range(0, 26), selection_range: range(16, 21), children: vec![],
+        };
+        let definition = PathBuf::from("/p/definition.ts");
+        let source = PathBuf::from("/p/use.ts");
+        let source_text = "\"😀\"; saluer(); // saluer is an alias";
+        let file = |text: &str, symbols| FileEntry {
+            hash: hash_text(text), server: ServerId::TypeScript, language_id: "typescript",
+            text: text.into(), symbols: Some(Ok(symbols)), stale: false, retried: false,
+        };
+        let mut indexer = DependencyIndexer::default();
+        indexer.files.insert(definition.clone(), file("export function greet() {}", vec![SymbolEntry {
+            symbol: symbol.clone(), label: "fn".into(), definition: LineSpan { start: 0, end: 0 },
+            position: symbol.selection_range.start, name_end: symbol.selection_range.end,
+            references: Some(vec![
+                Location { path: source.clone(), range: range(6, 12) },
+                Location { path: definition.clone(), range: range(16, 21) },
+            ]),
+        }]));
+        indexer.files.insert(source.clone(), file(source_text, vec![]));
+        let occurrences = indexer.symbol_occurrences(&source, 0);
+        assert_eq!(occurrences.len(), 1, "the spelling in the comment is not an LSP occurrence");
+        let occurrence = &occurrences[0];
+        assert_eq!(occurrence.symbol.name, "greet");
+        let (_, start, end) = occurrence.name_span;
+        assert_eq!(&source_text[start..end], "saluer", "UTF-16 is converted after the emoji");
+        assert_eq!(occurrence.definition_path, definition);
+        assert_eq!(indexer.symbol_occurrences(&definition, 0).len(), 1, "declaration reference is deduplicated");
+        assert!(indexer.symbol_occurrences(&source, 1).is_empty());
+        let open = OpenFiles::new(indexer.files.iter().map(|(path, entry)| (path.as_path(), entry.text.as_str())));
+        let links = indexer.links(&open);
+        let (_, start, end) = links[0].source_name_span.unwrap();
+        assert_eq!(&source_text[start..end], "saluer", "edge carries the exact UTF-16 alias reference range");
     }
 }

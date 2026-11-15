@@ -8,7 +8,7 @@ checklist "02 · Nós de arquivo e LOD" \
   "Ctrl+roda até ~0,2x|o código vira barras coloridas por token, estilo minimap (LOD Minified, 0,12–0,5)" \
   "Ctrl+roda acima de 0,5x|texto real com syntax highlighting (LOD Full)" \
   "Entre os níveis, observar a borda e posição dos nós|a geometria não muda: só o conteúdo desenhado troca" \
-  "Abrir um nó com mais de 50 linhas (ex.: m002.rs)|o nó mostra no máximo 50 linhas, mesmo o arquivo sendo maior" \
+  "Abrir um nó com mais de 50 linhas (ex.: m002.rs) e navegar até o final|o bloco inclui todas as linhas do arquivo; pan/zoom apenas recorta o que está fora da tela, sem truncar o conteúdo" \
   "Em zoom intermediário, olhar o título|se o título no header ficar ilegível, aparece um rótulo flutuando acima do nó" \
   "Clicar num nó|borda de seleção destacada; Shift+clique adiciona/remove outros nós" \
   "Com um nó selecionado, arrastar com o botão esquerdo|o nó selecionado acompanha o mouse"

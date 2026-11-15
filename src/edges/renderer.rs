@@ -1,14 +1,13 @@
-use std::collections::HashSet;
-
 use egui::{Color32, Pos2, Rect, Stroke, Vec2};
 
 use crate::analysis::dependencies::LineSpan;
 use crate::canvas::viewport::Viewport;
-use crate::edges::edge_store::{EdgeKind, EdgeStore};
+use crate::edges::edge_store::{EdgeKind, EdgeStore, NameSpan};
 use crate::edges::style::{EdgeStyle, EdgeStyleConfig, GradientGapMode, OpacityMode};
 use crate::nodes::file_node::{FileNode, HEADER_HEIGHT};
 use crate::nodes::lod::LodLevel;
 use crate::nodes::node_store::NodeStore;
+use crate::nodes::selection::Selection;
 
 /// Shortest horizontal reach of a bezier's control points, in screen pixels,
 /// so edges between vertically stacked nodes still bend outward.
@@ -28,12 +27,6 @@ const CONNECTED_ALPHA: u8 = 235;
 const UNCONNECTED_DEPTH_ALPHA: u8 = 40;
 const FULL_ALPHA: u8 = 200;
 
-/// Symbol pill geometry, in screen pixels.
-const PILL_FONT_PX: f32 = 11.0;
-const PILL_PAD_X: f32 = 6.0;
-const PILL_PAD_Y: f32 = 2.0;
-const PILL_GAP: f32 = 4.0;
-
 /// Inverted-direction color for `highlight_backwards`: v2 picks a cool blue.
 const BACKWARDS_COLOR: Color32 = Color32::from_rgb(0x3b, 0x82, 0xf6);
 
@@ -43,59 +36,72 @@ pub fn draw_edges(
     nodes: &NodeStore,
     viewport: &Viewport,
     config: &EdgeStyleConfig,
-    selected_nodes: &HashSet<u64>,
+    selection: &Selection,
     node_width: f32,
     font_size: f32,
+    symbol_rect: &mut dyn FnMut(&FileNode, NameSpan) -> Option<Rect>,
 ) {
     let clip = painter.clip_rect();
-    let visible_world = viewport.visible_world_rect(clip);
     // Stroke scales softly with zoom so edges stay sub-pixel thin in overview.
     let stroke_px = 1.0 * viewport.zoom.clamp(0.6, 1.4);
     let min_len_px = config.min_size_pct * MIN_VISIBLE_LEN_PX;
-    let nothing_selected = selected_nodes.is_empty();
-    let show_pills = config.show_symbol_pills
-        && !nothing_selected
-        && LodLevel::from_zoom(viewport.zoom) != LodLevel::TitleOnly;
-    let mut pills: Vec<(Pos2, f32, String)> = Vec::new();
+    let nothing_selected = selection.count() == 0 && selection.symbols().is_empty();
+    let code_visible = LodLevel::from_zoom(viewport.zoom) != LodLevel::TitleOnly;
 
     // Two passes, as v2: the dim web first, then the selection's edges on top.
     for connected_pass in [false, true] {
         for edge in edges.all_edges() {
-            let is_src_sel = selected_nodes.contains(&edge.source_node);
-            let is_tgt_sel = selected_nodes.contains(&edge.target_node);
-            let is_connected = is_src_sel || is_tgt_sel;
+            let is_connected = edge.is_selected(selection);
             if is_connected != connected_pass {
                 continue;
             }
-            match edge.kind {
-                EdgeKind::ReExport if !config.show_reexport_edges => continue,
-                EdgeKind::Barrel if !config.show_barrel_edges => continue,
-                _ => {}
+            if !edge.is_visible(config) {
+                continue;
             }
             // show_all=false hides the edges unrelated to the current selection.
             if !config.show_all && !is_connected && !nothing_selected {
                 continue;
             }
-            let (Some(src), Some(tgt)) =
-                (nodes.get_file(edge.source_node), nodes.get_file(edge.target_node))
-            else {
+            let (Some(src), Some(tgt)) = (
+                nodes.get_file(edge.source_node),
+                nodes.get_file(edge.target_node),
+            ) else {
                 continue;
             };
 
             let src_rect = src.world_rect(node_width, font_size);
             let tgt_rect = tgt.world_rect(node_width, font_size);
-            let (src_point, src_dir) =
-                anchor(src, src_rect, edge.source_span, tgt_rect.center().x, font_size);
-            let (tgt_point, tgt_dir) =
-                anchor(tgt, tgt_rect, edge.target_span, src_rect.center().x, font_size);
+            let (src_point, src_dir) = anchor(
+                src,
+                src_rect,
+                edge.source_span,
+                tgt_rect.center().x,
+                font_size,
+            );
+            let (tgt_point, tgt_dir) = anchor(
+                tgt,
+                tgt_rect,
+                edge.target_span,
+                src_rect.center().x,
+                font_size,
+            );
 
-            let edge_rect = egui::Rect::from_two_pos(src_point, tgt_point);
-            if !visible_world.intersects(edge_rect) {
+            let src_screen = edge
+                .source_name_span
+                .filter(|_| code_visible && !src.collapsed)
+                .and_then(|name| symbol_rect(src, name))
+                .map(|rect| glyph_anchor(rect, src_dir))
+                .unwrap_or_else(|| viewport.world_to_screen(src_point));
+            let tgt_screen = edge
+                .name_span
+                .filter(|_| code_visible && !tgt.collapsed)
+                .and_then(|name| symbol_rect(tgt, name))
+                .map(|rect| glyph_anchor(rect, tgt_dir))
+                .unwrap_or_else(|| viewport.world_to_screen(tgt_point));
+            let edge_rect = egui::Rect::from_two_pos(src_screen, tgt_screen);
+            if !clip.intersects(edge_rect) {
                 continue;
             }
-
-            let src_screen = viewport.world_to_screen(src_point);
-            let tgt_screen = viewport.world_to_screen(tgt_point);
 
             if (tgt_screen - src_screen).length() < min_len_px {
                 continue;
@@ -108,7 +114,15 @@ pub fn draw_edges(
 
             // Highlight overrides pick a fixed color that must stay readable
             // end to end, so they also turn the gradient off.
-            let backwards = config.highlight_backwards && is_tgt_sel && !is_src_sel;
+            let backwards = config.highlight_backwards
+                && if selection.symbols().is_empty() {
+                    selection.is_selected(edge.target_node)
+                        && !selection.is_selected(edge.source_node)
+                } else {
+                    selection.symbols().iter().any(|s| {
+                        s.node_id == edge.target_node && Some(s.name_span) == edge.name_span
+                    })
+                };
             let override_color = if backwards {
                 Some(BACKWARDS_COLOR)
             } else if config.highlight_barrel && edge.kind == EdgeKind::Barrel {
@@ -120,10 +134,18 @@ pub fn draw_edges(
             };
             let selected_edge = is_connected && !nothing_selected;
             let base_color = override_color.unwrap_or_else(|| {
-                if selected_edge { rgb(config.selected_color) } else { rgb(config.base_color) }
+                if selected_edge {
+                    rgb(config.selected_color)
+                } else {
+                    rgb(config.base_color)
+                }
             });
             let color = base_color.gamma_multiply(alpha as f32 / 255.0);
-            let width = if selected_edge { stroke_px * SELECTED_STROKE_SCALE } else { stroke_px };
+            let width = if selected_edge {
+                stroke_px * SELECTED_STROKE_SCALE
+            } else {
+                stroke_px
+            };
             let stroke = Stroke::new(width, color);
 
             // Direction the edge arrives from, for the arrow head.
@@ -139,8 +161,8 @@ pub fn draw_edges(
                     arrives_from = cp2;
                     if use_gradient {
                         draw_bezier_gradient(
-                            painter, src_screen, src_dir, tgt_screen, tgt_dir,
-                            width, alpha, start_col, end_col, fade_frac,
+                            painter, src_screen, src_dir, tgt_screen, tgt_dir, width, alpha,
+                            start_col, end_col, fade_frac,
                         );
                     } else {
                         draw_bezier(painter, src_screen, src_dir, tgt_screen, tgt_dir, stroke);
@@ -148,24 +170,45 @@ pub fn draw_edges(
                 }
                 EdgeStyle::Step => {
                     if use_gradient {
-                        draw_polyline_gradient(painter, &step_points(src_screen, tgt_screen),
-                            width, alpha, start_col, end_col, fade_frac);
+                        draw_polyline_gradient(
+                            painter,
+                            &step_points(src_screen, tgt_screen),
+                            width,
+                            alpha,
+                            start_col,
+                            end_col,
+                            fade_frac,
+                        );
                     } else {
                         draw_step(painter, src_screen, tgt_screen, stroke);
                     }
                 }
                 EdgeStyle::Line => {
                     if use_gradient {
-                        draw_polyline_gradient(painter, &[src_screen, tgt_screen],
-                            width, alpha, start_col, end_col, fade_frac);
+                        draw_polyline_gradient(
+                            painter,
+                            &[src_screen, tgt_screen],
+                            width,
+                            alpha,
+                            start_col,
+                            end_col,
+                            fade_frac,
+                        );
                     } else {
                         painter.line_segment([src_screen, tgt_screen], stroke);
                     }
                 }
                 EdgeStyle::Pcb => {
                     if use_gradient {
-                        draw_polyline_gradient(painter, &pcb_points(src_screen, tgt_screen),
-                            width, alpha, start_col, end_col, fade_frac);
+                        draw_polyline_gradient(
+                            painter,
+                            &pcb_points(src_screen, tgt_screen),
+                            width,
+                            alpha,
+                            start_col,
+                            end_col,
+                            fade_frac,
+                        );
                     } else {
                         draw_pcb(painter, src_screen, tgt_screen, stroke);
                     }
@@ -186,58 +229,17 @@ pub fn draw_edges(
                 };
                 draw_arrow_head(painter, arrives_from, tgt_screen, color, arrow_size);
             }
-
-            if show_pills && selected_edge
-                && let Some(name) = edge_symbol_name(edge, tgt)
-            {
-                // Inside each node, next to the side the edge touches.
-                pills.push((src_screen, -src_dir, name.to_string()));
-                pills.push((tgt_screen, -tgt_dir, name.to_string()));
-            }
         }
     }
-
-    draw_symbol_pills(painter, pills, rgb(config.selected_color));
 }
 
-/// Name of the symbol an edge points at, read from the target's definition
-/// line through the edge's name span.
-pub(crate) fn edge_symbol_name<'a>(
-    edge: &crate::edges::edge_store::Edge,
-    target: &'a FileNode,
-) -> Option<&'a str> {
-    let ns = edge.name_span?;
-    let line = target.content.lines().nth(ns.line)?;
-    let name = line.get(ns.start_byte..ns.end_byte)?.trim();
-    (!name.is_empty()).then_some(name)
-}
-
-/// v2 symbol pills: a rounded label with the symbol name at each end of the
-/// selection's edges. `inward` (+1 right, -1 left) is the direction from the
-/// anchor into its node. Pills sharing a spot and name are drawn once.
-fn draw_symbol_pills(painter: &egui::Painter, pills: Vec<(Pos2, f32, String)>, accent: Color32) {
-    let mut seen = HashSet::new();
-    let font = egui::FontId::proportional(PILL_FONT_PX);
-    for (at, inward, name) in pills {
-        let key = (at.x.round() as i32, at.y.round() as i32, name.clone());
-        if !seen.insert(key) {
-            continue;
-        }
-        let galley = painter.layout_no_wrap(name, font.clone(), accent);
-        let size = galley.size() + Vec2::new(PILL_PAD_X * 2.0, PILL_PAD_Y * 2.0);
-        let x0 = if inward > 0.0 { at.x + PILL_GAP } else { at.x - PILL_GAP - size.x };
-        let rect = Rect::from_min_size(Pos2::new(x0, at.y - size.y * 0.5), size);
-        if !painter.clip_rect().intersects(rect) {
-            continue;
-        }
-        painter.rect_filled(rect, size.y * 0.5, Color32::from_black_alpha(220));
-        painter.rect_stroke(
-            rect,
-            size.y * 0.5,
-            Stroke::new(1.0_f32, accent.gamma_multiply(0.6)),
-            egui::StrokeKind::Inside,
-        );
-        painter.galley(rect.min + Vec2::new(PILL_PAD_X, PILL_PAD_Y), galley, accent);
+/// Touch the side of the actual name facing the other endpoint, not the file
+/// border or a replacement label. The arrow tip stays outside the glyphs.
+fn glyph_anchor(rect: Rect, outward: f32) -> Pos2 {
+    if outward > 0.0 {
+        rect.right_center()
+    } else {
+        rect.left_center()
     }
 }
 
@@ -251,7 +253,11 @@ fn anchor(
     toward_x: f32,
     font_size: f32,
 ) -> (Pos2, f32) {
-    let dir = if toward_x >= rect.center().x { 1.0 } else { -1.0 };
+    let dir = if toward_x >= rect.center().x {
+        1.0
+    } else {
+        -1.0
+    };
     let x = if dir > 0.0 { rect.right() } else { rect.left() };
     let y = span
         .filter(|_| !node.collapsed)
@@ -263,7 +269,11 @@ fn anchor(
 fn compute_alpha(config: &EdgeStyleConfig, is_connected: bool, nothing_selected: bool) -> u8 {
     match config.opacity_mode {
         OpacityMode::Full => {
-            if is_connected && !nothing_selected { CONNECTED_ALPHA } else { FULL_ALPHA }
+            if is_connected && !nothing_selected {
+                CONNECTED_ALPHA
+            } else {
+                FULL_ALPHA
+            }
         }
         OpacityMode::Depth => {
             if nothing_selected {
@@ -279,7 +289,11 @@ fn compute_alpha(config: &EdgeStyleConfig, is_connected: bool, nothing_selected:
 
 /// Arrow heads follow v2's "Arrow Heads › Only selected": with `only_selected`
 /// on they mark only the edges of the current selection.
-fn arrow_head_visible(config: &EdgeStyleConfig, is_connected: bool, nothing_selected: bool) -> bool {
+fn arrow_head_visible(
+    config: &EdgeStyleConfig,
+    is_connected: bool,
+    nothing_selected: bool,
+) -> bool {
     config.show_arrow_heads && (!config.only_selected || (is_connected && !nothing_selected))
 }
 
@@ -291,7 +305,11 @@ fn kind_color_for(config: &EdgeStyleConfig, label: Option<&str>) -> Color32 {
 }
 
 fn rgb(c: [f32; 3]) -> Color32 {
-    Color32::from_rgb((c[0] * 255.0) as u8, (c[1] * 255.0) as u8, (c[2] * 255.0) as u8)
+    Color32::from_rgb(
+        (c[0] * 255.0) as u8,
+        (c[1] * 255.0) as u8,
+        (c[2] * 255.0) as u8,
+    )
 }
 
 /// Source and target colors for the bi-color gradient. The source color
@@ -415,10 +433,7 @@ fn draw_polyline_gradient(
     if pts.len() < 2 {
         return;
     }
-    let total: f32 = pts
-        .windows(2)
-        .map(|w| (w[1] - w[0]).length())
-        .sum();
+    let total: f32 = pts.windows(2).map(|w| (w[1] - w[0]).length()).sum();
     if total <= 0.0 {
         return;
     }
@@ -443,7 +458,13 @@ fn draw_polyline_gradient(
 /// Sample the bi-color fade at parameter `t ∈ [0,1]`. The fade lives in the
 /// centered window of width `fade_frac`; outside stays solid (start before,
 /// end after). All colors carry the edge's base `alpha`.
-pub(crate) fn gradient_sample(start: Color32, end: Color32, alpha: u8, t: f32, fade_frac: f32) -> Color32 {
+pub(crate) fn gradient_sample(
+    start: Color32,
+    end: Color32,
+    alpha: u8,
+    t: f32,
+    fade_frac: f32,
+) -> Color32 {
     let frac = fade_frac.clamp(0.0, 1.0);
     let half_gap = (1.0 - frac) * 0.5;
     let fade_start = half_gap;
@@ -463,7 +484,12 @@ pub(crate) fn gradient_sample(start: Color32, end: Color32, alpha: u8, t: f32, f
 
 fn lerp_color(a: Color32, b: Color32, t: f32) -> Color32 {
     let l = |x: u8, y: u8| (x as f32 * (1.0 - t) + y as f32 * t).round() as u8;
-    Color32::from_rgba_unmultiplied(l(a.r(), b.r()), l(a.g(), b.g()), l(a.b(), b.b()), l(a.a(), b.a()))
+    Color32::from_rgba_unmultiplied(
+        l(a.r(), b.r()),
+        l(a.g(), b.g()),
+        l(a.b(), b.b()),
+        l(a.a(), b.a()),
+    )
 }
 
 fn step_points(from: Pos2, to: Pos2) -> [Pos2; 4] {
@@ -525,8 +551,14 @@ mod tests {
         let span = Some(LineSpan { start: 2, end: 2 });
         let line_y = node.line_anchor_y(2, 10.0).unwrap();
 
-        assert_eq!(anchor(&node, rect, span, 500.0, 10.0), (Pos2::new(100.0, line_y), 1.0));
-        assert_eq!(anchor(&node, rect, span, -500.0, 10.0), (Pos2::new(0.0, line_y), -1.0));
+        assert_eq!(
+            anchor(&node, rect, span, 500.0, 10.0),
+            (Pos2::new(100.0, line_y), 1.0)
+        );
+        assert_eq!(
+            anchor(&node, rect, span, -500.0, 10.0),
+            (Pos2::new(0.0, line_y), -1.0)
+        );
     }
 
     #[test]
@@ -534,19 +566,34 @@ mod tests {
         let header_y = HEADER_HEIGHT * 0.5;
         let mut node = file("a\nb\n", 0.0);
         let rect = node.world_rect(100.0, 10.0);
-        assert_eq!(anchor(&node, rect, None, 500.0, 10.0).0.y, header_y, "no span");
+        assert_eq!(
+            anchor(&node, rect, None, 500.0, 10.0).0.y,
+            header_y,
+            "no span"
+        );
         let past_end = Some(LineSpan { start: 7, end: 7 });
-        assert_eq!(anchor(&node, rect, past_end, 500.0, 10.0).0.y, header_y, "line not drawn");
+        assert_eq!(
+            anchor(&node, rect, past_end, 500.0, 10.0).0.y,
+            header_y,
+            "line not drawn"
+        );
         node.collapsed = true;
         let first = Some(LineSpan { start: 0, end: 0 });
-        assert_eq!(anchor(&node, rect, first, 500.0, 10.0).0.y, header_y, "collapsed");
+        assert_eq!(
+            anchor(&node, rect, first, 500.0, 10.0).0.y,
+            header_y,
+            "collapsed"
+        );
     }
 
     #[test]
     fn bezier_control_points_leave_each_side_outward() {
         let [_, cp1, cp2, _] =
             bezier_points(Pos2::new(100.0, 0.0), 1.0, Pos2::new(100.0, 300.0), 1.0);
-        assert_eq!((cp1.x, cp2.x), (100.0 + MIN_BEZIER_REACH, 100.0 + MIN_BEZIER_REACH));
+        assert_eq!(
+            (cp1.x, cp2.x),
+            (100.0 + MIN_BEZIER_REACH, 100.0 + MIN_BEZIER_REACH)
+        );
 
         let [_, cp1, cp2, _] =
             bezier_points(Pos2::new(0.0, 0.0), 1.0, Pos2::new(1000.0, 0.0), -1.0);
@@ -583,18 +630,10 @@ mod tests {
     }
 
     #[test]
-    fn symbol_name_is_read_from_the_target_definition_line() {
-        use crate::edges::edge_store::{EdgeStore, NameSpan};
-        let target = file("// doc\npub fn kind_of(x: u8) {}\n", 0.0);
-        let mut store = EdgeStore::default();
-        let id = store.add(1, 2, Some("fn".into()));
-        let mut edge = store.all_edges().find(|e| e.id == id).unwrap().clone();
-        edge.name_span = Some(NameSpan { line: 1, start_byte: 7, end_byte: 14 });
-        assert_eq!(edge_symbol_name(&edge, &target), Some("kind_of"));
-        edge.name_span = Some(NameSpan { line: 9, start_byte: 0, end_byte: 3 });
-        assert_eq!(edge_symbol_name(&edge, &target), None, "line past the end");
-        edge.name_span = None;
-        assert_eq!(edge_symbol_name(&edge, &target), None);
+    fn glyph_anchor_touches_the_name_not_the_file_border() {
+        let name = Rect::from_min_max(Pos2::new(60.0, 80.0), Pos2::new(110.0, 92.0));
+        assert_eq!(glyph_anchor(name, -1.0), Pos2::new(60.0, 86.0));
+        assert_eq!(glyph_anchor(name, 1.0), Pos2::new(110.0, 86.0));
     }
 
     #[test]
@@ -630,8 +669,14 @@ mod tests {
         let a = Color32::from_rgb(200, 0, 0);
         let b = Color32::from_rgb(0, 0, 200);
         // fade_frac 0.5: solid A on 0..0.25, fade on 0.25..0.75, solid B on 0.75..1.
-        assert_eq!(gradient_sample(a, b, 255, 0.1, 0.5), Color32::from_rgba_unmultiplied(200, 0, 0, 255));
-        assert_eq!(gradient_sample(a, b, 255, 0.9, 0.5), Color32::from_rgba_unmultiplied(0, 0, 200, 255));
+        assert_eq!(
+            gradient_sample(a, b, 255, 0.1, 0.5),
+            Color32::from_rgba_unmultiplied(200, 0, 0, 255)
+        );
+        assert_eq!(
+            gradient_sample(a, b, 255, 0.9, 0.5),
+            Color32::from_rgba_unmultiplied(0, 0, 200, 255)
+        );
         let mid = gradient_sample(a, b, 255, 0.5, 0.5);
         assert_eq!(mid, Color32::from_rgba_unmultiplied(100, 0, 100, 255));
     }
@@ -641,6 +686,10 @@ mod tests {
         let cfg = config(false, OpacityMode::Depth);
         assert_eq!(compute_alpha(&cfg, true, false), CONNECTED_ALPHA);
         assert_eq!(compute_alpha(&cfg, false, false), UNCONNECTED_DEPTH_ALPHA);
-        assert_eq!(compute_alpha(&cfg, false, true), IDLE_ALPHA, "no selection = faint web");
+        assert_eq!(
+            compute_alpha(&cfg, false, true),
+            IDLE_ALPHA,
+            "no selection = faint web"
+        );
     }
 }

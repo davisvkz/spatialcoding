@@ -229,8 +229,6 @@ fn draw_edges_panel(ui: &mut egui::Ui, state: &mut AppState) {
         ui.checkbox(&mut state.edge_style.show_arrow_heads, "Arrow Heads");
         ui.checkbox(&mut state.edge_style.only_selected, "Only Selected")
             .on_hover_text("Arrow heads only on the edges of the selection");
-        ui.checkbox(&mut state.edge_style.show_symbol_pills, "Symbol Pills")
-            .on_hover_text("Symbol name at both ends of the selection's edges");
         ui.checkbox(&mut state.edge_style.scale_arrow_heads, "Scale Arrow Heads");
         ui.label("Min Size %");
         ui.add(egui::Slider::new(

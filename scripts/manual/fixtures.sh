@@ -14,6 +14,9 @@ put() {
 # client.rs lines 5 and 10 (1-based) → server.rs `pub struct Server` (lines
 # 3-5), line 10 → `pub fn bind`, line 14 → `pub fn addr`; main.rs
 # `util::shout` → helpers/strings.rs (util.rs only re-exports it).
+# Symbol-picking check (TASK-38): select `bind` in server.rs or its use in
+# client.rs. Only bind's links brighten; Server and addr stay dim. Keep the
+# three definitions in one file so accidental whole-file focus is visible.
 fixture_rust() {
   local d=$1
   put "$d" Cargo.toml <<'EOF'
@@ -107,6 +110,12 @@ pub fn shout(s: &str) -> String {
     s.to_uppercase()
 }
 EOF
+  # TASK-41: a real module longer than 50 lines to verify complete file nodes.
+  local i
+  for ((i = 0; i < 80; i++)); do
+    printf '// File continues beyond line 50.\n' >>"$d/src/helpers/strings.rs"
+  done
+  printf 'pub fn after_fifty_lines() {}\n' >>"$d/src/helpers/strings.rs"
 }
 
 # TypeScript/JS: relative imports, index resolution, tsconfig paths,

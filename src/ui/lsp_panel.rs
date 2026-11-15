@@ -164,7 +164,9 @@ impl LspPanelState {
     pub fn receive(&mut self, id: RequestId, response: LspResponse) -> Option<LspResponse> {
         match response {
             LspResponse::Symbols(result) => match &mut self.symbols {
-                Some(entry) if entry.fetch == Fetch::Pending(id) => entry.fetch = Fetch::Done(result),
+                Some(entry) if entry.fetch == Fetch::Pending(id) => {
+                    entry.fetch = Fetch::Done(result)
+                }
                 _ => return Some(LspResponse::Symbols(result)),
             },
             LspResponse::References(result) => match &mut self.references {
@@ -180,7 +182,10 @@ impl LspPanelState {
     /// True while an answer is on its way.
     pub fn is_waiting(&self) -> bool {
         self.symbols.as_ref().is_some_and(|s| s.fetch.is_pending())
-            || self.references.as_ref().is_some_and(|r| r.fetch.is_pending())
+            || self
+                .references
+                .as_ref()
+                .is_some_and(|r| r.fetch.is_pending())
     }
 }
 
@@ -212,7 +217,7 @@ pub fn reference_rows(locations: &[Location]) -> Vec<ReferenceRow> {
 
 /// What a click in the panel asked for, applied after drawing.
 enum Action {
-    FindReferences(LspSymbol),
+    FindReferences(LspSymbol, bool),
     Focus(PathBuf, usize),
 }
 
@@ -241,9 +246,13 @@ pub fn draw_lsp_panel(ui: &mut egui::Ui, state: &mut AppState) {
     }
 
     match action {
-        Some(Action::FindReferences(symbol)) => {
-            let Some(node_id) = state.selection.primary else { return };
-            let Some(node) = state.node_store.get_file(node_id) else { return };
+        Some(Action::FindReferences(symbol, additive)) => {
+            let Some(node_id) = state.selection.primary else {
+                return;
+            };
+            let Some(node) = state.node_store.get_file(node_id) else {
+                return;
+            };
             let root = workspace_root(state, &node.path);
             state.lsp.find_references(
                 Some(ui.ctx()),
@@ -253,6 +262,11 @@ pub fn draw_lsp_panel(ui: &mut egui::Ui, state: &mut AppState) {
                 &node.content,
                 &symbol,
             );
+            if let Some(selected) =
+                crate::nodes::selection::SelectedSymbol::from_lsp(node_id, &node.content, &symbol)
+            {
+                state.selection.select_symbol(node_id, selected, additive);
+            }
         }
         Some(Action::Focus(path, line)) => {
             workspace::focus_location(state, &path, line);
@@ -271,7 +285,12 @@ fn workspace_root(state: &AppState, path: &Path) -> PathBuf {
         .unwrap_or_default()
 }
 
-fn draw_symbols(ui: &mut egui::Ui, state: &mut AppState, node_id: u64, action: &mut Option<Action>) {
+fn draw_symbols(
+    ui: &mut egui::Ui,
+    state: &mut AppState,
+    node_id: u64,
+    action: &mut Option<Action>,
+) {
     let node = state.node_store.get_file(node_id).unwrap();
     ui.label(egui::RichText::new(node.file_name()).strong());
     let Some((server, _)) = server_for(&node.path) else {
@@ -319,10 +338,16 @@ fn draw_symbols(ui: &mut egui::Ui, state: &mut AppState, node_id: u64, action: &
 fn draw_status(ui: &mut egui::Ui, manager: &LspManager, server: ServerId, root: &Path) {
     match manager.status(server, root) {
         Some(ServerStatus::Starting) => {
-            ui.weak(format!("Starting the {} language server\u{2026}", server.name()));
+            ui.weak(format!(
+                "Starting the {} language server\u{2026}",
+                server.name()
+            ));
         }
         Some(ServerStatus::Indexing) => {
-            ui.weak(format!("The {} language server is indexing\u{2026}", server.name()));
+            ui.weak(format!(
+                "The {} language server is indexing\u{2026}",
+                server.name()
+            ));
         }
         // Failures show up as the error of the request itself.
         _ => {}
@@ -346,9 +371,9 @@ fn draw_symbol(
     hovered: &mut Option<(usize, usize)>,
     action: &mut Option<Action>,
 ) {
-    let is_selected = selected
-        .as_ref()
-        .is_some_and(|(name, line)| *name == symbol.name && *line == symbol.selection_range.start.line);
+    let is_selected = selected.as_ref().is_some_and(|(name, line)| {
+        *name == symbol.name && *line == symbol.selection_range.start.line
+    });
     let text = egui::RichText::new(symbol_label(symbol)).monospace();
     let row = |ui: &mut egui::Ui| {
         let response = ui.selectable_label(is_selected, text.clone());
@@ -375,7 +400,10 @@ fn draw_symbol(
         *hovered = Some((symbol.range.start.line, symbol.range.end.line));
     }
     if response.clicked() {
-        *action = Some(Action::FindReferences(symbol.clone()));
+        *action = Some(Action::FindReferences(
+            symbol.clone(),
+            ui.input(|i| i.modifiers.shift),
+        ));
     }
 }
 
@@ -405,7 +433,11 @@ fn draw_references(ui: &mut egui::Ui, state: &mut AppState, action: &mut Option<
     ui.weak(format!(
         "{} {} in {} {}",
         rows.len(),
-        if rows.len() == 1 { "reference" } else { "references" },
+        if rows.len() == 1 {
+            "reference"
+        } else {
+            "references"
+        },
         files,
         if files == 1 { "file" } else { "files" },
     ));
@@ -464,8 +496,17 @@ mod tests {
             name: name.into(),
             detail: None,
             kind: SymbolKind::Function,
-            range: Range { start: pos, end: Position { line: line + 2, character: 1 } },
-            selection_range: Range { start: pos, end: pos },
+            range: Range {
+                start: pos,
+                end: Position {
+                    line: line + 2,
+                    character: 1,
+                },
+            },
+            selection_range: Range {
+                start: pos,
+                end: pos,
+            },
             children: Vec::new(),
         }
     }
@@ -534,9 +575,17 @@ mod tests {
         std::fs::write(&a, "fn hello() {}\n\n    hello();   \n").unwrap();
         let loc = |path: &Path, line| Location {
             path: path.to_path_buf(),
-            range: Range { start: Position { line, character: 0 }, end: Position::default() },
+            range: Range {
+                start: Position { line, character: 0 },
+                end: Position::default(),
+            },
         };
-        let rows = reference_rows(&[loc(&a, 0), loc(&a, 2), loc(&a, 9), loc(Path::new("/missing.rs"), 0)]);
+        let rows = reference_rows(&[
+            loc(&a, 0),
+            loc(&a, 2),
+            loc(&a, 9),
+            loc(Path::new("/missing.rs"), 0),
+        ]);
         let previews: Vec<&str> = rows.iter().map(|r| r.preview.as_str()).collect();
         assert_eq!(previews, ["fn hello() {}", "hello();", "", ""]);
         assert_eq!(rows[1].line, 2);
@@ -545,7 +594,11 @@ mod tests {
     #[test]
     fn symbol_label_shows_kind_name_and_one_based_line() {
         assert_eq!(symbol_label(&symbol("main", 2)), "fn main  L3");
-        let block = LspSymbol { name: "impl Config".into(), kind: SymbolKind::Other, ..symbol("x", 7) };
+        let block = LspSymbol {
+            name: "impl Config".into(),
+            kind: SymbolKind::Other,
+            ..symbol("x", 7)
+        };
         assert_eq!(symbol_label(&block), "impl Config  L8");
     }
 }

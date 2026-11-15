@@ -19,7 +19,11 @@ use crate::fake_lsp;
 /// opens every file of it with `launcher` as the language servers and waits
 /// up to `timeout` for the dependency edges. Returns the temp dir guard, the
 /// state and the root.
-fn open_fixture(name: &str, launcher: Option<Launcher>, timeout: Duration) -> (tempfile::TempDir, AppState, PathBuf) {
+fn open_fixture(
+    name: &str,
+    launcher: Option<Launcher>,
+    timeout: Duration,
+) -> (tempfile::TempDir, AppState, PathBuf) {
     let dir = tempfile::tempdir().unwrap();
     let script = Path::new(env!("CARGO_MANIFEST_DIR")).join("scripts/manual/fixtures.sh");
     let status = Command::new("bash")
@@ -44,7 +48,10 @@ fn open_fixture(name: &str, launcher: Option<Launcher>, timeout: Duration) -> (t
     workspace::open_all_files(&mut state);
     let deadline = Instant::now() + timeout;
     while state.deps.is_waiting() {
-        assert!(Instant::now() < deadline, "the language server did not answer in time");
+        assert!(
+            Instant::now() < deadline,
+            "the language server did not answer in time"
+        );
         std::thread::sleep(Duration::from_millis(10));
         workspace::poll_lsp(&mut state);
     }
@@ -81,7 +88,8 @@ fn span(start: usize, end: usize) -> LineSpan {
 
 #[test]
 fn rust_fixture_links_usage_statements_to_definitions_and_highlights_them() {
-    let (_dir, mut state, root) = open_fixture("rust", Some(fake_lsp::launcher()), Duration::from_secs(10));
+    let (_dir, mut state, root) =
+        open_fixture("rust", Some(fake_lsp::launcher()), Duration::from_secs(10));
 
     // client.rs uses `Server` in a field (line 4) and in `Server::bind(..)`
     // (line 9), which also calls `bind` (line 7 of server.rs), and calls
@@ -108,11 +116,80 @@ fn rust_fixture_links_usage_statements_to_definitions_and_highlights_them() {
         hl.iter().any(|h| h.span == s)
     };
     for line in [4, 9, 13] {
-        assert!(has_span(&highlights[&client], span(line, line)), "client.rs line {line}");
+        assert!(
+            has_span(&highlights[&client], span(line, line)),
+            "client.rs line {line}"
+        );
     }
     for line in [2, 7, 11] {
-        assert!(has_span(&highlights[&server], span(line, line)), "server.rs line {line}");
+        assert!(
+            has_span(&highlights[&server], span(line, line)),
+            "server.rs line {line}"
+        );
     }
+
+    // TASK-38: clicking bind's exact LSP name must not select Server or addr
+    // just because all three definitions live in server.rs.
+    let path = root.join("src/net/server.rs");
+    let occurrences = state.deps.symbol_occurrences(&path, 7);
+    let bind = occurrences
+        .iter()
+        .find(|o| o.symbol.name == "bind")
+        .unwrap();
+    let symbol = spatialcoding::nodes::selection::SelectedSymbol::from_lsp(
+        server,
+        &state.node_store.get_file(server).unwrap().content,
+        bind.symbol,
+    )
+    .unwrap();
+    state.selection.select_symbol(server, symbol, false);
+    let focused = state
+        .edge_store
+        .focused_spans(&state.selection, &state.edge_style);
+    assert!(has_span(&focused[&client], span(9, 9)));
+    assert!(
+        !has_span(&focused[&client], span(13, 13)),
+        "addr usage stays dim"
+    );
+    assert_eq!(
+        focused[&server].len(),
+        1,
+        "only bind is marked in server.rs"
+    );
+    let bind_edge = state
+        .edge_store
+        .all_edges()
+        .find(|e| e.target_node == server && e.name_span.is_some_and(|n| n.line == 7))
+        .unwrap();
+    let name = bind_edge.source_name_span.unwrap();
+    let usage_line = state
+        .node_store
+        .get_file(client)
+        .unwrap()
+        .content
+        .lines()
+        .nth(name.line)
+        .unwrap();
+    assert_eq!(
+        &usage_line[name.start_byte..name.end_byte],
+        "bind",
+        "edge preserves the exact usage name"
+    );
+    let strings = state
+        .node_store
+        .get_file(node_id(&state, &root, "src/helpers/strings.rs"))
+        .unwrap();
+    assert!(strings.line_count > 50);
+    assert_eq!(strings.visible_lines(), strings.line_count);
+    assert!(strings
+        .content
+        .lines()
+        .last()
+        .unwrap()
+        .contains("after_fifty_lines"));
+    assert!(strings
+        .line_anchor_y(strings.line_count - 1, state.settings.font_size)
+        .is_some());
 }
 
 /// The same fixture against the real rust-analyzer:
@@ -125,12 +202,26 @@ fn rust_fixture_with_rust_analyzer() {
     let edges = spans(&state, &root, "src/net/client.rs", "src/net/server.rs");
     // `server: Server,` and `Server::bind(..)` → `pub struct Server { … }`
     // (lines 2-4); `Server::bind(..)` → `pub fn bind(..) { … }` (lines 7-9).
-    for expected in [(span(4, 4), span(2, 4)), (span(9, 9), span(2, 4)), (span(9, 9), span(7, 9))] {
-        assert!(edges.contains(&expected), "{expected:?} missing from {edges:?}; {progress:?}");
+    for expected in [
+        (span(4, 4), span(2, 4)),
+        (span(9, 9), span(2, 4)),
+        (span(9, 9), span(7, 9)),
+    ] {
+        assert!(
+            edges.contains(&expected),
+            "{expected:?} missing from {edges:?}; {progress:?}"
+        );
     }
     // main.rs calls `config::Config::load`, `Client::new` and `util::shout`,
     // which util.rs only re-exports: it is defined in helpers/strings.rs.
-    for target in ["src/config.rs", "src/net/client.rs", "src/helpers/strings.rs"] {
-        assert!(!spans(&state, &root, "src/main.rs", target).is_empty(), "main.rs -> {target}");
+    for target in [
+        "src/config.rs",
+        "src/net/client.rs",
+        "src/helpers/strings.rs",
+    ] {
+        assert!(
+            !spans(&state, &root, "src/main.rs", target).is_empty(),
+            "main.rs -> {target}"
+        );
     }
 }
