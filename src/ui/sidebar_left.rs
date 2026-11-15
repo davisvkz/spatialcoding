@@ -68,11 +68,15 @@ pub fn draw_sidebar_left(
         .expect("PANELS covers every LeftPanel variant");
 
     egui::Area::new(egui::Id::new("sidebar_left_overlay"))
-        .fixed_pos(egui::pos2(RAIL_WIDTH + 4.0, 8.0))
+        .fixed_pos(egui::pos2(RAIL_WIDTH + 6.0, 8.0))
         .order(egui::Order::Foreground)
         .show(ctx, |ui| {
-            ui.set_width(PANEL_WIDTH);
             overlay_frame(&theme).show(ui, |ui| {
+                // The Frame otherwise shrinks to the widest row, leaving the
+                // right side of the panel showing the canvas through. Pin the
+                // body to PANEL_WIDTH so the card is always the same size.
+                ui.set_min_width(PANEL_WIDTH);
+                ui.set_max_width(PANEL_WIDTH);
                 if panel_header(ui, icon_ch, title) {
                     state.left_panel = None;
                 }

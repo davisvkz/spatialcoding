@@ -57,14 +57,22 @@ pub fn draw_sidebar_right(ctx: &egui::Context, state: &mut AppState) {
         .find(|(_, _, p)| *p == panel)
         .expect("PANELS covers every RightPanel variant");
     let theme = state.theme.clone();
-    let screen_w = ctx.screen_rect().width();
 
     egui::Area::new(egui::Id::new("sidebar_right_overlay"))
-        .fixed_pos(egui::pos2(screen_w - RAIL_WIDTH - PANEL_WIDTH - 4.0, 8.0))
+        // Anchor to the top-right so the card always sits flush against the
+        // right rail regardless of its content width. The negative X leaves
+        // room for the rail itself and a 6px gap.
+        .anchor(
+            egui::Align2::RIGHT_TOP,
+            egui::vec2(-(RAIL_WIDTH + 6.0), 8.0),
+        )
         .order(egui::Order::Foreground)
         .show(ctx, |ui| {
-            ui.set_width(PANEL_WIDTH);
             overlay_frame(&theme).show(ui, |ui| {
+                // Pin to PANEL_WIDTH so the card is the same size regardless
+                // of which panel body is active.
+                ui.set_min_width(PANEL_WIDTH);
+                ui.set_max_width(PANEL_WIDTH);
                 if panel_header(ui, icon_ch, title) {
                     state.right_panel = None;
                 }
