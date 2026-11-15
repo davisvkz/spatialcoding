@@ -63,6 +63,8 @@ pub struct AppState {
     /// Dependency edges from the language servers, computed in the background
     /// on `lsp.manager`.
     pub deps: DependencyIndexer,
+    /// Explicitly refreshed, read-only Git comparison of local graph evidence.
+    pub git_comparison: crate::git::comparison::GraphComparison,
     /// World point the canvas centers on next frame (set when jumping to a
     /// reference; the canvas size is only known while drawing).
     pub pending_focus: Option<egui::Pos2>,
@@ -205,6 +207,7 @@ impl Default for AppState {
             cst: CstPanelState::default(),
             lsp: LspPanelState::default(),
             deps: DependencyIndexer::default(),
+            git_comparison: Default::default(),
             pending_focus: None,
         }
     }

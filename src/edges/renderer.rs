@@ -2,7 +2,7 @@ use egui::{Color32, Pos2, Rect, Stroke, Vec2};
 
 use crate::analysis::dependencies::LineSpan;
 use crate::canvas::viewport::Viewport;
-use crate::edges::edge_store::{EdgeKind, EdgeStore, NameSpan};
+use crate::edges::edge_store::{EdgeChange, EdgeKind, EdgeStore, NameSpan};
 use crate::edges::style::{EdgeStyle, EdgeStyleConfig, GradientGapMode, OpacityMode};
 use crate::nodes::file_node::{FileNode, HEADER_HEIGHT};
 use crate::nodes::lod::LodLevel;
@@ -40,6 +40,7 @@ pub fn draw_edges(
     node_width: f32,
     font_size: f32,
     symbol_rect: &mut dyn FnMut(&FileNode, NameSpan) -> Option<Rect>,
+    workspace_root: Option<&std::path::Path>,
 ) {
     let clip = painter.clip_rect();
     // Stroke scales softly with zoom so edges stay sub-pixel thin in overview.
@@ -52,14 +53,11 @@ pub fn draw_edges(
     for connected_pass in [false, true] {
         for edge in edges.all_edges() {
             let is_connected = edge.is_selected(selection);
-            if is_connected != connected_pass {
+            let changes_highlight = config.highlight_changes && edge.change.is_changed();
+            if (is_connected || changes_highlight) != connected_pass {
                 continue;
             }
-            if !edge.is_visible(config) {
-                continue;
-            }
-            // show_all=false hides the edges unrelated to the current selection.
-            if !config.show_all && !is_connected && !nothing_selected {
+            if !edge.is_visible_for(config, selection) {
                 continue;
             }
             let (Some(src), Some(tgt)) = (
@@ -107,23 +105,31 @@ pub fn draw_edges(
                 continue;
             }
 
-            let alpha = compute_alpha(config, is_connected, nothing_selected);
+            let alpha = if changes_highlight {
+                CONNECTED_ALPHA
+            } else {
+                compute_alpha(config, is_connected, nothing_selected)
+            };
             if alpha < 2 {
                 continue;
             }
 
             // Highlight overrides pick a fixed color that must stay readable
             // end to end, so they also turn the gradient off.
-            let backwards = config.highlight_backwards
-                && if selection.symbols().is_empty() {
-                    selection.is_selected(edge.target_node)
-                        && !selection.is_selected(edge.source_node)
-                } else {
-                    selection.symbols().iter().any(|s| {
-                        s.node_id == edge.target_node && Some(s.name_span) == edge.name_span
-                    })
-                };
-            let override_color = if backwards {
+            let backwards = (config.highlight_backwards && edge.is_incoming(selection))
+                || (config.highlight_reverse_layout && src_rect.center().x > tgt_rect.center().x);
+            let diff_color = if config.diff_colors {
+                match edge.change {
+                    EdgeChange::Added => Some(Color32::from_rgb(64, 204, 112)),
+                    EdgeChange::Deleted => Some(Color32::from_rgb(242, 80, 96)),
+                    _ => None,
+                }
+            } else {
+                None
+            };
+            let override_color = if diff_color.is_some() {
+                diff_color
+            } else if backwards {
                 Some(BACKWARDS_COLOR)
             } else if config.highlight_barrel && edge.kind == EdgeKind::Barrel {
                 Some(rgb(config.barrel_color))
@@ -132,12 +138,23 @@ pub fn draw_edges(
             } else {
                 None
             };
-            let selected_edge = is_connected && !nothing_selected;
+            let selected_edge = (config.highlight_selected && is_connected && !nothing_selected)
+                || changes_highlight;
+            let folder_colors = workspace_root
+                .filter(|_| config.folder_levels)
+                .and_then(|root| {
+                    Some((
+                        rgb(config.folder_color(&src.path, root)?),
+                        rgb(config.folder_color(&tgt.path, root)?),
+                    ))
+                });
             let base_color = override_color.unwrap_or_else(|| {
                 if selected_edge {
                     rgb(config.selected_color)
                 } else {
-                    rgb(config.base_color)
+                    folder_colors.map(|(source, _)| source).unwrap_or_else(|| {
+                        rgb(config.relationships[edge.relationship.index()].color)
+                    })
                 }
             });
             let color = base_color.gamma_multiply(alpha as f32 / 255.0);
@@ -150,9 +167,12 @@ pub fn draw_edges(
 
             // Direction the edge arrives from, for the arrow head.
             let mut arrives_from = src_screen;
-            let use_gradient =
-                config.use_gradient && edge.label.is_some() && override_color.is_none();
-            let (start_col, end_col) = gradient_endpoints(config, edge);
+            let use_gradient = config.use_gradient
+                && edge.label.is_some()
+                && override_color.is_none()
+                && !selected_edge;
+            let (start_col, end_col) =
+                folder_colors.unwrap_or_else(|| gradient_endpoints(config, edge));
             let span_len = (tgt_screen - src_screen).length();
             let fade_frac = gradient_fade_fraction(config, span_len);
             match config.style {
@@ -267,6 +287,8 @@ fn anchor(
 }
 
 fn compute_alpha(config: &EdgeStyleConfig, is_connected: bool, nothing_selected: bool) -> u8 {
+    let is_connected = is_connected && config.highlight_selected;
+    let nothing_selected = nothing_selected || !config.highlight_selected;
     match config.opacity_mode {
         OpacityMode::Full => {
             if is_connected && !nothing_selected {

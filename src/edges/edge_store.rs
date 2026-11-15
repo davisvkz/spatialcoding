@@ -1,7 +1,7 @@
 use std::collections::{HashMap, HashSet};
 
 use crate::analysis::dependencies::LineSpan;
-use crate::edges::style::EdgeStyleConfig;
+use crate::edges::style::{EdgeStyleConfig, RelationshipType};
 use crate::nodes::selection::Selection;
 
 /// Column span of the symbol name inside a line, for inline highlight.
@@ -28,8 +28,27 @@ pub enum EdgeKind {
     Barrel,
 }
 
+/// Graph comparison coverage is explicit: LSP-only links are not assumed
+/// unchanged merely because no historical symbol graph was collected.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum EdgeChange {
+    #[default]
+    Uncompared,
+    Unchanged,
+    Added,
+    Deleted,
+}
+
+impl EdgeChange {
+    pub fn is_changed(self) -> bool {
+        matches!(self, Self::Added | Self::Deleted)
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct Edge {
+    pub change: EdgeChange,
+    pub relationship: RelationshipType,
     pub id: u64,
     pub source_node: u64,
     pub target_node: u64,
@@ -67,11 +86,28 @@ impl Edge {
     }
 
     pub fn is_visible(&self, config: &EdgeStyleConfig) -> bool {
-        match self.kind {
-            EdgeKind::Direct => true,
-            EdgeKind::ReExport => config.show_reexport_edges,
-            EdgeKind::Barrel => config.show_barrel_edges,
+        config.relationships[self.relationship.index()].visible
+            && (self.change != EdgeChange::Deleted || config.show_deleted)
+            && match self.kind {
+                EdgeKind::Direct => true,
+                EdgeKind::ReExport => config.show_reexport_edges,
+                EdgeKind::Barrel => config.show_barrel_edges,
+            }
+    }
+
+    pub fn is_visible_for(&self, config: &EdgeStyleConfig, selection: &Selection) -> bool {
+        self.is_visible(config) && (config.show_all || self.is_selected(selection))
+    }
+
+    pub fn is_incoming(&self, selection: &Selection) -> bool {
+        if selection.symbols().is_empty() {
+            return selection.is_selected(self.target_node)
+                && !selection.is_selected(self.source_node);
         }
+        selection
+            .symbols()
+            .iter()
+            .any(|s| s.node_id == self.target_node && Some(s.name_span) == self.name_span)
     }
 }
 
@@ -100,6 +136,16 @@ impl Default for EdgeStore {
 }
 
 impl EdgeStore {
+    pub fn set_change(&mut self, id: u64, change: EdgeChange) {
+        if let Some(edge) = self.edges.get_mut(&id) {
+            edge.change = change;
+        }
+    }
+    pub fn set_relationship(&mut self, id: u64, relationship: RelationshipType) {
+        if let Some(edge) = self.edges.get_mut(&id) {
+            edge.relationship = relationship;
+        }
+    }
     pub fn add(&mut self, source: u64, target: u64, label: Option<String>) -> u64 {
         self.add_spanned(source, target, label, None, None, None)
     }
@@ -148,6 +194,8 @@ impl EdgeStore {
         self.edges.insert(
             id,
             Edge {
+                change: EdgeChange::Uncompared,
+                relationship: RelationshipType::References,
                 id,
                 source_node: source,
                 target_node: target,
@@ -179,8 +227,19 @@ impl EdgeStore {
         selection: &Selection,
         config: &EdgeStyleConfig,
     ) -> HashMap<u64, Vec<SpanHighlight>> {
-        let mut out = self.spans_matching(|e| e.is_selected(selection) && e.is_visible(config));
-        for symbol in selection.symbols() {
+        if !config.highlight_selected && !config.highlight_changes {
+            return HashMap::new();
+        }
+        let mut out = self.spans_matching(|e| {
+            ((config.highlight_selected && e.is_selected(selection))
+                || (config.highlight_changes && e.change.is_changed()))
+                && e.is_visible_for(config, selection)
+        });
+        for symbol in selection
+            .symbols()
+            .iter()
+            .filter(|_| config.highlight_selected)
+        {
             let highlight = SpanHighlight {
                 span: symbol.span,
                 label: symbol.label.clone(),
@@ -197,7 +256,7 @@ impl EdgeStore {
     fn spans_matching(&self, matches: impl Fn(&Edge) -> bool) -> HashMap<u64, Vec<SpanHighlight>> {
         let mut out: HashMap<u64, Vec<SpanHighlight>> = HashMap::new();
         for e in self.edges.values() {
-            if !matches(e) {
+            if e.change == EdgeChange::Deleted || !matches(e) {
                 continue;
             }
             let label = e.label.clone().unwrap_or_default();
@@ -253,6 +312,72 @@ impl EdgeStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn deleted_visibility_never_marks_old_ranges_in_current_code() {
+        let mut store = EdgeStore::default();
+        let id = store.add_spanned(
+            1,
+            2,
+            Some("file".into()),
+            Some(LineSpan { start: 9, end: 9 }),
+            None,
+            None,
+        );
+        store.set_change(id, EdgeChange::Deleted);
+        let mut selection = Selection::default();
+        selection.select(1);
+        let mut config = EdgeStyleConfig::default();
+        assert!(!store
+            .all_edges()
+            .next()
+            .unwrap()
+            .is_visible_for(&config, &selection));
+        config.show_deleted = true;
+        assert!(store
+            .all_edges()
+            .next()
+            .unwrap()
+            .is_visible_for(&config, &selection));
+        assert!(store.focused_spans(&selection, &config).is_empty());
+        store.set_change(id, EdgeChange::Added);
+        config.highlight_selected = false;
+        config.highlight_changes = true;
+        assert!(!store
+            .focused_spans(&Selection::default(), &config)
+            .is_empty());
+    }
+
+    #[test]
+    fn relationship_filters_and_all_apply_to_strokes_and_statement_highlights() {
+        use crate::edges::style::RelationshipType;
+        let mut store = EdgeStore::default();
+        let id = store.add_spanned(
+            1,
+            2,
+            Some("fn".into()),
+            Some(LineSpan { start: 3, end: 3 }),
+            None,
+            None,
+        );
+        store.set_relationship(id, RelationshipType::Renders);
+        let edge = store.all_edges().next().unwrap();
+        let mut selection = Selection::default();
+        selection.select(1);
+        let mut config = EdgeStyleConfig::default();
+        assert!(edge.is_visible_for(&config, &selection));
+        config.relationships[RelationshipType::Renders.index()].visible = false;
+        assert!(!edge.is_visible_for(&config, &selection));
+        assert!(store.focused_spans(&selection, &config).is_empty());
+        config.relationships[RelationshipType::Renders.index()].visible = true;
+        config.show_all = false;
+        assert!(edge.is_visible_for(&config, &selection));
+        selection.clear();
+        assert!(
+            !edge.is_visible_for(&config, &selection),
+            "All off with no selection hides the graph"
+        );
+    }
 
     #[test]
     fn add_assigns_sequential_ids_and_stores_endpoints() {

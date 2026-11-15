@@ -18,8 +18,15 @@ fn key_1_applies_the_hierarchical_layout() {
     let column = s.settings.node_width + s.layout_settings.file_spacing;
     let (main_pos, util_pos) = (app.node_position(main), app.node_position(util));
     // Both sit in the `src/` folder box, inset by its padding.
-    assert_eq!(main_pos.x, s.layout_settings.folder_padding, "importer is a root");
-    assert_eq!(util_pos.x - main_pos.x, column, "dependency is one column to the right");
+    assert_eq!(
+        main_pos.x, s.layout_settings.folder_padding,
+        "importer is a root"
+    );
+    assert_eq!(
+        util_pos.x - main_pos.x,
+        column,
+        "dependency is one column to the right"
+    );
 }
 
 #[test]
@@ -71,12 +78,28 @@ fn ctrl_shift_o_opens_all_text_files() {
     app.settle_edges();
 
     let s = app.app_state();
-    let mut names: Vec<&str> = s.node_store.file_nodes.values().map(|n| n.file_name()).collect();
+    let mut names: Vec<&str> = s
+        .node_store
+        .file_nodes
+        .values()
+        .map(|n| n.file_name())
+        .collect();
     names.sort();
     assert_eq!(
         names,
-        ["Cargo.toml", "README.md", "a.ts", "app.ts", "main.rs", "util.rs"],
+        [
+            "Cargo.toml",
+            "README.md",
+            "a.ts",
+            "app.ts",
+            "main.rs",
+            "util.rs"
+        ],
         "binary, hidden and build files are skipped; main.rs is not duplicated"
     );
-    assert_eq!(s.edge_store.all_edges().count(), 2, "main->util and app->a");
+    assert_eq!(
+        s.edge_store.all_edges().count(),
+        4,
+        "main->util and app->a each have import and reference edges"
+    );
 }

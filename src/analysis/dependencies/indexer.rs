@@ -90,6 +90,7 @@ pub struct SymbolOccurrence<'a> {
 
 #[derive(Default)]
 pub struct DependencyIndexer {
+    local_links: Vec<DependencyLink>,
     root: Option<PathBuf>,
     files: HashMap<PathBuf, FileEntry>,
     queue: VecDeque<Job>,
@@ -113,6 +114,7 @@ impl DependencyIndexer {
                 ..Self::default()
             };
         }
+        self.local_links = super::local::links(root, &OpenFiles::new(files.iter().copied()));
         self.files
             .retain(|path, entry| files.iter().any(|(p, text)| *p == path && hash_text(text) == entry.hash));
         for (path, text) in files {
@@ -339,7 +341,7 @@ impl DependencyIndexer {
         let mut finder = StatementFinder::default();
         let mut targets: Vec<(&PathBuf, &FileEntry)> = self.files.iter().collect();
         targets.sort_by_key(|(path, _)| *path);
-        let mut out = Vec::new();
+        let mut out: Vec<_> = self.local_links.iter().filter(|l| open.get(&l.source).is_some() && open.get(&l.target).is_some()).cloned().collect();
         for (target, entry) in targets {
             let Some(Ok(symbols)) = &entry.symbols else { continue };
             if open.get(target).is_none() {
@@ -353,10 +355,17 @@ impl DependencyIndexer {
                     symbol.name_end,
                 );
                 for usage in usage_occurrences(target, references, open, &mut finder) {
+                    let relationship = open.get(&usage.source).map(|(_, text)| finder.relationship_at(&usage.source, text, usage.range.start.line, usage.range.start.character)).unwrap_or_default();
+                    if relationship == crate::edges::style::RelationshipType::Imports
+                        && out.iter().any(|l| l.relationship == relationship && l.source == usage.source && l.target == *target && l.usage == usage.span) {
+                        continue;
+                    }
                     let source_label = self.enclosing_symbol_label(&usage.source, usage.range.start.line);
                     let source_name_span = open.get(&usage.source).and_then(|(_, text)|
                         Self::name_byte_span(text, usage.range.start, usage.range.end));
                     out.push(DependencyLink {
+                        evidence: super::LinkEvidence::LanguageServer,
+                        relationship,
                         source: usage.source,
                         target: target.clone(),
                         label: symbol.label.clone(),

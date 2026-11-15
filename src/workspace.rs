@@ -120,6 +120,7 @@ fn find_or_create_folder(state: &mut AppState, dir: &Path) -> u64 {
 
 /// Removes every node, folder, edge and the selection from the canvas.
 pub fn clear_canvas(state: &mut AppState) {
+    state.git_comparison.invalidate();
     state.node_store.clear();
     state.edge_store.clear();
     state.selection.clear();
@@ -128,6 +129,7 @@ pub fn clear_canvas(state: &mut AppState) {
 /// Removes file nodes together with their edges, their folder membership,
 /// any folder left empty, and their selection.
 pub fn remove_nodes(state: &mut AppState, ids: &[u64]) {
+    state.git_comparison.invalidate();
     let removed: HashSet<u64> = ids.iter().copied().collect();
     for &id in ids {
         for edge_id in state.edge_store.edges_for_node(id) {
@@ -151,6 +153,7 @@ pub fn remove_nodes(state: &mut AppState, ids: &[u64]) {
     for id in empty_folders {
         state.node_store.remove_node(id);
     }
+    apply_dependency_edges(state);
 }
 
 /// Shows line `line` (0-based) of `path`: opens the file if it is not on the
@@ -193,6 +196,7 @@ fn find_file_node(state: &AppState, path: &Path) -> Option<u64> {
 /// language servers in the background, and redraws the edges known so far.
 /// New edges arrive through [`poll_lsp`].
 pub fn rebuild_edges(state: &mut AppState) {
+    state.git_comparison.invalidate();
     let Some(root) = state.loaded_dir.clone() else {
         return;
     };
@@ -219,6 +223,40 @@ pub fn poll_lsp(state: &mut AppState) {
     if state.deps.take_changed() {
         apply_dependency_edges(state);
     }
+    if state.git_comparison.poll() {
+        // Also reject direct in-memory content changes made without a rebuild.
+        let signature = comparison_input(state).map(|input| input.signature());
+        if signature != state.git_comparison.requested_signature {
+            state.git_comparison.invalidate();
+        }
+        apply_dependency_edges(state);
+    }
+}
+
+fn comparison_input(state: &AppState) -> Option<crate::git::comparison::GraphInput> {
+    Some(crate::git::comparison::GraphInput {
+        root: state.loaded_dir.clone()?,
+        files: state.node_store.file_nodes.values().map(|n| (n.path.clone(), n.content.clone())).collect(),
+    })
+}
+
+/// No Git commands run here: only a canvas snapshot and worker dispatch.
+pub fn refresh_git_comparison(state: &mut AppState) {
+    use crate::git::repo::{MAX_FILES, MAX_FILE_BYTES, MAX_TOTAL_BYTES};
+    let nodes = &state.node_store.file_nodes;
+    if nodes.len() > MAX_FILES || nodes.values().any(|n| n.content.len() > MAX_FILE_BYTES)
+        || nodes.values().map(|n| n.content.len()).sum::<usize>() > MAX_TOTAL_BYTES {
+        invalidate_git_comparison(state);
+        state.git_comparison.status = crate::git::comparison::ComparisonStatus::Error("Comparison limits: 512 files, 2 MiB/file, 32 MiB total.".into());
+        return;
+    }
+    rebuild_edges(state);
+    if let Some(input) = comparison_input(state) { state.git_comparison.request(input); }
+}
+
+pub fn invalidate_git_comparison(state: &mut AppState) {
+    state.git_comparison.invalidate();
+    apply_dependency_edges(state);
 }
 
 /// Replaces the edges with one per link the indexer knows between open files.
@@ -236,7 +274,8 @@ fn apply_dependency_edges(state: &mut AppState) {
         .map(|n| (n.path.as_path(), n.content.as_str()))
         .collect();
 
-    let links = state.deps.links(&open);
+    let mut links = state.deps.links(&open);
+    let mut changes: Vec<_> = links.iter().map(|l| state.git_comparison.diff.as_ref().map(|d| d.state_for(l)).unwrap_or_default()).collect();
     // Per-link classification, then a barrel promotion pass.
     let mut kinds: Vec<_> = links
         .iter()
@@ -247,29 +286,39 @@ fn apply_dependency_edges(state: &mut AppState) {
         .collect();
     let sources: Vec<&Path> = links.iter().map(|l| l.source.as_path()).collect();
     kinds = promote_barrels(&kinds, &sources);
+    // Historical links retain historical classification and must not inflate
+    // the current file's re-export count into a barrel.
+    if let Some(diff) = &state.git_comparison.diff {
+        changes.extend(diff.deleted.iter().map(|_| crate::edges::edge_store::EdgeChange::Deleted));
+        links.extend(diff.deleted.iter().cloned());
+        kinds.extend(diff.deleted_kinds.iter().copied());
+    }
 
     state.edge_store.clear();
-    for (link, kind) in links.into_iter().zip(kinds) {
+    for ((link, kind), change) in links.into_iter().zip(kinds).zip(changes) {
         if let (Some(&src), Some(&tgt)) = (ids.get(link.source.as_path()), ids.get(link.target.as_path())) {
-            let name_span = link.name_span.map(|(line, start, end)| NameSpan {
+            let deleted = change == crate::edges::edge_store::EdgeChange::Deleted;
+            let name_span = link.name_span.filter(|_| !deleted).map(|(line, start, end)| NameSpan {
                 line,
                 start_byte: start,
                 end_byte: end,
             });
-            let source_name_span = link.source_name_span.map(|(line, start_byte, end_byte)| NameSpan {
+            let source_name_span = link.source_name_span.filter(|_| !deleted).map(|(line, start_byte, end_byte)| NameSpan {
                 line, start_byte, end_byte,
             });
-            state.edge_store.add_full(
+            let id = state.edge_store.add_full(
                 src,
                 tgt,
                 Some(link.label),
                 link.source_label,
-                Some(link.usage),
-                Some(link.definition),
+                (!deleted).then_some(link.usage),
+                (!deleted).then_some(link.definition),
                 name_span,
                 source_name_span,
                 kind,
             );
+            state.edge_store.set_relationship(id, link.relationship);
+            state.edge_store.set_change(id, change);
         }
     }
 }
@@ -278,6 +327,16 @@ fn apply_dependency_edges(state: &mut AppState) {
 mod tests {
     use super::*;
     use crate::nodes::file_node::{line_height, CODE_PADDING, HEADER_HEIGHT};
+
+    #[test]
+    fn git_refresh_rejects_oversized_canvas_before_spawning_or_rebuilding() {
+        let mut state = AppState { loaded_dir: Some("/p".into()), ..Default::default() };
+        state.node_store.add_file("/p/large.ts".into(), "x".repeat(crate::git::repo::MAX_FILE_BYTES + 1), egui::Pos2::ZERO);
+        refresh_git_comparison(&mut state);
+        assert!(matches!(state.git_comparison.status, crate::git::comparison::ComparisonStatus::Error(_)));
+        assert!(!state.git_comparison.is_loading());
+        assert!(!state.deps.is_waiting());
+    }
 
     fn write(dir: &Path, rel: &str, content: &str) -> PathBuf {
         let p = dir.join(rel);

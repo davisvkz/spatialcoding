@@ -109,6 +109,8 @@ mod tests {
 
     fn link(source: &str, usage_line: usize) -> DependencyLink {
         DependencyLink {
+            evidence: crate::analysis::dependencies::LinkEvidence::LanguageServer,
+            relationship: crate::edges::style::RelationshipType::References,
             source: PathBuf::from(source),
             target: PathBuf::from("/does/not/matter.rs"),
             label: "fn".into(),

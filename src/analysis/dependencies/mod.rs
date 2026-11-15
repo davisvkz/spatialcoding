@@ -7,6 +7,7 @@
 
 pub mod classify;
 pub mod indexer;
+pub mod local;
 mod statements;
 
 use std::collections::HashMap;
@@ -47,6 +48,8 @@ impl LineSpan {
 /// that symbol in `target`. Paths are the file nodes' paths.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DependencyLink {
+    pub evidence: LinkEvidence,
+    pub relationship: crate::edges::style::RelationshipType,
     pub source: PathBuf,
     pub target: PathBuf,
     /// The symbol's kind, e.g. `fn` or `struct`.
@@ -61,6 +64,12 @@ pub struct DependencyLink {
     pub name_span: Option<(usize, usize, usize)>,
     /// Exact reference name in the source file, in line-relative UTF-8 bytes.
     pub source_name_span: Option<(usize, usize, usize)>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LinkEvidence {
+    LocalSyntax,
+    LanguageServer,
 }
 
 /// The symbols whose references become edges: every top-level symbol except
@@ -115,6 +124,11 @@ impl<'a> OpenFiles<'a> {
     /// The node path and content of the open file at `path`.
     pub fn get(&self, path: &Path) -> Option<(&'a Path, &'a str)> {
         self.by_path.get(path).copied()
+    }
+
+    /// Node paths once each, excluding canonical-path aliases.
+    pub fn iter(&self) -> impl Iterator<Item = (&'a Path, &'a str)> + '_ {
+        self.by_path.iter().filter(|(key, (path, _))| key.as_path() == *path).map(|(_, value)| *value)
     }
 }
 

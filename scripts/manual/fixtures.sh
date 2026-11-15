@@ -177,6 +177,22 @@ export async function later(): Promise<string> {
   return pad('x', 3);
 }
 EOF
+  put "$d" src/Base.ts <<'EOF'
+export class Base {}
+EOF
+  put "$d" src/View.tsx <<'EOF'
+import { Base } from './Base';
+import { Button } from './components/Button';
+
+export class View extends Base {}
+export function render() {
+  return <Button label="demo" />;
+}
+EOF
+  put "$d" README.md <<'EOF'
+# Web fixture
+[Compiler settings](./tsconfig.json)
+EOF
 }
 
 # Python (src layout): absolute, relative and package imports.

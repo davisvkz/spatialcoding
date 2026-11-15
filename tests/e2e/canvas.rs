@@ -321,8 +321,8 @@ fn selecting_a_node_lifts_its_edges_without_adding_symbol_badges() {
     let util = app.open(&fx.path("src/util.rs"));
     assert_eq!(
         app.app_state().edge_store.all_edges().count(),
-        1,
-        "main -> util::hello"
+        2,
+        "main imports util and references util::hello"
     );
     {
         let s = app.app_state_mut();
@@ -387,6 +387,9 @@ fn edge_endpoints_touch_the_usage_and_definition_glyphs_at_different_zooms() {
     {
         let s = app.app_state_mut();
         s.left_panel = None;
+        s.edge_style.relationships
+            [spatialcoding::edges::style::RelationshipType::Imports.index()]
+        .visible = false;
         s.node_store.get_file_mut(source).unwrap().position = Pos2::ZERO;
         s.node_store.get_file_mut(target).unwrap().position = Pos2::new(900.0, 0.0);
         s.selection.select(source);
@@ -436,6 +439,9 @@ fn file_nodes_show_and_navigate_to_code_after_line_fifty() {
     )
     .unwrap();
     let mut app = app_with(&fx);
+    app.app_state_mut().edge_style.relationships
+        [spatialcoding::edges::style::RelationshipType::Imports.index()]
+    .visible = false;
     let id = app.open(&fx.path("src/util.rs"));
     app.open(&fx.path("src/main.rs"));
     let s = app.app_state();
@@ -495,6 +501,9 @@ fn minified_edges_touch_identifier_bars_and_collapsed_nodes_use_header_fallbacks
     {
         let s = app.app_state_mut();
         s.left_panel = None;
+        s.edge_style.relationships
+            [spatialcoding::edges::style::RelationshipType::Imports.index()]
+        .visible = false;
         s.node_store.get_file_mut(source).unwrap().position = Pos2::ZERO;
         s.node_store.get_file_mut(target).unwrap().position = Pos2::new(900.0, 0.0);
         s.viewport.zoom = 0.25;
@@ -504,7 +513,11 @@ fn minified_edges_touch_identifier_bars_and_collapsed_nodes_use_header_fallbacks
     }
     app.show_at(Pos2::new(800.0, 60.0), CANVAS_SPOT);
     let s = app.app_state();
-    let edge = s.edge_store.all_edges().next().unwrap();
+    let edge = s
+        .edge_store
+        .all_edges()
+        .find(|e| e.relationship == spatialcoding::edges::style::RelationshipType::References)
+        .unwrap();
     let name = edge.name_span.unwrap();
     let node = s.node_store.get_file(target).unwrap();
     let line = node.content.lines().nth(name.line).unwrap();

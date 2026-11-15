@@ -20,7 +20,11 @@ fn open_and_layout_options_prepare_the_canvas_and_fit_the_view() {
 
     let s = app.app_state();
     assert_eq!(s.node_store.file_nodes.len(), 2);
-    assert_eq!(s.edge_store.all_edges().count(), 1);
+    assert_eq!(
+        s.edge_store.all_edges().count(),
+        2,
+        "module import plus symbol reference"
+    );
     let by_name = |name: &str| {
         s.node_store
             .file_nodes
@@ -35,7 +39,11 @@ fn open_and_layout_options_prepare_the_canvas_and_fit_the_view() {
     let visible = s.viewport.visible_world_rect(screen);
     for node in s.node_store.file_nodes.values() {
         let rect = node.world_rect(s.settings.node_width, s.settings.font_size);
-        assert!(visible.contains_rect(rect), "{} off screen", node.file_name());
+        assert!(
+            visible.contains_rect(rect),
+            "{} off screen",
+            node.file_name()
+        );
     }
     app.get_by_label(&fx.name);
 }
@@ -49,7 +57,7 @@ fn open_all_option_opens_every_text_file() {
         open_all: true,
         ..Default::default()
     });
-    app.run();
+    app.settle_edges();
     assert_eq!(app.app_state().node_store.file_nodes.len(), 6);
 }
 

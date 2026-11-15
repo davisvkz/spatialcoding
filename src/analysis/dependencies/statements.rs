@@ -11,7 +11,7 @@ use std::path::{Path, PathBuf};
 use tree_sitter::{Node, Tree};
 
 use super::LineSpan;
-use crate::analysis::cst::{CstLanguage, parse_tree};
+use crate::analysis::cst::{parse_tree, CstLanguage};
 
 /// Longer statements (a big JSX `return (…)`, a long literal) shrink to the
 /// line of the position itself.
@@ -100,19 +100,84 @@ pub struct StatementFinder {
 }
 
 impl StatementFinder {
+    /// Classifies an already proven binding (LSP reference), never a name
+    /// search. Attributes/arguments inside JSX or class bodies stay references.
+    pub fn relationship_at(
+        &mut self,
+        path: &Path,
+        content: &str,
+        line: usize,
+        character: usize,
+    ) -> crate::edges::style::RelationshipType {
+        use crate::edges::style::RelationshipType;
+        if self.at(path, content, line, character).is_import {
+            return RelationshipType::Imports;
+        }
+        let Some((_, tree)) = self.trees.get(path).and_then(Option::as_ref) else {
+            return RelationshipType::References;
+        };
+        let Some(offset) = byte_offset(content, line, character) else {
+            return RelationshipType::References;
+        };
+        let Some(node) = tree.root_node().descendant_for_byte_range(offset, offset) else {
+            return RelationshipType::References;
+        };
+        let contains =
+            |container: Node| container.start_byte() <= offset && offset < container.end_byte();
+        let mut current = Some(node);
+        while let Some(n) = current {
+            if matches!(
+                n.kind(),
+                "type_arguments" | "keyword_argument" | "argument_list" | "arguments"
+            ) && !n.parent().is_some_and(|p| p.kind() == "class_definition")
+            {
+                return RelationshipType::References;
+            }
+            if n.kind() == "keyword_argument" {
+                return RelationshipType::References;
+            }
+            if matches!(
+                n.kind(),
+                "jsx_opening_element" | "jsx_self_closing_element" | "jsx_closing_element"
+            ) && n.child_by_field_name("name").is_some_and(contains)
+            {
+                return RelationshipType::Renders;
+            }
+            if matches!(
+                n.kind(),
+                "extends_clause" | "extends_type_clause" | "implements_clause" | "supertrait_list"
+            ) {
+                return RelationshipType::Inherits;
+            }
+            if (n.kind() == "class_definition"
+                && n.child_by_field_name("superclasses").is_some_and(contains))
+                || (n.kind() == "trait_item"
+                    && n.child_by_field_name("bounds").is_some_and(contains))
+                || (n.kind() == "impl_item" && n.child_by_field_name("trait").is_some_and(contains))
+            {
+                return RelationshipType::Inherits;
+            }
+            current = n.parent();
+        }
+        RelationshipType::References
+    }
+
     /// The statement of `content` (the text of `path`) at `line` and UTF-16
     /// column `character`, as language servers count them. Without a grammar
     /// it is the line itself.
     pub fn at(&mut self, path: &Path, content: &str, line: usize, character: usize) -> Statement {
-        let parsed = self
-            .trees
-            .entry(path.to_path_buf())
-            .or_insert_with(|| parse_tree(path, content).map(|(lang, tree)| (Family::of(lang), tree)));
+        let parsed = self.trees.entry(path.to_path_buf()).or_insert_with(|| {
+            parse_tree(path, content).map(|(lang, tree)| (Family::of(lang), tree))
+        });
         let fallback = Statement {
-            span: LineSpan { start: line, end: line },
+            span: LineSpan {
+                start: line,
+                end: line,
+            },
             is_import: false,
         };
-        let (Some((family, tree)), Some(offset)) = (parsed.as_ref(), byte_offset(content, line, character))
+        let (Some((family, tree)), Some(offset)) =
+            (parsed.as_ref(), byte_offset(content, line, character))
         else {
             return fallback;
         };
@@ -180,10 +245,7 @@ fn statement_span(family: Family, node: Node) -> LineSpan {
     let start = stmt.start_position().row;
     let mut end = end_row(stmt);
     if let Some(body) = body_after(family, &path, node.end_byte()) {
-        end = body
-            .prev_sibling()
-            .map_or(start, end_row)
-            .clamp(start, end);
+        end = body.prev_sibling().map_or(start, end_row).clamp(start, end);
     }
     if end - start + 1 > MAX_STATEMENT_LINES {
         return LineSpan {
@@ -222,9 +284,72 @@ fn body_after<'t>(family: Family, path: &[Node<'t>], after: usize) -> Option<Nod
 mod tests {
     use super::*;
 
+    #[test]
+    fn relationships_follow_syntax_at_the_proven_reference_not_symbol_kind() {
+        use crate::edges::style::RelationshipType::{Imports, Inherits, References, Renders};
+        let cases = [
+            ("a.tsx", "import { Base } from './base';", "Base", Imports),
+            ("a.tsx", "class Child extends Base {}", "Base", Inherits),
+            ("a.ts", "interface Child extends Base {}", "Base", Inherits),
+            ("a.ts", "class Child implements Base {}", "Base", Inherits),
+            (
+                "a.tsx",
+                "const v = <Alias value={Other} />;",
+                "Alias",
+                Renders,
+            ),
+            (
+                "a.tsx",
+                "const v = <Alias value={Other} />;",
+                "Other",
+                References,
+            ),
+            ("a.tsx", "const v = <UI.Button />;", "Button", Renders),
+            ("a.py", "class Child(Base):\n    pass\n", "Base", Inherits),
+            (
+                "a.py",
+                "class Child:\n    value = Base()\n",
+                "Base",
+                References,
+            ),
+            ("a.rs", "trait Child: Base {}", "Base", Inherits),
+            ("a.rs", "impl Base for Child {}", "Base", Inherits),
+            ("a.ts", "const value: Base = make();", "Base", References),
+            (
+                "a.ts",
+                "class Child extends Generic<Other> {}",
+                "Other",
+                References,
+            ),
+            (
+                "a.py",
+                "class Child(Base, metaclass=Meta):\n    pass\n",
+                "Meta",
+                References,
+            ),
+            (
+                "a.tsx",
+                "// <Alias />\nconst value = 'Base';",
+                "Alias",
+                References,
+            ),
+        ];
+        for (path, text, needle, expected) in cases {
+            let offset = text.find(needle).unwrap();
+            let character = text[..offset].encode_utf16().count();
+            assert_eq!(
+                StatementFinder::default().relationship_at(Path::new(path), text, 0, character),
+                expected,
+                "{text}: {needle}"
+            );
+        }
+    }
+
     /// The statement at the first occurrence of `needle` in `content`.
     fn at(path: &str, content: &str, needle: &str) -> Statement {
-        let offset = content.find(needle).unwrap_or_else(|| panic!("{needle} not in source"));
+        let offset = content
+            .find(needle)
+            .unwrap_or_else(|| panic!("{needle} not in source"));
         let line = content[..offset].matches('\n').count();
         let line_start = content[..offset].rfind('\n').map_or(0, |i| i + 1);
         let character = content[line_start..offset].encode_utf16().count();
@@ -238,9 +363,21 @@ mod tests {
     #[test]
     fn statements_in_bodies_and_at_top_level() {
         let src = "use crate::a::f;\n\nfn main() {\n    let x = f(1);\n    f(2);\n}\n";
-        assert_eq!(at("a.rs", src, "f(1)"), Statement { span: span(3, 3), is_import: false });
+        assert_eq!(
+            at("a.rs", src, "f(1)"),
+            Statement {
+                span: span(3, 3),
+                is_import: false
+            }
+        );
         assert_eq!(at("a.rs", src, "f(2)").span, span(4, 4));
-        assert_eq!(at("a.rs", src, "f;"), Statement { span: span(0, 0), is_import: true });
+        assert_eq!(
+            at("a.rs", src, "f;"),
+            Statement {
+                span: span(0, 0),
+                is_import: true
+            }
+        );
     }
 
     #[test]
@@ -277,6 +414,12 @@ mod tests {
         assert_eq!(byte_offset(src, 1, 26), Some(src.find("target").unwrap()));
         assert_eq!(byte_offset(src, 5, 0), None);
         let plain = StatementFinder::default().at(Path::new("notes.txt"), "a\nb\n", 1, 0);
-        assert_eq!(plain, Statement { span: span(1, 1), is_import: false });
+        assert_eq!(
+            plain,
+            Statement {
+                span: span(1, 1),
+                is_import: false
+            }
+        );
     }
 }

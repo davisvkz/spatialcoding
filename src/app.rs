@@ -440,6 +440,7 @@ impl SpatialCodingApp {
             self.state.settings.node_width,
             self.state.settings.font_size,
             &mut symbol_rect,
+            self.state.loaded_dir.as_deref(),
         );
     }
 
@@ -464,6 +465,9 @@ impl eframe::App for SpatialCodingApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         input::handle_shortcuts(ctx, &mut self.state);
         crate::workspace::poll_lsp(&mut self.state);
+        if self.state.git_comparison.is_loading() {
+            ctx.request_repaint_after(std::time::Duration::from_millis(100));
+        }
         // The indexer's requests carry no context to wake the UI: check back
         // while answers are on their way.
         if self.state.deps.is_waiting() {

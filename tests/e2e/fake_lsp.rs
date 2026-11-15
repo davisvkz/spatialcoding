@@ -18,7 +18,9 @@ use regex::Regex;
 use serde_json::{json, Value};
 use spatialcoding::analysis::lsp::client::Connection;
 use spatialcoding::analysis::lsp::manager::Launcher;
-use spatialcoding::analysis::lsp::protocol::{path_to_uri, read_message, uri_to_path, write_message};
+use spatialcoding::analysis::lsp::protocol::{
+    path_to_uri, read_message, uri_to_path, write_message,
+};
 
 pub fn launcher() -> Launcher {
     Arc::new(|_server, root| Ok(start(root.to_path_buf())))
@@ -47,13 +49,21 @@ fn serve(root: PathBuf, mut reader: BufReader<std::io::PipeReader>, mut writer: 
                 .unwrap_or_else(|| std::fs::read_to_string(p).unwrap_or_default())
         };
         let result = match msg["method"].as_str() {
-            Some("initialize") => json!({"capabilities": {"documentSymbolProvider": true, "referencesProvider": true}}),
+            Some("initialize") => {
+                json!({"capabilities": {"documentSymbolProvider": true, "referencesProvider": true}})
+            }
             Some("textDocument/didOpen") => {
-                open.insert(doc_path.unwrap(), params["textDocument"]["text"].as_str().unwrap().into());
+                open.insert(
+                    doc_path.unwrap(),
+                    params["textDocument"]["text"].as_str().unwrap().into(),
+                );
                 continue;
             }
             Some("textDocument/didChange") => {
-                open.insert(doc_path.unwrap(), params["contentChanges"][0]["text"].as_str().unwrap().into());
+                open.insert(
+                    doc_path.unwrap(),
+                    params["contentChanges"][0]["text"].as_str().unwrap().into(),
+                );
                 continue;
             }
             Some("textDocument/documentSymbol") => symbols(&text_of(&open, &doc_path.unwrap())),
@@ -82,7 +92,8 @@ fn range(line: usize, start: usize, end: usize) -> Value {
 }
 
 fn symbols(text: &str) -> Value {
-    let re = Regex::new(r"^\s*(?:pub\s+)?(?:export\s+)?(fn|struct|function|class|const)\s+(\w+)").unwrap();
+    let re = Regex::new(r"^\s*(?:pub\s+)?(?:export\s+)?(fn|struct|function|class|const)\s+(\w+)")
+        .unwrap();
     let items: Vec<Value> = text
         .lines()
         .enumerate()
@@ -111,7 +122,9 @@ fn word_at(text: &str, line: usize, col: usize) -> Option<String> {
     let start = line[..col.min(line.len())]
         .rfind(|c: char| !is_word(c))
         .map_or(0, |i| i + 1);
-    let end = line[start..].find(|c: char| !is_word(c)).map_or(line.len(), |i| start + i);
+    let end = line[start..]
+        .find(|c: char| !is_word(c))
+        .map_or(line.len(), |i| start + i);
     (start < end).then(|| line[start..end].to_string())
 }
 
@@ -132,12 +145,17 @@ fn references(root: &Path, word: &str) -> Value {
 }
 
 fn collect(dir: &Path, out: &mut Vec<PathBuf>) {
-    let Ok(entries) = std::fs::read_dir(dir) else { return };
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
     for entry in entries.flatten() {
         let path = entry.path();
         if path.is_dir() {
             collect(&path, out);
-        } else if path.extension().is_some_and(|e| e == "rs" || e == "ts") {
+        } else if path
+            .extension()
+            .is_some_and(|e| e == "rs" || e == "ts" || e == "tsx")
+        {
             out.push(path);
         }
     }

@@ -3,7 +3,7 @@
 
 use crate::analysis::dependencies::indexer::ServerProgress;
 use crate::analysis::lsp::manager::ServerStatus;
-use crate::edges::style::{EdgeStyle, GradientGapMode, OpacityMode};
+use crate::edges::style::{EdgeStyle, GradientGapMode, OpacityMode, RelationshipType};
 use crate::layout::settings::{HAlign, SortMode, VAlign};
 use crate::state::{AppState, RightPanel};
 use crate::ui::icons;
@@ -71,7 +71,12 @@ pub fn draw_sidebar_right(ctx: &egui::Context, state: &mut AppState) {
         .show(ctx, |ui| {
             bubble_frame(&theme).show(ui, |ui| {
                 ui.set_min_width(ui.available_width());
-                if panel_header(ui, icon_ch, title) {
+                let heading = if panel == RightPanel::DependencyEdges {
+                    "Dependency Edges"
+                } else {
+                    title
+                };
+                if panel_header(ui, icon_ch, heading) {
                     state.right_panel = None;
                 }
                 // Each tab keeps its own offset. The header stays outside the
@@ -177,6 +182,56 @@ pub fn progress_line(p: &ServerProgress) -> (String, bool) {
 }
 
 fn draw_edges_panel(ui: &mut egui::Ui, state: &mut AppState) {
+    let comparison_ready = state.git_comparison.is_ready();
+    section(ui, "Visibility", |ui| {
+        ui.checkbox(&mut state.edge_style.show_all, "All")
+            .on_hover_text(
+                "Show all enabled relationship types; otherwise show only the current selection.",
+            );
+        egui::CollapsingHeader::new("Relationship types")
+            .default_open(true)
+            .show(ui, |ui| {
+                for kind in RelationshipType::ALL {
+                    let settings = &mut state.edge_style.relationships[kind.index()];
+                    ui.horizontal(|ui| {
+                        ui.checkbox(&mut settings.visible, kind.label());
+                        ui.color_edit_button_rgb(&mut settings.color);
+                    });
+                    ui.weak(kind.description());
+                }
+            });
+        ui.weak("Highlights");
+        ui.horizontal(|ui| {
+            ui.checkbox(&mut state.edge_style.highlight_selected, "Selected");
+            ui.add_enabled(
+                comparison_ready,
+                egui::Checkbox::new(&mut state.edge_style.highlight_changes, "Changes"),
+            )
+            .on_disabled_hover_text(
+                "Refresh the Git comparison below to highlight proven graph changes.",
+            );
+        });
+        ui.checkbox(&mut state.edge_style.highlight_backwards, "Backwards")
+            .on_hover_text("Highlight incoming dependencies of the selected symbols/files.");
+        ui.weak("Folder nesting levels");
+        ui.checkbox(&mut state.edge_style.folder_levels, "Levels")
+            .on_hover_text(
+                "Color connections by their workspace-relative source and target folders.",
+            );
+        ui.label(format!("Depth    L{}", state.edge_style.folder_depth));
+        ui.add_enabled(
+            state.edge_style.folder_levels,
+            egui::Slider::new(&mut state.edge_style.folder_depth, 1..=12),
+        );
+        ui.separator();
+        ui.checkbox(
+            &mut state.edge_style.highlight_reverse_layout,
+            "Highlight Backwards Edges",
+        )
+        .on_hover_text(
+            "Highlight edges whose source is to the right of their target on the canvas.",
+        );
+    });
     section(ui, "Analysis (language servers)", |ui| {
         let progress = state.deps.progress(&state.lsp.manager);
         if progress.is_empty() {
@@ -216,12 +271,7 @@ fn draw_edges_panel(ui: &mut egui::Ui, state: &mut AppState) {
         });
     });
 
-    section(ui, "Visibility", |ui| {
-        ui.checkbox(&mut state.edge_style.show_all, "Show All");
-        ui.checkbox(
-            &mut state.edge_style.highlight_backwards,
-            "Highlight Backwards",
-        );
+    section(ui, "Connections", |ui| {
         ui.checkbox(
             &mut state.edge_style.show_connection_markers,
             "Connection Markers",
@@ -239,7 +289,7 @@ fn draw_edges_panel(ui: &mut egui::Ui, state: &mut AppState) {
 
     section(ui, "Gradient", |ui| {
         ui.checkbox(&mut state.edge_style.use_gradient, "Use Gradient");
-        if state.edge_style.use_gradient {
+        ui.add_enabled_ui(state.edge_style.use_gradient, |ui| {
             ui.horizontal(|ui| {
                 ui.radio_value(
                     &mut state.edge_style.gradient_gap_mode,
@@ -252,23 +302,78 @@ fn draw_edges_panel(ui: &mut egui::Ui, state: &mut AppState) {
                     "Fixed",
                 );
             });
-            match state.edge_style.gradient_gap_mode {
-                GradientGapMode::Percent => {
-                    ui.label("Gap %");
-                    ui.add(egui::Slider::new(
-                        &mut state.edge_style.gradient_gap_pct,
-                        0.0..=1.0,
+            ui.label("Gap %");
+            ui.add_enabled(
+                state.edge_style.gradient_gap_mode == GradientGapMode::Percent,
+                egui::Slider::new(&mut state.edge_style.gradient_gap_pct, 0.0..=1.0),
+            );
+            ui.label("Min Dist (px)");
+            ui.add_enabled(
+                state.edge_style.gradient_gap_mode == GradientGapMode::Fixed,
+                egui::Slider::new(&mut state.edge_style.gradient_min_dist_px, 0.0..=40000.0),
+            );
+        });
+    });
+
+    section(ui, "Diff", |ui| {
+        let baseline_label = ui.label("Git baseline");
+        if ui
+            .add(egui::TextEdit::singleline(&mut state.git_comparison.baseline).hint_text("HEAD"))
+            .labelled_by(baseline_label.id)
+            .changed()
+        {
+            crate::workspace::invalidate_git_comparison(state);
+        }
+        let can_refresh = state.loaded_dir.is_some()
+            && !state.node_store.file_nodes.is_empty()
+            && !state.git_comparison.is_loading();
+        if ui
+            .add_enabled(can_refresh, egui::Button::new("Refresh comparison"))
+            .clicked()
+        {
+            crate::workspace::refresh_git_comparison(state);
+        }
+        let ready = state.git_comparison.is_ready();
+        ui.add_enabled(ready, egui::Checkbox::new(&mut state.edge_style.diff_colors, "Diff Colors"))
+            .on_hover_text("Added = green; deleted = red. Other highlight colors are overridden only for proven changes.");
+        ui.add_enabled(
+            ready,
+            egui::Checkbox::new(&mut state.edge_style.show_deleted, "Deleted"),
+        )
+        .on_hover_text(
+            "Baseline-only links use file headers, never obsolete identifier positions.",
+        );
+        use crate::git::comparison::ComparisonStatus;
+        match &state.git_comparison.status {
+            ComparisonStatus::Idle => {
+                ui.weak("Not compared; refresh after changing the canvas.");
+            }
+            ComparisonStatus::Loading => {
+                ui.spinner();
+                ui.label("Comparing Git graph…");
+            }
+            ComparisonStatus::Unavailable(message) | ComparisonStatus::Error(message) => {
+                ui.colored_label(ui.visuals().error_fg_color, message);
+            }
+            ComparisonStatus::Ready => {
+                if let Some(diff) = &state.git_comparison.diff {
+                    let (added, deleted, unchanged) = diff.counts();
+                    ui.label(format!(
+                        "Baseline: {}",
+                        &diff.commit[..diff.commit.len().min(12)]
                     ));
-                }
-                GradientGapMode::Fixed => {
-                    ui.label("Min Dist (px)");
-                    ui.add(egui::Slider::new(
-                        &mut state.edge_style.gradient_min_dist_px,
-                        0.0..=1000.0,
-                    ));
+                    ui.label(format!("+{added} / −{deleted} / {unchanged} unchanged"));
+                    let uncovered = state
+                        .edge_store
+                        .all_edges()
+                        .filter(|e| e.change == crate::edges::edge_store::EdgeChange::Uncompared)
+                        .count();
+                    ui.weak(format!("{uncovered} symbol links not compared."));
                 }
             }
         }
+        ui.weak("Coverage: local module/document links, between open files only. LSP-only symbol links are not compared.");
+        ui.weak("Canvas snapshot vs commit (not index). Reopen files after external edits.");
     });
 
     egui::CollapsingHeader::new("Re-export & Barrel")

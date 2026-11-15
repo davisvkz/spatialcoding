@@ -16,7 +16,10 @@ fn welcome_screen_shows_until_a_folder_is_opened() {
     assert!(app.query_by_label("Open folder...").is_none());
     assert!(app.query_by_label("No folder loaded").is_none());
     app.get_by_label(&fx.name); // toolbar folder button
-    assert_eq!(app.app_state().loaded_dir.as_deref(), Some(fx.root.as_path()));
+    assert_eq!(
+        app.app_state().loaded_dir.as_deref(),
+        Some(fx.root.as_path())
+    );
 }
 
 #[test]
@@ -25,7 +28,11 @@ fn opening_another_folder_clears_the_canvas() {
     let mut app = app_with(&fx);
     app.open(&fx.path("src/main.rs"));
     app.open(&fx.path("src/util.rs"));
-    assert_eq!(app.app_state().edge_store.all_edges().count(), 1);
+    assert_eq!(
+        app.app_state().edge_store.all_edges().count(),
+        2,
+        "module import plus symbol reference"
+    );
 
     let other = fixture();
     app.state_mut().open_folder(other.root.clone());

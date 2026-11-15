@@ -2,6 +2,66 @@ use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
+pub enum RelationshipType {
+    Imports,
+    Inherits,
+    #[default]
+    References,
+    Renders,
+}
+
+impl RelationshipType {
+    pub const ALL: [Self; 4] = [
+        Self::Imports,
+        Self::Inherits,
+        Self::References,
+        Self::Renders,
+    ];
+    pub fn index(self) -> usize {
+        self as usize
+    }
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Imports => "Imports",
+            Self::Inherits => "Inherits",
+            Self::References => "References",
+            Self::Renders => "Renders",
+        }
+    }
+    pub fn description(self) -> &'static str {
+        match self {
+            Self::Imports => "Explicitly loads a module, header or source file.",
+            Self::Inherits => {
+                "Explicitly inherits a base class or refines an interface or protocol."
+            }
+            Self::References => {
+                "References a symbol or eligible local document/configuration file."
+            }
+            Self::Renders => "Renders a component through a proven local binding.",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+pub struct RelationshipStyle {
+    pub visible: bool,
+    pub color: [f32; 3],
+}
+
+fn default_relationships() -> [RelationshipStyle; 4] {
+    [
+        [0.55, 0.61, 0.75],
+        [0.67, 0.58, 0.81],
+        [0.55, 0.61, 0.75],
+        [0.34, 0.66, 0.62],
+    ]
+    .map(|color| RelationshipStyle {
+        visible: true,
+        color,
+    })
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum EdgeStyle {
     Bezier,
@@ -29,6 +89,22 @@ pub enum GradientGapMode {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EdgeStyleConfig {
+    #[serde(default)]
+    pub highlight_changes: bool,
+    #[serde(default)]
+    pub diff_colors: bool,
+    #[serde(default)]
+    pub show_deleted: bool,
+    #[serde(default = "default_relationships")]
+    pub relationships: [RelationshipStyle; 4],
+    #[serde(default = "default_true")]
+    pub highlight_selected: bool,
+    #[serde(default)]
+    pub highlight_reverse_layout: bool,
+    #[serde(default)]
+    pub folder_levels: bool,
+    #[serde(default = "default_folder_depth")]
+    pub folder_depth: usize,
     pub style: EdgeStyle,
     pub opacity_mode: OpacityMode,
     pub show_all: bool,
@@ -67,6 +143,9 @@ pub struct EdgeStyleConfig {
 
 fn default_gradient_gap_mode() -> GradientGapMode {
     GradientGapMode::Percent
+}
+fn default_folder_depth() -> usize {
+    1
 }
 fn default_gradient_gap_pct() -> f32 {
     0.8
@@ -109,6 +188,26 @@ pub fn default_symbol_colors() -> HashMap<String, [f32; 3]> {
 }
 
 impl EdgeStyleConfig {
+    /// A stable palette keyed by the workspace-relative folder prefix. Opening
+    /// another file does not change an existing folder's color.
+    pub fn folder_color(&self, file: &std::path::Path, root: &std::path::Path) -> Option<[f32; 3]> {
+        let relative = file.parent()?.strip_prefix(root).ok()?;
+        let mut hash = 2166136261_u32;
+        for part in relative.components().take(self.folder_depth.max(1)) {
+            for byte in part.as_os_str().to_string_lossy().bytes().chain(*b"/") {
+                hash = (hash ^ u32::from(byte)).wrapping_mul(16777619);
+            }
+        }
+        let palette = [
+            [0.45, 0.67, 0.86],
+            [0.71, 0.57, 0.85],
+            [0.36, 0.74, 0.63],
+            [0.86, 0.65, 0.39],
+            [0.82, 0.48, 0.59],
+            [0.58, 0.71, 0.40],
+        ];
+        Some(palette[hash as usize % palette.len()])
+    }
     pub fn kind_color(&self, label: &str) -> egui::Color32 {
         let rgb = self
             .symbol_colors
@@ -126,6 +225,14 @@ impl EdgeStyleConfig {
 impl Default for EdgeStyleConfig {
     fn default() -> Self {
         Self {
+            highlight_changes: false,
+            diff_colors: false,
+            show_deleted: false,
+            relationships: default_relationships(),
+            highlight_selected: true,
+            highlight_reverse_layout: false,
+            folder_levels: false,
+            folder_depth: default_folder_depth(),
             style: EdgeStyle::Bezier,
             opacity_mode: OpacityMode::Depth,
             // v2 keeps the rest of the web visible (dimmed) around a selection.
@@ -161,6 +268,24 @@ mod tests {
     use super::*;
 
     #[test]
+    fn folder_colors_are_workspace_relative_and_group_at_the_selected_depth() {
+        use std::path::Path;
+        let mut config = EdgeStyleConfig::default();
+        let color =
+            |cfg: &EdgeStyleConfig, path| cfg.folder_color(Path::new(path), Path::new("/repo"));
+        assert_eq!(
+            color(&config, "/repo/src/a/one.rs"),
+            color(&config, "/repo/src/b/two.rs")
+        );
+        config.folder_depth = 2;
+        assert_ne!(
+            color(&config, "/repo/src/a/one.rs"),
+            color(&config, "/repo/src/b/two.rs")
+        );
+        assert_eq!(color(&config, "/outside/a.rs"), None);
+    }
+
+    #[test]
     fn legacy_symbol_pill_setting_is_ignored_and_not_serialized_again() {
         let mut value = serde_json::to_value(EdgeStyleConfig::default()).unwrap();
         value
@@ -172,5 +297,28 @@ mod tests {
             .unwrap()
             .get("show_symbol_pills")
             .is_none());
+    }
+
+    #[test]
+    fn legacy_configs_enable_reference_visibility_and_selection_emphasis() {
+        let mut value = serde_json::to_value(EdgeStyleConfig::default()).unwrap();
+        for key in [
+            "highlight_changes",
+            "diff_colors",
+            "show_deleted",
+            "relationships",
+            "highlight_selected",
+            "highlight_reverse_layout",
+            "folder_levels",
+            "folder_depth",
+        ] {
+            value.as_object_mut().unwrap().remove(key);
+        }
+        let config: EdgeStyleConfig = serde_json::from_value(value).unwrap();
+        assert!(config.highlight_selected);
+        assert!(config.relationships.iter().all(|style| style.visible));
+        assert!(!config.folder_levels && !config.highlight_reverse_layout);
+        assert_eq!(config.folder_depth, 1);
+        assert!(!config.highlight_changes && !config.diff_colors && !config.show_deleted);
     }
 }

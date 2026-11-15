@@ -14,7 +14,10 @@ fn expand_root_and_src(app: &mut App, fx: &Fixture) {
 fn clicking_folder_names_expands_them() {
     let fx = fixture();
     let mut app = app_with(&fx);
-    assert!(app.query_by_label("src (2)").is_none(), "root starts collapsed");
+    assert!(
+        app.query_by_label("src (2)").is_none(),
+        "root starts collapsed"
+    );
 
     expand_root_and_src(&mut app, &fx);
 
@@ -42,7 +45,7 @@ fn clicking_files_opens_nodes_folders_and_edges() {
     expand_root_and_src(&mut app, &fx);
 
     app.get_by_label_contains("main.rs").click();
-    app.run();
+    app.settle_edges();
     {
         let s = app.app_state();
         assert_eq!(s.node_store.file_nodes.len(), 1);
@@ -64,10 +67,28 @@ fn clicking_files_opens_nodes_folders_and_edges() {
     let edges: Vec<_> = s
         .edge_store
         .all_edges()
-        .map(|e| (path_of(e.source_node), path_of(e.target_node), e.label.clone()))
+        .filter(|e| e.relationship == spatialcoding::edges::style::RelationshipType::References)
+        .map(|e| {
+            (
+                path_of(e.source_node),
+                path_of(e.target_node),
+                e.label.clone(),
+            )
+        })
         .collect();
     assert_eq!(
         edges,
-        [(fx.path("src/main.rs"), fx.path("src/util.rs"), Some("fn".into()))]
+        [(
+            fx.path("src/main.rs"),
+            fx.path("src/util.rs"),
+            Some("fn".into())
+        )]
+    );
+    assert_eq!(
+        s.edge_store
+            .all_edges()
+            .filter(|e| e.relationship == spatialcoding::edges::style::RelationshipType::Imports)
+            .count(),
+        1
     );
 }
