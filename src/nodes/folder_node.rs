@@ -1,5 +1,9 @@
 use std::path::PathBuf;
 
+/// Band reserved above a folder's contents, inside its box. The hierarchical
+/// layout reserves the same space so laid-out folders never overlap.
+pub const FOLDER_HEADER_HEIGHT: f32 = 28.0;
+
 pub struct FolderNode {
     pub id: u64,
     pub path: PathBuf,
@@ -36,7 +40,7 @@ impl FolderNode {
         for rect in &child_rects[1..] {
             combined = combined.union(*rect);
         }
-        let header_height = 28.0;
+        let header_height = FOLDER_HEADER_HEIGHT;
         self.bounds = egui::Rect::from_min_max(
             egui::pos2(combined.min.x - padding, combined.min.y - padding - header_height),
             egui::pos2(combined.max.x + padding, combined.max.y + padding),

@@ -28,6 +28,7 @@ pub fn draw_settings(ctx: &egui::Context, state: &mut AppState) {
                 .show(ui, |ui| {
                     ui.checkbox(&mut state.settings.show_controls_bar, "Controls Bar");
                     ui.checkbox(&mut state.settings.show_minimap, "Minimap");
+                    ui.checkbox(&mut state.settings.show_grid, "Dot Grid");
                 });
 
             egui::CollapsingHeader::new("Canvas File Nodes")

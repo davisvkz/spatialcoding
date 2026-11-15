@@ -17,8 +17,9 @@ fn key_1_applies_the_hierarchical_layout() {
     let s = app.app_state();
     let column = s.settings.node_width + s.layout_settings.file_spacing;
     let (main_pos, util_pos) = (app.node_position(main), app.node_position(util));
-    assert_eq!(main_pos.x, 0.0, "importer is a root");
-    assert_eq!(util_pos.x, column, "dependency is one column to the right");
+    // Both sit in the `src/` folder box, inset by its padding.
+    assert_eq!(main_pos.x, s.layout_settings.folder_padding, "importer is a root");
+    assert_eq!(util_pos.x - main_pos.x, column, "dependency is one column to the right");
 }
 
 #[test]

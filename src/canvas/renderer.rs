@@ -8,8 +8,17 @@ const GRID_SPACING: f32 = 50.0;
 pub struct CanvasRenderer;
 
 impl CanvasRenderer {
-    pub fn draw_background(painter: &Painter, viewport: &Viewport, rect: Rect, theme: &Theme) {
+    pub fn draw_background(
+        painter: &Painter,
+        viewport: &Viewport,
+        rect: Rect,
+        theme: &Theme,
+        show_grid: bool,
+    ) {
         painter.rect_filled(rect, 0.0, theme.canvas_bg);
+        if !show_grid {
+            return;
+        }
 
         let alpha = ((viewport.zoom - 0.15) / 0.35).clamp(0.0, 1.0);
         if alpha < 0.01 {

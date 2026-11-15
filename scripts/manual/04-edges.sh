@@ -17,14 +17,17 @@ dir=$(fixture "$lang")
 checklist "04 · Arestas de dependência via LSP ($lang)" \
   "Abrir o painel direito → Edges logo ao iniciar|'Analysis (language servers)': 'Rust: starting…' ou 'indexing… N/M files' e depois 'M files analyzed'; linguagem sem servidor mostra o erro em vermelho" \
   "Esperar a indexação terminar (rust-analyzer: alguns segundos)|as arestas aparecem aos poucos, sem travar a interface; o layout de --layout é refeito quando a análise termina" \
-  "Observar o canvas sem nada selecionado|arestas quase invisíveis: 'Only Selected' vem ligado" \
-  "Clicar num arquivo|as arestas dele (entrando e saindo) aparecem fortes, com ponta de seta no destino" \
+  "Observar o canvas sem nada selecionado|fundo quase preto, sem grade; arestas finas azul-acinzentadas e translúcidas formando uma teia (não uma parede)" \
+  "Clicar num arquivo|borda branca no nó; as arestas dele (entrando e saindo) ficam azul-claras, opacas e por cima das outras, com ponta de seta no destino; as demais continuam visíveis, mais apagadas" \
+  "Com o arquivo selecionado e zoom médio/próximo|cada aresta dele tem uma 'pílula' com o nome do símbolo nas duas pontas, dentro do nó junto da lateral; com zoom muito distante as pílulas somem" \
   "Aproximar (Ctrl+roda) um arquivo selecionado|cada aresta sai da lateral do nó na linha do statement que USA o símbolo e chega na linha da DEFINIÇÃO no outro arquivo (função, struct, método); vários usos geram várias arestas" \
   "Com o arquivo selecionado, olhar o código dos dois lados|os statements de uso e as definições inteiras ficam destacados na cor do tipo do símbolo (fn, struct…, editável na aba Edges), com uma barra na borda esquerda" \
   "Na definição, olhar o nome do símbolo (ex.: 'pub struct Server', 'pub fn bind') em zooms diferentes|a marca mais forte cobre exatamente o nome, sem começar no meio dele nem passar para o '{' ou o '('" \
   "Conferir as arestas|esperado: $expected" \
   "Um import cujo símbolo é usado no arquivo|não gera aresta própria; um import sem uso liga a linha do import à definição" \
-  "Painel direito → Edges → desmarcar Only Selected|todas as arestas visíveis; as do nó selecionado mais fortes (Opacity: Depth)" \
+  "Painel direito → Edges → desmarcar Only Selected|todas as arestas ganham ponta de seta, não só as da seleção" \
+  "Desmarcar Symbol Pills|as pílulas com o nome do símbolo somem" \
+  "Settings → UI → Dot Grid|a grade de pontos volta a aparecer no fundo" \
   "Trocar o estilo: Bezier, Step, Line, PCB|o traçado das arestas muda de forma" \
   "Desmarcar Arrow Heads|as setas somem" \
   "Arrastar um nó selecionado|as arestas acompanham o nó"

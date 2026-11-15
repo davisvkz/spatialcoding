@@ -149,6 +149,9 @@ pub struct AppSettings {
     pub show_activity_indicator: bool,
     pub show_controls_bar: bool,
     pub show_minimap: bool,
+    /// Dot grid behind the canvas. Off by default: v2 draws a plain background.
+    #[serde(default)]
+    pub show_grid: bool,
     pub font_size: f32,
     pub node_width: f32,
     pub show_dot_folders: bool,
@@ -168,6 +171,7 @@ impl Default for AppSettings {
             show_activity_indicator: false,
             show_controls_bar: true,
             show_minimap: true,
+            show_grid: false,
             font_size: 12.0,
             node_width: 700.0,
             show_dot_folders: false,

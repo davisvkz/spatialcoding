@@ -94,6 +94,16 @@ fn add_file_node(state: &mut AppState, path: &Path, content: String) -> u64 {
         {
             folder.children_ids.push(file_id);
         }
+        // Directories between the loaded folder and this one get a folder too,
+        // so nested boxes show the whole path (v2: `src` ⊃ `analysis` ⊃ `lsp`).
+        if let Some(root) = state.loaded_dir.clone() {
+            for dir in parent_dir.ancestors().skip(1) {
+                if dir == root || !dir.starts_with(&root) {
+                    break;
+                }
+                find_or_create_folder(state, dir);
+            }
+        }
     }
     file_id
 }
@@ -129,10 +139,14 @@ pub fn remove_nodes(state: &mut AppState, ids: &[u64]) {
         }
     }
 
+    // A folder stays while any open file still lives under it, so the
+    // intermediate folders of a nested path survive until it is emptied.
+    let remaining: Vec<PathBuf> =
+        state.node_store.file_nodes.values().map(|n| n.path.clone()).collect();
     let mut empty_folders = Vec::new();
     for folder in state.node_store.folder_nodes.values_mut() {
         folder.children_ids.retain(|child| !removed.contains(child));
-        if folder.children_ids.is_empty() {
+        if !remaining.iter().any(|p| p.starts_with(&folder.path)) {
             empty_folders.push(folder.id);
         }
     }
@@ -398,6 +412,30 @@ mod tests {
         assert_eq!(focus_location(&mut state, &link.join("a.rs"), 0), a_id);
         assert_eq!(state.node_store.file_nodes.len(), 2);
         assert_eq!(state.selection.primary, Some(a_id));
+    }
+
+    #[test]
+    fn nested_files_create_their_intermediate_folders_until_removed() {
+        let dir = tempfile::tempdir().unwrap();
+        let deep = write(dir.path(), "src/analysis/lsp/client.rs", "fn c() {}\n");
+        let top = write(dir.path(), "src/main.rs", "fn main() {}\n");
+        let mut state = state_in(dir.path());
+        let deep_id = open_file(&mut state, &deep);
+        let top_id = open_file(&mut state, &top);
+
+        let mut paths: Vec<PathBuf> =
+            state.node_store.folder_nodes.values().map(|f| f.path.clone()).collect();
+        paths.sort();
+        let rel = |p: &str| dir.path().join(p);
+        assert_eq!(paths, [rel("src"), rel("src/analysis"), rel("src/analysis/lsp")]);
+
+        // `src/` keeps its own file; the now-empty deep chain goes away.
+        remove_nodes(&mut state, &[deep_id]);
+        let paths: Vec<PathBuf> =
+            state.node_store.folder_nodes.values().map(|f| f.path.clone()).collect();
+        assert_eq!(paths, [rel("src")]);
+        remove_nodes(&mut state, &[top_id]);
+        assert!(state.node_store.folder_nodes.is_empty());
     }
 
     #[test]

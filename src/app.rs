@@ -135,7 +135,13 @@ impl SpatialCodingApp {
 
         let painter = ui.painter_at(canvas_rect);
 
-        CanvasRenderer::draw_background(&painter, &self.state.viewport, canvas_rect, &self.state.theme);
+        CanvasRenderer::draw_background(
+            &painter,
+            &self.state.viewport,
+            canvas_rect,
+            &self.state.theme,
+            self.state.settings.show_grid,
+        );
 
         self.update_folder_bounds();
         self.draw_folder_nodes(&painter);
@@ -189,46 +195,36 @@ impl SpatialCodingApp {
                 if !painter.clip_rect().intersects(screen_rect) {
                     continue;
                 }
-                painter.rect_filled(screen_rect, 4.0, theme.folder_bg);
-                painter.rect_stroke(screen_rect, 4.0, egui::Stroke::new(1.0_f32, theme.folder_border), egui::StrokeKind::Outside);
-                let label_pos = screen_rect.left_top() + egui::vec2(8.0, 4.0);
-                let label = format!("{} ({})", folder.label, folder.file_count);
-                painter.text(
-                    label_pos,
-                    egui::Align2::LEFT_TOP,
-                    &label,
-                    egui::FontId::proportional((11.0 * self.state.viewport.zoom).max(10.0)),
-                    theme.text_secondary,
+                // v2 folders: unfilled square outline, dim name just above it.
+                painter.rect_filled(screen_rect, 0.0, theme.folder_bg);
+                painter.rect_stroke(
+                    screen_rect,
+                    0.0,
+                    egui::Stroke::new(1.0_f32, theme.folder_border),
+                    egui::StrokeKind::Outside,
                 );
+                // Sized in world units so a nested folder's label never
+                // runs into its parent's at overview zoom; hidden when tiny.
+                let label_px = (FOLDER_LABEL_WORLD_PX * self.state.viewport.zoom).min(16.0);
+                if label_px >= 6.0 {
+                    painter.text(
+                        screen_rect.left_top() - egui::vec2(0.0, 3.0),
+                        egui::Align2::LEFT_BOTTOM,
+                        &folder.label,
+                        egui::FontId::proportional(label_px),
+                        theme.text_muted,
+                    );
+                }
             }
         }
     }
 
     fn update_folder_bounds(&mut self) {
-        let folder_ids = self.state.node_store.all_folder_ids();
-        for folder_id in folder_ids {
-            let child_rects: Vec<egui::Rect> = {
-                let folder = match self.state.node_store.get_folder(folder_id) {
-                    Some(f) => f,
-                    None => continue,
-                };
-                folder
-                    .children_ids
-                    .iter()
-                    .filter_map(|&id| self.state.node_store.get_file(id))
-                    .map(|n| {
-                        n.world_rect(
-                            self.state.settings.node_width,
-                            self.state.settings.font_size,
-                        )
-                    })
-                    .collect()
-            };
-            if let Some(folder) = self.state.node_store.get_folder_mut(folder_id) {
-                folder.file_count = child_rects.len();
-                folder.update_bounds(&child_rects, self.state.layout_settings.folder_padding);
-            }
-        }
+        self.state.node_store.update_folder_bounds(
+            self.state.settings.node_width,
+            self.state.settings.font_size,
+            self.state.layout_settings.folder_padding,
+        );
     }
 
     fn draw_file_nodes(&mut self, painter: &egui::Painter, canvas_rect: egui::Rect) {
@@ -249,19 +245,19 @@ impl SpatialCodingApp {
 
             let screen_rect = self.state.viewport.world_to_screen_rect(world_rect);
             let selected = self.state.selection.is_selected(node.id);
-            let border_color = if selected { theme.selection } else { theme.node_border };
-            let border_width: f32 = if selected { 1.5 } else { 1.0 };
+            let border_color = if selected { theme.selected_border } else { theme.node_border };
+            let border_width: f32 = 1.0;
             let rounding = (4.0 * zoom).clamp(1.0, 4.0);
 
             // v2 Code Canvas style: no interior header bar; the file name
             // floats above the rectangle as a secondary label.
-            let label_anchor = screen_rect.left_top() - egui::vec2(0.0, 4.0);
+            let label_anchor = screen_rect.center_top() - egui::vec2(0.0, 4.0);
             let label_size = (font_size * zoom).max(10.0).min(14.0);
             draw_fitted_label(
                 painter,
                 node.file_name(),
                 label_anchor,
-                egui::Align2::LEFT_BOTTOM,
+                egui::Align2::CENTER_BOTTOM,
                 screen_rect.width(),
                 label_size,
                 theme.text_secondary,
@@ -489,6 +485,9 @@ const MONO_ADVANCE: f32 = 0.6;
 
 /// Draws `text` with a font no larger than `max_px`, shrunk to fit `max_width`.
 /// Skips drawing when it would be too small to read.
+/// Folder label height in world units: fits in the parent folder's padding.
+const FOLDER_LABEL_WORLD_PX: f32 = 36.0;
+
 fn draw_fitted_label(
     painter: &egui::Painter,
     text: &str,
@@ -503,7 +502,9 @@ fn draw_fitted_label(
     if px < 5.0 {
         return;
     }
-    painter.text(pos, align, text, egui::FontId::monospace(px), color);
+    // Proportional, as v2's file labels; the mono advance over-estimates
+    // its width, so the fit stays conservative.
+    painter.text(pos, align, text, egui::FontId::proportional(px), color);
 }
 
 /// Full LOD: real syntax-highlighted text.

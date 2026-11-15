@@ -210,3 +210,79 @@ fn escape_clears_the_selection() {
     app.run();
     assert!(app.selected().is_empty());
 }
+
+/// Every shape of the last frame, with nested `Shape::Vec`s flattened.
+fn frame_shapes(app: &App) -> Vec<egui::Shape> {
+    fn flatten(shape: &egui::Shape, out: &mut Vec<egui::Shape>) {
+        match shape {
+            egui::Shape::Vec(v) => v.iter().for_each(|s| flatten(s, out)),
+            s => out.push(s.clone()),
+        }
+    }
+    let mut out = Vec::new();
+    for clipped in &app.output().shapes {
+        flatten(&clipped.shape, &mut out);
+    }
+    out
+}
+
+fn texts_equal(shapes: &[egui::Shape], text: &str) -> usize {
+    shapes
+        .iter()
+        .filter(|s| matches!(s, egui::Shape::Text(t) if t.galley.job.text == text))
+        .count()
+}
+
+/// Strongest alpha among bezier edges whose stroke is blue-dominant.
+fn max_bezier_alpha(shapes: &[egui::Shape]) -> u8 {
+    shapes
+        .iter()
+        .filter_map(|s| match s {
+            egui::Shape::CubicBezier(b) => match b.stroke.color {
+                egui::epaint::ColorMode::Solid(c) => {
+                    let [r, g, bl, a] = c.to_srgba_unmultiplied();
+                    (bl > r && bl >= g).then_some(a)
+                }
+                _ => None,
+            },
+            _ => None,
+        })
+        .max()
+        .unwrap_or(0)
+}
+
+#[test]
+fn selecting_a_node_lifts_its_edges_and_labels_both_ends_with_the_symbol() {
+    let fx = fixture();
+    let mut app = app_with(&fx);
+    let main = app.open(&fx.path("src/main.rs"));
+    let util = app.open(&fx.path("src/util.rs"));
+    assert_eq!(app.app_state().edge_store.all_edges().count(), 1, "main -> util::hello");
+    {
+        let s = app.app_state_mut();
+        s.node_store.get_file_mut(main).unwrap().position = Pos2::new(0.0, 0.0);
+        s.node_store.get_file_mut(util).unwrap().position = Pos2::new(900.0, 0.0);
+        s.viewport.zoom = 0.6;
+        s.viewport.target_zoom = 0.6;
+        s.right_panel = None;
+    }
+    app.show_at(Pos2::new(800.0, 60.0), Pos2::new(700.0, 300.0));
+
+    let idle = frame_shapes(&app);
+    let idle_alpha = max_bezier_alpha(&idle);
+    assert!(idle_alpha > 0 && idle_alpha < 100, "faint idle web, got alpha {idle_alpha}");
+
+    app.app_state_mut().selection.select(main);
+    app.run();
+    let selected = frame_shapes(&app);
+    assert!(max_bezier_alpha(&selected) > 200, "the selection's edge is opaque light blue");
+    assert_eq!(
+        texts_equal(&selected, "hello") - texts_equal(&idle, "hello"),
+        2,
+        "one symbol pill at each end"
+    );
+
+    app.app_state_mut().edge_style.show_symbol_pills = false;
+    app.run();
+    assert_eq!(texts_equal(&frame_shapes(&app), "hello"), texts_equal(&idle, "hello"));
+}

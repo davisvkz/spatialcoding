@@ -7,6 +7,7 @@ use crate::canvas::viewport::Viewport;
 use crate::edges::edge_store::{EdgeKind, EdgeStore};
 use crate::edges::style::{EdgeStyle, EdgeStyleConfig, GradientGapMode, OpacityMode};
 use crate::nodes::file_node::{FileNode, HEADER_HEIGHT};
+use crate::nodes::lod::LodLevel;
 use crate::nodes::node_store::NodeStore;
 
 /// Shortest horizontal reach of a bezier's control points, in screen pixels,
@@ -16,6 +17,22 @@ const MIN_BEZIER_REACH: f32 = 40.0;
 /// Visible pixel length under which an edge is dropped: `min_size_pct=1.0`
 /// hides edges shorter than this many pixels on screen.
 const MIN_VISIBLE_LEN_PX: f32 = 40.0;
+
+/// Stroke multiplier for the edges of the selection.
+const SELECTED_STROKE_SCALE: f32 = 1.4;
+
+/// Edge alpha levels (0..=255). v2 keeps the idle web faint so it reads as
+/// a web rather than a wall, and the selection's edges fully opaque.
+const IDLE_ALPHA: u8 = 70;
+const CONNECTED_ALPHA: u8 = 235;
+const UNCONNECTED_DEPTH_ALPHA: u8 = 40;
+const FULL_ALPHA: u8 = 200;
+
+/// Symbol pill geometry, in screen pixels.
+const PILL_FONT_PX: f32 = 11.0;
+const PILL_PAD_X: f32 = 6.0;
+const PILL_PAD_Y: f32 = 2.0;
+const PILL_GAP: f32 = 4.0;
 
 /// Inverted-direction color for `highlight_backwards`: v2 picks a cool blue.
 const BACKWARDS_COLOR: Color32 = Color32::from_rgb(0x3b, 0x82, 0xf6);
@@ -35,133 +52,192 @@ pub fn draw_edges(
     // Stroke scales softly with zoom so edges stay sub-pixel thin in overview.
     let stroke_px = 1.0 * viewport.zoom.clamp(0.6, 1.4);
     let min_len_px = config.min_size_pct * MIN_VISIBLE_LEN_PX;
+    let nothing_selected = selected_nodes.is_empty();
+    let show_pills = config.show_symbol_pills
+        && !nothing_selected
+        && LodLevel::from_zoom(viewport.zoom) != LodLevel::TitleOnly;
+    let mut pills: Vec<(Pos2, f32, String)> = Vec::new();
 
-    for edge in edges.all_edges() {
-        match edge.kind {
-            EdgeKind::ReExport if !config.show_reexport_edges => continue,
-            EdgeKind::Barrel if !config.show_barrel_edges => continue,
-            _ => {}
-        }
-        let src = match nodes.get_file(edge.source_node) {
-            Some(n) => n,
-            None => continue,
-        };
-        let tgt = match nodes.get_file(edge.target_node) {
-            Some(n) => n,
-            None => continue,
-        };
-
-        let src_rect = src.world_rect(node_width, font_size);
-        let tgt_rect = tgt.world_rect(node_width, font_size);
-        let (src_point, src_dir) =
-            anchor(src, src_rect, edge.source_span, tgt_rect.center().x, font_size);
-        let (tgt_point, tgt_dir) =
-            anchor(tgt, tgt_rect, edge.target_span, src_rect.center().x, font_size);
-
-        let edge_rect = egui::Rect::from_two_pos(src_point, tgt_point);
-        if !visible_world.intersects(edge_rect) {
-            continue;
-        }
-
-        let src_screen = viewport.world_to_screen(src_point);
-        let tgt_screen = viewport.world_to_screen(tgt_point);
-
-        if (tgt_screen - src_screen).length() < min_len_px {
-            continue;
-        }
-
-        let is_src_sel = selected_nodes.contains(&edge.source_node);
-        let is_tgt_sel = selected_nodes.contains(&edge.target_node);
-        let is_connected = is_src_sel || is_tgt_sel;
-
-        // show_all=false + nothing connected hides edges that have no
-        // relation to the current selection. only_selected further dims
-        // unconnected edges when they are still drawn.
-        if !config.show_all && !is_connected && !selected_nodes.is_empty() {
-            continue;
-        }
-
-        let alpha = compute_alpha(config, is_connected, selected_nodes.is_empty());
-        if alpha < 2 {
-            continue;
-        }
-
-        let base_color = if config.highlight_backwards && is_tgt_sel && !is_src_sel {
-            BACKWARDS_COLOR
-        } else if config.highlight_barrel && edge.kind == EdgeKind::Barrel {
-            rgb(config.barrel_color)
-        } else if config.highlight_reexport && edge.kind == EdgeKind::ReExport {
-            rgb(config.reexport_color)
-        } else {
-            rgb(config.base_color)
-        };
-        let color = base_color.gamma_multiply(alpha as f32 / 255.0);
-        let stroke = Stroke::new(stroke_px, color);
-
-        // Direction the edge arrives from, for the arrow head.
-        let mut arrives_from = src_screen;
-        // Gradient disabled for highlight overrides: those pick a fixed
-        // color that must stay readable end to end.
-        let highlight_override = (config.highlight_backwards && is_tgt_sel && !is_src_sel)
-            || (config.highlight_barrel && edge.kind == EdgeKind::Barrel)
-            || (config.highlight_reexport && edge.kind == EdgeKind::ReExport);
-        let use_gradient = config.use_gradient && edge.label.is_some() && !highlight_override;
-        let (start_col, end_col) = gradient_endpoints(config, edge);
-        let span_len = (tgt_screen - src_screen).length();
-        let fade_frac = gradient_fade_fraction(config, span_len);
-        match config.style {
-            EdgeStyle::Bezier => {
-                let [_, _, cp2, _] = bezier_points(src_screen, src_dir, tgt_screen, tgt_dir);
-                arrives_from = cp2;
-                if use_gradient {
-                    draw_bezier_gradient(
-                        painter, src_screen, src_dir, tgt_screen, tgt_dir,
-                        stroke_px, alpha, start_col, end_col, fade_frac,
-                    );
-                } else {
-                    draw_bezier(painter, src_screen, src_dir, tgt_screen, tgt_dir, stroke);
-                }
+    // Two passes, as v2: the dim web first, then the selection's edges on top.
+    for connected_pass in [false, true] {
+        for edge in edges.all_edges() {
+            let is_src_sel = selected_nodes.contains(&edge.source_node);
+            let is_tgt_sel = selected_nodes.contains(&edge.target_node);
+            let is_connected = is_src_sel || is_tgt_sel;
+            if is_connected != connected_pass {
+                continue;
             }
-            EdgeStyle::Step => {
-                if use_gradient {
-                    draw_polyline_gradient(painter, &step_points(src_screen, tgt_screen),
-                        stroke_px, alpha, start_col, end_col, fade_frac);
-                } else {
-                    draw_step(painter, src_screen, tgt_screen, stroke);
-                }
+            match edge.kind {
+                EdgeKind::ReExport if !config.show_reexport_edges => continue,
+                EdgeKind::Barrel if !config.show_barrel_edges => continue,
+                _ => {}
             }
-            EdgeStyle::Line => {
-                if use_gradient {
-                    draw_polyline_gradient(painter, &[src_screen, tgt_screen],
-                        stroke_px, alpha, start_col, end_col, fade_frac);
-                } else {
-                    painter.line_segment([src_screen, tgt_screen], stroke);
-                }
+            // show_all=false hides the edges unrelated to the current selection.
+            if !config.show_all && !is_connected && !nothing_selected {
+                continue;
             }
-            EdgeStyle::Pcb => {
-                if use_gradient {
-                    draw_polyline_gradient(painter, &pcb_points(src_screen, tgt_screen),
-                        stroke_px, alpha, start_col, end_col, fade_frac);
-                } else {
-                    draw_pcb(painter, src_screen, tgt_screen, stroke);
-                }
-            }
-        }
-
-        if config.show_connection_markers {
-            let r = stroke_px * 1.6;
-            painter.circle_filled(src_screen, r, color);
-            painter.circle_filled(tgt_screen, r, color);
-        }
-
-        if config.show_arrow_heads {
-            let arrow_size = if config.scale_arrow_heads {
-                8.0 * viewport.zoom.clamp(0.5, 1.5)
-            } else {
-                8.0
+            let (Some(src), Some(tgt)) =
+                (nodes.get_file(edge.source_node), nodes.get_file(edge.target_node))
+            else {
+                continue;
             };
-            draw_arrow_head(painter, arrives_from, tgt_screen, color, arrow_size);
+
+            let src_rect = src.world_rect(node_width, font_size);
+            let tgt_rect = tgt.world_rect(node_width, font_size);
+            let (src_point, src_dir) =
+                anchor(src, src_rect, edge.source_span, tgt_rect.center().x, font_size);
+            let (tgt_point, tgt_dir) =
+                anchor(tgt, tgt_rect, edge.target_span, src_rect.center().x, font_size);
+
+            let edge_rect = egui::Rect::from_two_pos(src_point, tgt_point);
+            if !visible_world.intersects(edge_rect) {
+                continue;
+            }
+
+            let src_screen = viewport.world_to_screen(src_point);
+            let tgt_screen = viewport.world_to_screen(tgt_point);
+
+            if (tgt_screen - src_screen).length() < min_len_px {
+                continue;
+            }
+
+            let alpha = compute_alpha(config, is_connected, nothing_selected);
+            if alpha < 2 {
+                continue;
+            }
+
+            // Highlight overrides pick a fixed color that must stay readable
+            // end to end, so they also turn the gradient off.
+            let backwards = config.highlight_backwards && is_tgt_sel && !is_src_sel;
+            let override_color = if backwards {
+                Some(BACKWARDS_COLOR)
+            } else if config.highlight_barrel && edge.kind == EdgeKind::Barrel {
+                Some(rgb(config.barrel_color))
+            } else if config.highlight_reexport && edge.kind == EdgeKind::ReExport {
+                Some(rgb(config.reexport_color))
+            } else {
+                None
+            };
+            let selected_edge = is_connected && !nothing_selected;
+            let base_color = override_color.unwrap_or_else(|| {
+                if selected_edge { rgb(config.selected_color) } else { rgb(config.base_color) }
+            });
+            let color = base_color.gamma_multiply(alpha as f32 / 255.0);
+            let width = if selected_edge { stroke_px * SELECTED_STROKE_SCALE } else { stroke_px };
+            let stroke = Stroke::new(width, color);
+
+            // Direction the edge arrives from, for the arrow head.
+            let mut arrives_from = src_screen;
+            let use_gradient =
+                config.use_gradient && edge.label.is_some() && override_color.is_none();
+            let (start_col, end_col) = gradient_endpoints(config, edge);
+            let span_len = (tgt_screen - src_screen).length();
+            let fade_frac = gradient_fade_fraction(config, span_len);
+            match config.style {
+                EdgeStyle::Bezier => {
+                    let [_, _, cp2, _] = bezier_points(src_screen, src_dir, tgt_screen, tgt_dir);
+                    arrives_from = cp2;
+                    if use_gradient {
+                        draw_bezier_gradient(
+                            painter, src_screen, src_dir, tgt_screen, tgt_dir,
+                            width, alpha, start_col, end_col, fade_frac,
+                        );
+                    } else {
+                        draw_bezier(painter, src_screen, src_dir, tgt_screen, tgt_dir, stroke);
+                    }
+                }
+                EdgeStyle::Step => {
+                    if use_gradient {
+                        draw_polyline_gradient(painter, &step_points(src_screen, tgt_screen),
+                            width, alpha, start_col, end_col, fade_frac);
+                    } else {
+                        draw_step(painter, src_screen, tgt_screen, stroke);
+                    }
+                }
+                EdgeStyle::Line => {
+                    if use_gradient {
+                        draw_polyline_gradient(painter, &[src_screen, tgt_screen],
+                            width, alpha, start_col, end_col, fade_frac);
+                    } else {
+                        painter.line_segment([src_screen, tgt_screen], stroke);
+                    }
+                }
+                EdgeStyle::Pcb => {
+                    if use_gradient {
+                        draw_polyline_gradient(painter, &pcb_points(src_screen, tgt_screen),
+                            width, alpha, start_col, end_col, fade_frac);
+                    } else {
+                        draw_pcb(painter, src_screen, tgt_screen, stroke);
+                    }
+                }
+            }
+
+            if config.show_connection_markers {
+                let r = width * 1.6;
+                painter.circle_filled(src_screen, r, color);
+                painter.circle_filled(tgt_screen, r, color);
+            }
+
+            if arrow_head_visible(config, is_connected, nothing_selected) {
+                let arrow_size = if config.scale_arrow_heads {
+                    8.0 * viewport.zoom.clamp(0.5, 1.5)
+                } else {
+                    8.0
+                };
+                draw_arrow_head(painter, arrives_from, tgt_screen, color, arrow_size);
+            }
+
+            if show_pills && selected_edge
+                && let Some(name) = edge_symbol_name(edge, tgt)
+            {
+                // Inside each node, next to the side the edge touches.
+                pills.push((src_screen, -src_dir, name.to_string()));
+                pills.push((tgt_screen, -tgt_dir, name.to_string()));
+            }
         }
+    }
+
+    draw_symbol_pills(painter, pills, rgb(config.selected_color));
+}
+
+/// Name of the symbol an edge points at, read from the target's definition
+/// line through the edge's name span.
+pub(crate) fn edge_symbol_name<'a>(
+    edge: &crate::edges::edge_store::Edge,
+    target: &'a FileNode,
+) -> Option<&'a str> {
+    let ns = edge.name_span?;
+    let line = target.content.lines().nth(ns.line)?;
+    let name = line.get(ns.start_byte..ns.end_byte)?.trim();
+    (!name.is_empty()).then_some(name)
+}
+
+/// v2 symbol pills: a rounded label with the symbol name at each end of the
+/// selection's edges. `inward` (+1 right, -1 left) is the direction from the
+/// anchor into its node. Pills sharing a spot and name are drawn once.
+fn draw_symbol_pills(painter: &egui::Painter, pills: Vec<(Pos2, f32, String)>, accent: Color32) {
+    let mut seen = HashSet::new();
+    let font = egui::FontId::proportional(PILL_FONT_PX);
+    for (at, inward, name) in pills {
+        let key = (at.x.round() as i32, at.y.round() as i32, name.clone());
+        if !seen.insert(key) {
+            continue;
+        }
+        let galley = painter.layout_no_wrap(name, font.clone(), accent);
+        let size = galley.size() + Vec2::new(PILL_PAD_X * 2.0, PILL_PAD_Y * 2.0);
+        let x0 = if inward > 0.0 { at.x + PILL_GAP } else { at.x - PILL_GAP - size.x };
+        let rect = Rect::from_min_size(Pos2::new(x0, at.y - size.y * 0.5), size);
+        if !painter.clip_rect().intersects(rect) {
+            continue;
+        }
+        painter.rect_filled(rect, size.y * 0.5, Color32::from_black_alpha(220));
+        painter.rect_stroke(
+            rect,
+            size.y * 0.5,
+            Stroke::new(1.0_f32, accent.gamma_multiply(0.6)),
+            egui::StrokeKind::Inside,
+        );
+        painter.galley(rect.min + Vec2::new(PILL_PAD_X, PILL_PAD_Y), galley, accent);
     }
 }
 
@@ -185,16 +261,26 @@ fn anchor(
 }
 
 fn compute_alpha(config: &EdgeStyleConfig, is_connected: bool, nothing_selected: bool) -> u8 {
-    if config.only_selected && !is_connected && !nothing_selected {
-        return 4;
-    }
-
     match config.opacity_mode {
-        OpacityMode::Full => 200,
+        OpacityMode::Full => {
+            if is_connected && !nothing_selected { CONNECTED_ALPHA } else { FULL_ALPHA }
+        }
         OpacityMode::Depth => {
-            if is_connected || nothing_selected { 200 } else { 20 }
+            if nothing_selected {
+                IDLE_ALPHA
+            } else if is_connected {
+                CONNECTED_ALPHA
+            } else {
+                UNCONNECTED_DEPTH_ALPHA
+            }
         }
     }
+}
+
+/// Arrow heads follow v2's "Arrow Heads › Only selected": with `only_selected`
+/// on they mark only the edges of the current selection.
+fn arrow_head_visible(config: &EdgeStyleConfig, is_connected: bool, nothing_selected: bool) -> bool {
+    config.show_arrow_heads && (!config.only_selected || (is_connected && !nothing_selected))
 }
 
 fn kind_color_for(config: &EdgeStyleConfig, label: Option<&str>) -> Color32 {
@@ -476,16 +562,39 @@ mod tests {
     }
 
     #[test]
-    fn only_selected_dims_unconnected_edges() {
+    fn full_opacity_keeps_the_web_bright_and_lifts_the_selection() {
         let cfg = config(true, OpacityMode::Full);
-        assert_eq!(compute_alpha(&cfg, false, false), 4, "unconnected while a selection exists");
-        assert_eq!(compute_alpha(&cfg, true, false), 200);
+        assert_eq!(compute_alpha(&cfg, false, true), FULL_ALPHA);
+        assert_eq!(compute_alpha(&cfg, false, false), FULL_ALPHA);
+        assert_eq!(compute_alpha(&cfg, true, false), CONNECTED_ALPHA);
     }
 
     #[test]
-    fn full_opacity_ignores_selection() {
-        let cfg = config(false, OpacityMode::Full);
-        assert_eq!(compute_alpha(&cfg, false, true), 200);
+    fn arrow_heads_only_on_the_selection_when_only_selected() {
+        let mut cfg = config(true, OpacityMode::Depth);
+        cfg.show_arrow_heads = true;
+        assert!(!arrow_head_visible(&cfg, false, true), "nothing selected");
+        assert!(!arrow_head_visible(&cfg, false, false), "unconnected");
+        assert!(arrow_head_visible(&cfg, true, false), "selection edge");
+        cfg.only_selected = false;
+        assert!(arrow_head_visible(&cfg, false, true), "all edges");
+        cfg.show_arrow_heads = false;
+        assert!(!arrow_head_visible(&cfg, true, false), "arrows off");
+    }
+
+    #[test]
+    fn symbol_name_is_read_from_the_target_definition_line() {
+        use crate::edges::edge_store::{EdgeStore, NameSpan};
+        let target = file("// doc\npub fn kind_of(x: u8) {}\n", 0.0);
+        let mut store = EdgeStore::default();
+        let id = store.add(1, 2, Some("fn".into()));
+        let mut edge = store.all_edges().find(|e| e.id == id).unwrap().clone();
+        edge.name_span = Some(NameSpan { line: 1, start_byte: 7, end_byte: 14 });
+        assert_eq!(edge_symbol_name(&edge, &target), Some("kind_of"));
+        edge.name_span = Some(NameSpan { line: 9, start_byte: 0, end_byte: 3 });
+        assert_eq!(edge_symbol_name(&edge, &target), None, "line past the end");
+        edge.name_span = None;
+        assert_eq!(edge_symbol_name(&edge, &target), None);
     }
 
     #[test]
@@ -530,8 +639,8 @@ mod tests {
     #[test]
     fn depth_opacity_fades_unconnected_edges() {
         let cfg = config(false, OpacityMode::Depth);
-        assert_eq!(compute_alpha(&cfg, true, false), 200);
-        assert_eq!(compute_alpha(&cfg, false, false), 20);
-        assert_eq!(compute_alpha(&cfg, false, true), 200, "no selection = all at full");
+        assert_eq!(compute_alpha(&cfg, true, false), CONNECTED_ALPHA);
+        assert_eq!(compute_alpha(&cfg, false, false), UNCONNECTED_DEPTH_ALPHA);
+        assert_eq!(compute_alpha(&cfg, false, true), IDLE_ALPHA, "no selection = faint web");
     }
 }

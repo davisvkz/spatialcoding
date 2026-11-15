@@ -39,8 +39,9 @@ impl Minimap {
 
         let painter = ui.painter_at(minimap_rect);
 
-        painter.rect_filled(minimap_rect, 4.0, Color32::from_rgba_premultiplied(20, 20, 25, 200));
-        painter.rect_stroke(minimap_rect, 4.0, egui::Stroke::new(1.0_f32, Color32::from_gray(60)), egui::StrokeKind::Outside);
+        // v2 minimap: dark card, grey outlines for nodes.
+        painter.rect_filled(minimap_rect, 6.0, Color32::from_rgba_premultiplied(14, 14, 14, 230));
+        painter.rect_stroke(minimap_rect, 6.0, egui::Stroke::new(1.0_f32, Color32::from_gray(40)), egui::StrokeKind::Outside);
 
         let world_bounds = bounding_rect(node_rects);
         let padded = Rect::from_min_max(
@@ -62,7 +63,12 @@ impl Minimap {
             let min = map_to_minimap(r.min);
             let max = map_to_minimap(r.max);
             let mapped = Rect::from_min_max(min, max);
-            painter.rect_filled(mapped, 1.0, Color32::from_rgba_premultiplied(100, 160, 255, 180));
+            painter.rect_stroke(
+                mapped,
+                0.0,
+                egui::Stroke::new(1.0_f32, Color32::from_gray(110)),
+                egui::StrokeKind::Inside,
+            );
         }
 
         let visible = viewport.visible_world_rect(canvas_rect);

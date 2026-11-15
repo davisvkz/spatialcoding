@@ -42,9 +42,10 @@ impl Default for LayoutSettings {
             h_align: HAlign::Right,
             v_align: VAlign::Center,
             sort: SortMode::Desc,
-            file_spacing: 500.0,
-            folder_spacing: 500.0,
-            folder_padding: 80.0,
+            // Tighter than before: v2 packs columns and folders closely.
+            file_spacing: 220.0,
+            folder_spacing: 300.0,
+            folder_padding: 40.0,
         }
     }
 }

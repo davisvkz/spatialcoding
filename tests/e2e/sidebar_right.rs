@@ -35,10 +35,16 @@ fn edges_panel_changes_edge_style() {
     app.run();
     assert_eq!(app.app_state().edge_style.style, EdgeStyle::Step);
 
-    assert!(!app.app_state().edge_style.show_arrow_heads);
+    // On by default (v2: arrows on the selection's edges); the click turns them off.
+    assert!(app.app_state().edge_style.show_arrow_heads);
     app.get_by_label("Arrow Heads").click();
     app.run();
-    assert!(app.app_state().edge_style.show_arrow_heads);
+    assert!(!app.app_state().edge_style.show_arrow_heads);
+
+    assert!(app.app_state().edge_style.show_symbol_pills);
+    app.get_by_label("Symbol Pills").click();
+    app.run();
+    assert!(!app.app_state().edge_style.show_symbol_pills);
 }
 
 #[test]

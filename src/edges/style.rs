@@ -46,6 +46,12 @@ pub struct EdgeStyleConfig {
     #[serde(default = "default_gradient_min_dist_px")]
     pub gradient_min_dist_px: f32,
     pub base_color: [f32; 3],
+    /// Color of edges touching the selection (v2: light blue, fully opaque).
+    #[serde(default = "default_selected_color")]
+    pub selected_color: [f32; 3],
+    /// Symbol-name pills at both ends of the selection's edges.
+    #[serde(default = "default_true")]
+    pub show_symbol_pills: bool,
     #[serde(default = "default_symbol_colors")]
     pub symbol_colors: HashMap<String, [f32; 3]>,
     #[serde(default = "default_true")]
@@ -70,6 +76,9 @@ fn default_gradient_gap_pct() -> f32 {
 }
 fn default_gradient_min_dist_px() -> f32 {
     40.0
+}
+fn default_selected_color() -> [f32; 3] {
+    [0.72, 0.84, 1.0]
 }
 fn default_true() -> bool {
     true
@@ -122,10 +131,13 @@ impl Default for EdgeStyleConfig {
         Self {
             style: EdgeStyle::Bezier,
             opacity_mode: OpacityMode::Depth,
-            show_all: false,
+            // v2 keeps the rest of the web visible (dimmed) around a selection.
+            show_all: true,
             highlight_backwards: false,
             show_connection_markers: false,
-            show_arrow_heads: false,
+            // Arrow heads only on the selection's edges while `only_selected`
+            // is on, as v2's "Arrow Heads › Only selected".
+            show_arrow_heads: true,
             only_selected: true,
             scale_arrow_heads: false,
             min_size_pct: 0.5,
@@ -133,8 +145,10 @@ impl Default for EdgeStyleConfig {
             gradient_gap_mode: default_gradient_gap_mode(),
             gradient_gap_pct: default_gradient_gap_pct(),
             gradient_min_dist_px: default_gradient_min_dist_px(),
-            // Warm cream, close to v2 Code Canvas edge tone.
-            base_color: [0.88, 0.86, 0.80],
+            // Cool blue-grey, measured from v2 Code Canvas idle edges.
+            base_color: [0.55, 0.61, 0.75],
+            selected_color: default_selected_color(),
+            show_symbol_pills: true,
             symbol_colors: default_symbol_colors(),
             show_reexport_edges: true,
             show_barrel_edges: true,
