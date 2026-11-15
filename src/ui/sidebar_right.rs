@@ -31,20 +31,23 @@ pub fn draw_sidebar_right(ctx: &egui::Context, state: &mut AppState) {
         state.lsp.hovered = None;
     }
 
-    // 1. Always-visible icon rail.
+    // 1. Always-visible icon rail — centered in the 36 px column so the
+    // icons don't sit flush against the window edge.
     egui::SidePanel::right("sidebar_right_rail")
         .exact_width(RAIL_WIDTH)
         .resizable(false)
         .show_separator_line(false)
         .show(ctx, |ui| {
             ui.spacing_mut().item_spacing.y = 2.0;
-            ui.add_space(6.0);
-            for &(ch, label, panel) in PANELS {
-                let active = state.right_panel == Some(panel);
-                if icons::rail_icon_button(ui, ch, label, active).clicked() {
-                    state.right_panel = if active { None } else { Some(panel) };
+            ui.with_layout(egui::Layout::top_down(egui::Align::Center), |ui| {
+                ui.add_space(6.0);
+                for &(ch, label, panel) in PANELS {
+                    let active = state.right_panel == Some(panel);
+                    if icons::rail_icon_button(ui, ch, label, active).clicked() {
+                        state.right_panel = if active { None } else { Some(panel) };
+                    }
                 }
-            }
+            });
         });
 
     // 2. Floating overlay.
@@ -67,6 +70,9 @@ pub fn draw_sidebar_right(ctx: &egui::Context, state: &mut AppState) {
         .show_separator_line(false)
         .frame(bubble_frame(&theme))
         .show(ctx, |ui| {
+            // Force the bubble to paint across the full panel width — see the
+            // matching comment in sidebar_left.rs.
+            ui.set_min_width(ui.available_width());
             if panel_header(ui, icon_ch, title) {
                 state.right_panel = None;
             }

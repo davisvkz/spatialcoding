@@ -20,20 +20,23 @@ pub fn draw_sidebar_left(
     state: &mut AppState,
     tree: &mut Option<TreeNode>,
 ) {
-    // 1. The always-visible icon rail.
+    // 1. The always-visible icon rail. Center icons horizontally in the 36px
+    // column so they don't sit flush against the canvas edge.
     egui::SidePanel::left("sidebar_left_rail")
         .exact_width(RAIL_WIDTH)
         .resizable(false)
         .show_separator_line(false)
         .show(ctx, |ui| {
             ui.spacing_mut().item_spacing.y = 2.0;
-            ui.add_space(6.0);
-            for &(ch, label, panel) in PANELS {
-                let active = state.left_panel == Some(panel);
-                if icons::rail_icon_button(ui, ch, label, active).clicked() {
-                    state.left_panel = if active { None } else { Some(panel) };
+            ui.with_layout(egui::Layout::top_down(egui::Align::Center), |ui| {
+                ui.add_space(6.0);
+                for &(ch, label, panel) in PANELS {
+                    let active = state.left_panel == Some(panel);
+                    if icons::rail_icon_button(ui, ch, label, active).clicked() {
+                        state.left_panel = if active { None } else { Some(panel) };
+                    }
                 }
-            }
+            });
 
             // Footer actions at the bottom of the rail. Labels are
             // rail-specific so they don't collide with the toolbar's own
@@ -77,6 +80,10 @@ pub fn draw_sidebar_left(
         .show_separator_line(false)
         .frame(bubble_frame(&theme))
         .show(ctx, |ui| {
+            // Force the bubble to paint across the full panel width so a
+            // narrow body (e.g. a short file-tree row) doesn't leave an
+            // unpainted strip to the right of it.
+            ui.set_min_width(ui.available_width());
             if panel_header(ui, icon_ch, title) {
                 state.left_panel = None;
             }
