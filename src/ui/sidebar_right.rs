@@ -7,7 +7,7 @@ use crate::edges::style::{EdgeStyle, GradientGapMode, OpacityMode};
 use crate::layout::settings::{HAlign, SortMode, VAlign};
 use crate::state::{AppState, RightPanel};
 use crate::ui::icons;
-use crate::ui::panel::{bubble_frame, panel_header, section, PANEL_WIDTH, RAIL_WIDTH};
+use crate::ui::panel::{bubble_frame, panel_header, panel_slot_frame, rail_frame, section, PANEL_WIDTH, RAIL_WIDTH};
 use crate::ui::{agent_panel, cst_panel, files_panel, folders_panel, lsp_panel, performance_panel};
 
 const PANELS: &[(&str, &str, RightPanel)] = &[
@@ -31,12 +31,12 @@ pub fn draw_sidebar_right(ctx: &egui::Context, state: &mut AppState) {
         state.lsp.hovered = None;
     }
 
-    // 1. Always-visible icon rail — centered in the 36 px column so the
-    // icons don't sit flush against the window edge.
+    // 1. Always-visible icon rail, icons centered.
     egui::SidePanel::right("sidebar_right_rail")
         .exact_width(RAIL_WIDTH)
         .resizable(false)
         .show_separator_line(false)
+        .frame(rail_frame(&ctx.style()))
         .show(ctx, |ui| {
             ui.spacing_mut().item_spacing.y = 2.0;
             ui.with_layout(egui::Layout::top_down(egui::Align::Center), |ui| {
@@ -50,7 +50,7 @@ pub fn draw_sidebar_right(ctx: &egui::Context, state: &mut AppState) {
             });
         });
 
-    // 2. Floating overlay.
+    // 2. Docked panel beside the rail.
     let Some(panel) = state.right_panel else {
         return;
     };
@@ -61,35 +61,30 @@ pub fn draw_sidebar_right(ctx: &egui::Context, state: &mut AppState) {
         .expect("PANELS covers every RightPanel variant");
     let theme = state.theme.clone();
 
-    // Docked SidePanel beside the right rail, styled as a bubble via its own
-    // Frame. SidePanel owns its scroll/click events so the canvas no longer
-    // moves while you scroll the panel body.
     egui::SidePanel::right("sidebar_right_panel")
         .exact_width(PANEL_WIDTH)
         .resizable(false)
         .show_separator_line(false)
-        .frame(bubble_frame(&theme))
+        .frame(panel_slot_frame(&ctx.style()))
         .show(ctx, |ui| {
-            // Force the bubble to paint across the full panel width — see the
-            // matching comment in sidebar_left.rs.
-            ui.set_min_width(ui.available_width());
-            if panel_header(ui, icon_ch, title) {
-                state.right_panel = None;
-            }
-            // Intentionally no outer ScrollArea here — see decision-18:
-            // wrapping panel bodies in an outer ScrollArea broke AccessKit
-            // hover bounds on LSP row children. Each panel manages its own
-            // scrolling as needed.
-            match panel {
-                RightPanel::Layout => draw_layout_panel(ui, state),
-                RightPanel::LspSymbols => lsp_panel::draw_lsp_panel(ui, state),
-                RightPanel::DependencyEdges => draw_edges_panel(ui, state),
-                RightPanel::Folders => folders_panel::draw_folders_panel(ui, state),
-                RightPanel::FileNodes => files_panel::draw_files_panel(ui, state),
-                RightPanel::Cst => cst_panel::draw_cst_panel(ui, state),
-                RightPanel::AgentNotes => agent_panel::draw_agent_panel(ui, state),
-                RightPanel::Performance => performance_panel::draw_performance_panel(ui, state),
-            }
+            bubble_frame(&theme).show(ui, |ui| {
+                ui.set_min_width(ui.available_width());
+                if panel_header(ui, icon_ch, title) {
+                    state.right_panel = None;
+                }
+                // No outer ScrollArea (decision-18): it broke AccessKit hover
+                // bounds on LSP rows. Each panel scrolls on its own.
+                match panel {
+                    RightPanel::Layout => draw_layout_panel(ui, state),
+                    RightPanel::LspSymbols => lsp_panel::draw_lsp_panel(ui, state),
+                    RightPanel::DependencyEdges => draw_edges_panel(ui, state),
+                    RightPanel::Folders => folders_panel::draw_folders_panel(ui, state),
+                    RightPanel::FileNodes => files_panel::draw_files_panel(ui, state),
+                    RightPanel::Cst => cst_panel::draw_cst_panel(ui, state),
+                    RightPanel::AgentNotes => agent_panel::draw_agent_panel(ui, state),
+                    RightPanel::Performance => performance_panel::draw_performance_panel(ui, state),
+                }
+            });
         });
 }
 
@@ -283,6 +278,40 @@ fn draw_edges_panel(ui: &mut egui::Ui, state: &mut AppState) {
 mod tests {
     use super::*;
     use crate::analysis::lsp::ServerId;
+
+    /// Space left for the canvas after the right sidebar draws. A SidePanel
+    /// whose frame is wider than its exact width reserves the excess without
+    /// painting it, which shows up as a black strip next to the canvas.
+    fn canvas_rect_after(right_panel: Option<RightPanel>) -> egui::Rect {
+        let ctx = egui::Context::default();
+        icons::install(&ctx);
+        let mut state = AppState::default();
+        state.right_panel = right_panel;
+        let mut canvas = egui::Rect::NOTHING;
+        for _ in 0..3 {
+            let input = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1280.0, 800.0))),
+                ..Default::default()
+            };
+            let _ = ctx.run(input, |ctx| {
+                draw_sidebar_right(ctx, &mut state);
+                canvas = ctx.available_rect();
+            });
+        }
+        canvas
+    }
+
+    #[test]
+    fn rail_and_panel_reserve_exactly_their_width() {
+        assert_eq!(canvas_rect_after(None).max.x, 1280.0 - RAIL_WIDTH);
+        for &(_, _, panel) in PANELS {
+            assert_eq!(
+                canvas_rect_after(Some(panel)).max.x,
+                1280.0 - RAIL_WIDTH - PANEL_WIDTH,
+                "{panel:?} panel is wider than its slot"
+            );
+        }
+    }
 
     fn progress(done: usize, status: Option<ServerStatus>, error: Option<&str>) -> ServerProgress {
         ServerProgress {

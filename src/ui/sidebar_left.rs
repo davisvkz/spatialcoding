@@ -5,7 +5,7 @@
 use crate::fs::tree::TreeNode;
 use crate::state::{AppState, LeftPanel};
 use crate::ui::icons;
-use crate::ui::panel::{bubble_frame, panel_header, PANEL_WIDTH, RAIL_WIDTH};
+use crate::ui::panel::{bubble_frame, panel_header, panel_slot_frame, rail_frame, PANEL_WIDTH, RAIL_WIDTH};
 use crate::ui::{changes_panel, local_server_panel, search_panel};
 
 const PANELS: &[(&str, &str, LeftPanel)] = &[
@@ -20,12 +20,12 @@ pub fn draw_sidebar_left(
     state: &mut AppState,
     tree: &mut Option<TreeNode>,
 ) {
-    // 1. The always-visible icon rail. Center icons horizontally in the 36px
-    // column so they don't sit flush against the canvas edge.
+    // 1. The always-visible icon rail, icons centered.
     egui::SidePanel::left("sidebar_left_rail")
         .exact_width(RAIL_WIDTH)
         .resizable(false)
         .show_separator_line(false)
+        .frame(rail_frame(&ctx.style()))
         .show(ctx, |ui| {
             ui.spacing_mut().item_spacing.y = 2.0;
             ui.with_layout(egui::Layout::top_down(egui::Align::Center), |ui| {
@@ -59,11 +59,8 @@ pub fn draw_sidebar_left(
             });
         });
 
-    // 2. Docked side panel beside the rail when a panel is active. This is a
-    // real SidePanel (not a floating Area) so it reflows the canvas and
-    // consumes its own scroll/click events — scrolling the file tree no
-    // longer pans the canvas underneath. The bubble look comes from an
-    // inner Frame; the SidePanel itself is transparent.
+    // 2. Docked side panel beside the rail when a panel is active. A real
+    // SidePanel (not a floating Area), so scrolling it never pans the canvas.
     let Some(panel) = state.left_panel else {
         return;
     };
@@ -78,23 +75,22 @@ pub fn draw_sidebar_left(
         .exact_width(PANEL_WIDTH)
         .resizable(false)
         .show_separator_line(false)
-        .frame(bubble_frame(&theme))
+        .frame(panel_slot_frame(&ctx.style()))
         .show(ctx, |ui| {
-            // Force the bubble to paint across the full panel width so a
-            // narrow body (e.g. a short file-tree row) doesn't leave an
-            // unpainted strip to the right of it.
-            ui.set_min_width(ui.available_width());
-            if panel_header(ui, icon_ch, title) {
-                state.left_panel = None;
-            }
-            egui::ScrollArea::vertical()
-                .auto_shrink([false, false])
-                .show(ui, |ui| match panel {
-                    LeftPanel::Workspace => draw_workspace(ui, state, tree),
-                    LeftPanel::Changes => changes_panel::draw_changes_panel(ui),
-                    LeftPanel::Search => search_panel::draw_search_panel(ui),
-                    LeftPanel::LocalServer => local_server_panel::draw_local_server_panel(ui, state),
-                });
+            bubble_frame(&theme).show(ui, |ui| {
+                ui.set_min_width(ui.available_width());
+                if panel_header(ui, icon_ch, title) {
+                    state.left_panel = None;
+                }
+                egui::ScrollArea::vertical()
+                    .auto_shrink([false, false])
+                    .show(ui, |ui| match panel {
+                        LeftPanel::Workspace => draw_workspace(ui, state, tree),
+                        LeftPanel::Changes => changes_panel::draw_changes_panel(ui),
+                        LeftPanel::Search => search_panel::draw_search_panel(ui),
+                        LeftPanel::LocalServer => local_server_panel::draw_local_server_panel(ui, state),
+                    });
+            });
         });
 }
 
@@ -180,5 +176,44 @@ fn file_icon(name: &str) -> &'static str {
         Some("py") => "\u{1f40d}",
         Some("html" | "css") => "\u{1f310}",
         _ => "\u{1f4c4}",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Space left for the canvas after the left sidebar draws; see the
+    /// matching test in sidebar_right.rs for why this must be exact.
+    fn canvas_rect_after(left_panel: Option<LeftPanel>) -> egui::Rect {
+        let ctx = egui::Context::default();
+        icons::install(&ctx);
+        let mut state = AppState::default();
+        state.left_panel = left_panel;
+        let mut tree = None;
+        let mut canvas = egui::Rect::NOTHING;
+        for _ in 0..3 {
+            let input = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1280.0, 800.0))),
+                ..Default::default()
+            };
+            let _ = ctx.run(input, |ctx| {
+                draw_sidebar_left(ctx, &mut state, &mut tree);
+                canvas = ctx.available_rect();
+            });
+        }
+        canvas
+    }
+
+    #[test]
+    fn rail_and_panel_reserve_exactly_their_width() {
+        assert_eq!(canvas_rect_after(None).min.x, RAIL_WIDTH);
+        for &(_, _, panel) in PANELS {
+            assert_eq!(
+                canvas_rect_after(Some(panel)).min.x,
+                RAIL_WIDTH + PANEL_WIDTH,
+                "{panel:?} panel is wider than its slot"
+            );
+        }
     }
 }

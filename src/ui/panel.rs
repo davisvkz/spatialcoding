@@ -8,23 +8,37 @@
 use crate::ui::icons;
 use crate::ui::theme::Theme;
 
-/// Width of the always-visible icon rail on each side.
-pub const RAIL_WIDTH: f32 = 36.0;
-/// Width of the floating panel overlay.
+// A SidePanel clips its painting to `exact_width` but reserves whatever its
+// frame actually measures, and it only subtracts `inner_margin` when sizing
+// the content. Anything wider (content, stroke, outer margin) is reserved but
+// never painted, so eframe's near-black clear color shows through. Keep every
+// SidePanel frame here margin-only, with sizes that add up exactly.
+
+/// Width of the always-visible icon rail: a 32 px button plus 4 px each side,
+/// which also leaves room for the button's 1 px hover/selected expansion.
+pub const RAIL_WIDTH: f32 = 40.0;
+/// Width of the docked panel slot, gap included.
 pub const PANEL_WIDTH: f32 = 300.0;
 
-/// Frame used as the SidePanel's own frame when a panel body is docked.
-/// Looks like v2's floating "bubble" card (dark fill, 1px border, rounded
-/// corners, 8px padding) but lives inside a docked SidePanel so the canvas
-/// does not sit underneath — scrolling the panel stays inside it instead of
-/// bleeding into the canvas.
+/// The rail's SidePanel frame: egui's default panel gray, content exactly 32 px.
+pub fn rail_frame(style: &egui::Style) -> egui::Frame {
+    egui::Frame::side_top_panel(style).inner_margin(egui::Margin::symmetric(4, 6))
+}
+
+/// The panel slot's SidePanel frame: the gray gap around the bubble. No
+/// stroke and no outer margin, so its size adds up to `PANEL_WIDTH`.
+pub fn panel_slot_frame(style: &egui::Style) -> egui::Frame {
+    egui::Frame::side_top_panel(style).inner_margin(egui::Margin::same(6))
+}
+
+/// The visible rounded card, drawn inside [`panel_slot_frame`]. Never use it
+/// as a SidePanel's own frame: its stroke would overflow the panel width.
 pub fn bubble_frame(theme: &Theme) -> egui::Frame {
     egui::Frame::NONE
         .fill(theme.panel_bg)
         .stroke(egui::Stroke::new(1.0_f32, theme.panel_border))
         .corner_radius(8.0)
         .inner_margin(egui::Margin::symmetric(8, 8))
-        .outer_margin(egui::Margin { left: 6, right: 6, top: 4, bottom: 6 })
 }
 
 /// Draws the `[icon] [title] [⋮] [▶] [×]` header row. Returns `true` when
