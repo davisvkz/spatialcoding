@@ -70,6 +70,11 @@ impl Highlighter {
         &self.cache[&key]
     }
 
+    /// Forgets the colored lines of one file (its text changed).
+    pub fn invalidate(&mut self, path: &Path) {
+        self.cache.remove(path.to_string_lossy().as_ref());
+    }
+
     pub fn clear_cache(&mut self) {
         self.cache.clear();
     }

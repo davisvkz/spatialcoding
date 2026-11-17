@@ -10,6 +10,9 @@ pub fn handle_shortcuts(ctx: &egui::Context, state: &mut AppState) -> bool {
     // Read before `ctx.input`: calling back into `ctx` inside that closure
     // re-locks the context and deadlocks.
     let screen_rect = ctx.screen_rect();
+    // A focused text field (palette, search) owns plain keys: typing "f" or
+    // "1" must not fit the view or lay the canvas out. Chords still work.
+    let typing = ctx.wants_keyboard_input();
 
     ctx.input(|i| {
         // Ctrl+Shift+O: Open all files (file IO runs after the input lock is released)
@@ -19,17 +22,17 @@ pub fn handle_shortcuts(ctx: &egui::Context, state: &mut AppState) -> bool {
         }
 
         // Space held detection for pan mode
-        state.space_held = i.key_down(egui::Key::Space);
+        state.space_held = i.key_down(egui::Key::Space) && !typing;
 
         // Shift+F: Fit to screen. The canvas fits next frame, against its own
         // rect rather than the whole window.
-        if i.key_pressed(egui::Key::F) && i.modifiers.shift {
+        if i.key_pressed(egui::Key::F) && i.modifiers.shift && !typing {
             state.pending_fit = true;
             consumed = true;
         }
 
         // F: Focus on mouse — move the world point under the cursor to the screen center
-        if i.key_pressed(egui::Key::F) && !i.modifiers.shift && !i.modifiers.ctrl {
+        if i.key_pressed(egui::Key::F) && !i.modifiers.shift && !i.modifiers.ctrl && !typing {
             if let Some(pos) = i.pointer.hover_pos() {
                 let vp = &mut state.viewport;
                 let world_pos = vp.screen_to_world(pos);
@@ -51,13 +54,13 @@ pub fn handle_shortcuts(ctx: &egui::Context, state: &mut AppState) -> bool {
         }
 
         // Shift+X: Clear canvas
-        if i.key_pressed(egui::Key::X) && i.modifiers.shift {
+        if i.key_pressed(egui::Key::X) && i.modifiers.shift && !typing {
             crate::workspace::clear_canvas(state);
             consumed = true;
         }
 
         // 1: Apply layout
-        if i.key_pressed(egui::Key::Num1) && !i.modifiers.command && !i.modifiers.shift {
+        if i.key_pressed(egui::Key::Num1) && !i.modifiers.command && !i.modifiers.shift && !typing {
             crate::layout::hierarchical::apply_layout(
                 &mut state.node_store,
                 &state.edge_store,

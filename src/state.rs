@@ -52,6 +52,12 @@ pub struct AppState {
     pub show_settings: bool,
     pub show_shortcuts: bool,
     pub show_command_palette: bool,
+    /// Query and selection of the command palette.
+    pub palette: crate::ui::command_palette::PaletteState,
+    /// Query, mode and answers of the left Search panel.
+    pub search: crate::ui::search_panel::SearchState,
+    /// The open diff window (a file against Git HEAD), if any.
+    pub diff: Option<crate::ui::diff_view::DiffViewState>,
     pub loaded_dir: Option<PathBuf>,
     pub file_contents: HashMap<PathBuf, String>,
     pub space_held: bool,
@@ -293,6 +299,9 @@ impl Default for AppState {
             show_settings: false,
             show_shortcuts: false,
             show_command_palette: false,
+            palette: Default::default(),
+            search: Default::default(),
+            diff: None,
             loaded_dir: None,
             file_contents: HashMap::new(),
             space_held: false,

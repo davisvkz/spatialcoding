@@ -15,6 +15,7 @@ pub mod highlight;
 pub mod input;
 pub mod layout;
 pub mod nodes;
+pub mod search;
 pub mod server;
 pub mod settings_store;
 pub mod state;

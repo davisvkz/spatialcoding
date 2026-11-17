@@ -55,6 +55,23 @@ impl TreeNode {
         }
     }
 
+    /// Opens the folders that `old` (a previous load of the same tree) had
+    /// open, so reloading after a change keeps what the user expanded.
+    pub fn copy_expanded_from(&mut self, old: &TreeNode) {
+        if let (
+            TreeNode::Dir { children, expanded, .. },
+            TreeNode::Dir { children: old_children, expanded: old_expanded, .. },
+        ) = (&mut *self, old)
+        {
+            *expanded = *old_expanded;
+            for child in children.iter_mut() {
+                if let Some(old_child) = old_children.iter().find(|o| o.path() == child.path()) {
+                    child.copy_expanded_from(old_child);
+                }
+            }
+        }
+    }
+
     pub fn file_count(&self) -> usize {
         match self {
             TreeNode::File { .. } => 1,

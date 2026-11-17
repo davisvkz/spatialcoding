@@ -14,6 +14,11 @@ pub fn draw_shortcuts(ctx: &egui::Context, show: &mut bool) {
             shortcut_row(ui, "Fit to Screen", "Shift + F");
 
             ui.add_space(8.0);
+            ui.heading("General");
+            shortcut_row(ui, "Command Palette", "Ctrl + K");
+            shortcut_row(ui, "Shortcuts", "Ctrl + /");
+
+            ui.add_space(8.0);
             ui.heading("Canvas");
             shortcut_row(ui, "Clear Canvas", "Shift + X");
             shortcut_row(ui, "Apply Layout", "1");

@@ -10,6 +10,7 @@ pub mod shortcuts_dialog;
 pub mod command_palette;
 pub mod search_panel;
 pub mod changes_panel;
+pub mod diff_view;
 pub mod cst_panel;
 pub mod edges_panel;
 pub mod layout_panel;

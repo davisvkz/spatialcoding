@@ -7,21 +7,25 @@
 mod common;
 
 mod canvas;
+mod command_palette;
 mod cst_panel;
 mod edges_panel;
 mod fake_lsp;
 mod files_panel;
 mod folders_panel;
+mod git_changes;
 mod file_tree;
 mod layout_panel;
 mod lsp_panel;
 mod manual_fixtures;
 mod panel_chrome;
 mod performance_panel;
+mod search_panel;
 mod settings;
 mod shortcuts;
 mod showcase;
 mod sidebar_right;
 mod startup;
 mod toolbar;
+mod watcher;
 mod welcome;

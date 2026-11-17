@@ -6,6 +6,21 @@ use super::tree::TreeNode;
 
 const ALWAYS_SKIP: &[&str] = &["target", "node_modules", ".git", "__pycache__", ".DS_Store"];
 
+/// Whether the file tree leaves out an entry with this name: build output,
+/// VCS data and, unless `show_dot_folders`, dot files and folders.
+pub fn is_skipped_name(name: &str, show_dot_folders: bool) -> bool {
+    ALWAYS_SKIP.contains(&name) || (!show_dot_folders && name.starts_with('.'))
+}
+
+/// Whether `path` is, or lies inside, something the file tree leaves out.
+/// Only the components below `root` count.
+pub fn is_skipped_path(path: &Path, root: &Path, show_dot_folders: bool) -> bool {
+    let Ok(relative) = path.strip_prefix(root) else {
+        return true;
+    };
+    relative.components().any(|c| is_skipped_name(&c.as_os_str().to_string_lossy(), show_dot_folders))
+}
+
 pub fn load_directory(root: &Path, show_dot_folders: bool) -> io::Result<TreeNode> {
     let name = root
         .file_name()
@@ -18,11 +33,7 @@ pub fn load_directory(root: &Path, show_dot_folders: bool) -> io::Result<TreeNod
         let entry = entry?;
         let file_name = entry.file_name().to_string_lossy().into_owned();
 
-        if ALWAYS_SKIP.contains(&file_name.as_str()) {
-            continue;
-        }
-
-        if !show_dot_folders && file_name.starts_with('.') {
+        if is_skipped_name(&file_name, show_dot_folders) {
             continue;
         }
 

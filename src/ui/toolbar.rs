@@ -24,6 +24,12 @@ pub fn draw_toolbar(ui: &mut egui::Ui, state: &mut AppState) {
             // TODO: open folder picker
         }
 
+        if let Some(branch) = state.changes.branch().map(str::to_owned)
+            && branch_pill(ui, &theme, &branch).clicked()
+        {
+            state.left_panel = Some(crate::state::LeftPanel::Changes);
+        }
+
         separator(ui, &theme);
 
         if icons::toolbar_icon_button(ui, icons::POINTER, "Select tool", state.active_tool == Tool::Select)
@@ -109,6 +115,46 @@ fn folder_pill(ui: &mut egui::Ui, theme: &crate::ui::theme::Theme, name: &str) -
         egui::WidgetInfo::labeled(egui::WidgetType::Button, true, ak_label.clone())
     });
     response
+}
+
+/// The checked-out Git branch: branch glyph and name; a click opens the
+/// Changes panel.
+fn branch_pill(ui: &mut egui::Ui, theme: &crate::ui::theme::Theme, name: &str) -> egui::Response {
+    use egui::{Align2, FontId};
+    let font = FontId::proportional(11.0);
+    let text_width = ui.painter().layout_no_wrap(name.to_owned(), font.clone(), theme.text_primary).size().x;
+    let width = (text_width + 34.0).min(180.0);
+    let (rect, response) = ui.allocate_exact_size(egui::vec2(width, 22.0), egui::Sense::click());
+    if ui.is_rect_visible(rect) {
+        let fill = if response.hovered() {
+            theme.control_bg.lerp_to_gamma(egui::Color32::WHITE, 0.05)
+        } else {
+            theme.control_bg
+        };
+        ui.painter().rect(
+            rect,
+            11.0,
+            fill,
+            egui::Stroke::new(1.0_f32, egui::Color32::from_white_alpha(20)),
+            egui::StrokeKind::Inside,
+        );
+        let mid = rect.center().y;
+        ui.painter().text(
+            egui::pos2(rect.left() + 9.0, mid),
+            Align2::LEFT_CENTER,
+            icons::GIT_BRANCH,
+            FontId::new(12.0, egui::FontFamily::Name(icons::ICON_FAMILY.into())),
+            theme.text_secondary,
+        );
+        let clip = ui.painter().with_clip_rect(egui::Rect::from_min_max(
+            egui::pos2(rect.left() + 26.0, rect.top()),
+            egui::pos2(rect.right() - 8.0, rect.bottom()),
+        ));
+        clip.text(egui::pos2(rect.left() + 26.0, mid), Align2::LEFT_CENTER, name, font, theme.text_primary);
+    }
+    let label = format!("Branch {name}");
+    response.widget_info(move || egui::WidgetInfo::labeled(egui::WidgetType::Button, true, label.clone()));
+    response.on_hover_text("Git branch: show changes")
 }
 
 /// A 1px vertical divider between button groups.

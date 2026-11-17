@@ -108,6 +108,8 @@ pub trait AppExt {
     fn show_at(&mut self, world: Pos2, screen: Pos2);
     fn node_position(&self, id: u64) -> Pos2;
     fn selected(&self) -> Vec<u64>;
+    /// Runs a command-palette command, as if it was picked.
+    fn execute_palette_command(&mut self, command: spatialcoding::ui::command_palette::PaletteCommand);
 }
 
 impl AppExt for App {
@@ -154,6 +156,10 @@ impl AppExt for App {
 
     fn node_position(&self, id: u64) -> Pos2 {
         self.app_state().node_store.get_file(id).unwrap().position
+    }
+
+    fn execute_palette_command(&mut self, command: spatialcoding::ui::command_palette::PaletteCommand) {
+        self.state_mut().execute_command(command);
     }
 
     fn selected(&self) -> Vec<u64> {
@@ -296,4 +302,10 @@ pub fn texts_equal(shapes: &[egui::Shape], text: &str) -> usize {
         .iter()
         .filter(|s| matches!(s, egui::Shape::Text(t) if t.galley.job.text == text))
         .count()
+}
+
+/// Types `text` into the focused text field, as one text event.
+pub fn type_text(harness: &mut App, text: &str) {
+    send(harness, Event::Text(text.to_owned()));
+    harness.run();
 }

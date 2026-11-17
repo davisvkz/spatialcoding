@@ -31,6 +31,11 @@ pub struct SpatialCodingApp {
     /// `--layout` was asked: lay out again once the language servers have
     /// answered, since the dependency edges arrive in the background.
     layout_when_indexed: bool,
+    /// Follows the loaded folder on disk; `None` until a folder is open or
+    /// when the platform refused to watch it.
+    watcher: Option<crate::fs::watcher::FileWatcher>,
+    /// Wakes the UI from the watcher's thread.
+    repaint: egui::Context,
 }
 
 impl SpatialCodingApp {
@@ -47,6 +52,8 @@ impl SpatialCodingApp {
             saved_settings: String::new(),
             settings_checked_at: 0.0,
             layout_when_indexed: false,
+            watcher: None,
+            repaint: cc.egui_ctx.clone(),
         }
     }
 
@@ -100,6 +107,7 @@ impl SpatialCodingApp {
         workspace::clear_canvas(&mut self.state);
         // Asked again on the next frame, for the new folder.
         self.state.changes.reset();
+        self.state.diff = None;
         self.state.folder_files_cache.replace(None);
         self.file_tree =
             match crate::fs::loader::load_directory(&dir, self.state.settings.show_dot_folders) {
@@ -109,7 +117,30 @@ impl SpatialCodingApp {
                     None
                 }
             };
+        self.watcher = start_watcher(&dir, &self.repaint);
         self.state.loaded_dir = Some(dir);
+    }
+
+    /// Applies what the watcher saw on disk to the canvas and the file tree.
+    fn follow_disk(&mut self) {
+        let Some(watcher) = &mut self.watcher else { return };
+        let batch = watcher.poll_changes(self.state.settings.show_dot_folders);
+        if batch.is_empty() {
+            return;
+        }
+        let applied = workspace::apply_fs_changes(&mut self.state, &batch);
+        for path in &applied.reloaded {
+            self.highlighter.invalidate(path);
+        }
+        if applied.tree_stale
+            && let Some(dir) = self.state.loaded_dir.clone()
+            && let Ok(mut tree) = crate::fs::loader::load_directory(&dir, self.state.settings.show_dot_folders)
+        {
+            if let Some(old) = &self.file_tree {
+                tree.copy_expanded_from(old);
+            }
+            self.file_tree = Some(tree);
+        }
     }
 
     /// Applies command-line options: open the folder, open files, optionally
@@ -128,6 +159,38 @@ impl SpatialCodingApp {
             self.layout_when_indexed = self.state.deps.is_waiting();
         }
         self.state.pending_fit = !self.state.node_store.file_nodes.is_empty();
+    }
+
+    /// Runs what the command palette picked.
+    pub fn execute_command(&mut self, command: ui::command_palette::PaletteCommand) {
+        use ui::command_palette::PaletteCommand as C;
+        let state = &mut self.state;
+        match command {
+            C::OpenFolder => {
+                if let Some(dir) = rfd::FileDialog::new().pick_folder() {
+                    self.open_folder(dir);
+                }
+            }
+            C::OpenAllFiles => {
+                workspace::open_all_files(state);
+            }
+            C::FitView => state.pending_fit = true,
+            C::ApplyLayout => self.apply_layout(),
+            C::ClearCanvas => workspace::clear_canvas(state),
+            C::ToggleLeft(panel) => {
+                state.left_panel = if state.left_panel == Some(panel) { None } else { Some(panel) };
+            }
+            C::ToggleRight(panel) => {
+                state.right_panel = if state.right_panel == Some(panel) { None } else { Some(panel) };
+            }
+            C::ToggleSettings => state.show_settings = !state.show_settings,
+            C::ToggleShortcuts => state.show_shortcuts = !state.show_shortcuts,
+            C::ToggleMinimap => state.settings.show_minimap = !state.settings.show_minimap,
+            C::ShowDiff => workspace::open_diff_of_selection(state),
+            C::GoToFile(path) => {
+                workspace::focus_location(state, &path, 0);
+            }
+        }
     }
 
     fn apply_layout(&mut self) {
@@ -854,11 +917,26 @@ impl SpatialCodingApp {
     }
 }
 
+fn start_watcher(dir: &std::path::Path, ctx: &egui::Context) -> Option<crate::fs::watcher::FileWatcher> {
+    let ctx = ctx.clone();
+    match crate::fs::watcher::FileWatcher::new(dir, move || ctx.request_repaint()) {
+        Ok(watcher) => Some(watcher),
+        Err(e) => {
+            log::warn!("Not watching {} for changes: {e}", dir.display());
+            None
+        }
+    }
+}
+
 impl eframe::App for SpatialCodingApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         input::handle_shortcuts(ctx, &mut self.state);
         crate::workspace::poll_lsp(&mut self.state);
+        self.follow_disk();
         if self.state.git_comparison.is_loading() {
+            ctx.request_repaint_after(std::time::Duration::from_millis(100));
+        }
+        if self.state.diff.as_ref().is_some_and(|d| d.loader.is_loading()) {
             ctx.request_repaint_after(std::time::Duration::from_millis(100));
         }
         // Background information: check back slowly, so an idle UI (and a
@@ -919,7 +997,10 @@ impl eframe::App for SpatialCodingApp {
 
         ui::settings_dialog::draw_settings(ctx, &mut self.state);
         ui::shortcuts_dialog::draw_shortcuts(ctx, &mut self.state.show_shortcuts);
-        ui::command_palette::draw_command_palette(ctx, &mut self.state.show_command_palette);
+        ui::diff_view::draw_diff_view(ctx, &mut self.state);
+        if let Some(command) = ui::command_palette::draw_command_palette(ctx, &mut self.state) {
+            self.execute_command(command);
+        }
 
         if self.state.loaded_dir.is_none() {
             self.draw_welcome_screen(ctx);

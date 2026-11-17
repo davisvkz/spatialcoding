@@ -31,5 +31,5 @@ checklist "13 · Workspace de exemplo (showcase)" \
   "Painel LSP Symbols com entity.rs ou Entity.ts selecionado|lista de símbolos (interface, class, trait); clicar numa referência salta para a linha em outro arquivo" \
   "Layout: Rank Breaking, H/V Align, Sort, File/Folder Spacing; Reset Config|o layout muda ao aplicar e volta ao padrão no reset" \
   "Abrir docs/latin1.txt|aparece 'Café au lait…' sem quebrar (arquivo em latin-1)" \
-  "Ctrl+K, Ctrl+/ e o minimap no canto|paleta (stub), atalhos e o retângulo do viewport acompanha o pan e o zoom"
+  "Ctrl+K, Ctrl+/ e o minimap no canto|paleta de comandos (veja 14), atalhos e o retângulo do viewport acompanha o pan e o zoom"
 launch "$dir" --open-all --layout

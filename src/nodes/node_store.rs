@@ -57,6 +57,18 @@ impl NodeStore {
         id
     }
 
+    /// Swaps in the new text of an open file (it changed on disk), keeping
+    /// its place and collapse state. True when the text differed.
+    pub fn replace_content(&mut self, id: u64, content: String) -> bool {
+        let Some(node) = self.file_nodes.get_mut(&id) else { return false };
+        if node.content == content {
+            return false;
+        }
+        node.line_count = content.lines().count().max(1);
+        node.content = content;
+        true
+    }
+
     pub fn remove_node(&mut self, id: u64) {
         if self.file_nodes.remove(&id).is_none() {
             self.folder_nodes.remove(&id);

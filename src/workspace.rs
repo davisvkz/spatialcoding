@@ -282,7 +282,14 @@ pub fn poll_lsp(state: &mut AppState) {
     if state.deps.take_changed() {
         apply_dependency_edges(state);
     }
-    state.changes.poll();
+    let refreshed = state.changes.poll();
+    if let Some(diff) = &mut state.diff {
+        diff.poll();
+        // The Git status was read again: the file may have changed.
+        if refreshed && !diff.loader.is_loading() {
+            diff.loader.request();
+        }
+    }
     if state.git_comparison.poll() {
         // Also reject direct in-memory content changes made without a rebuild.
         let signature = comparison_input(state).map(|input| input.signature());
@@ -708,6 +715,72 @@ pub fn refresh_working_tree_changes(state: &mut AppState, now: f64) {
     state.folder_files_cache.replace(None);
     if let Some(root) = state.loaded_dir.clone() {
         state.changes.request(&root, now);
+    }
+}
+
+/// What [`apply_fs_changes`] did, for the parts of the app that cache more.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct FsApplied {
+    /// Open files whose text was replaced.
+    pub reloaded: Vec<PathBuf>,
+    /// Files or folders appeared or vanished: the file tree must be read again.
+    pub tree_stale: bool,
+}
+
+/// Makes the canvas follow the disk: open files whose text changed are read
+/// again in place, open files that were deleted (or sit in a deleted folder)
+/// are closed, and the Git status is asked again. The edges are rebuilt once
+/// when any text changed.
+pub fn apply_fs_changes(state: &mut AppState, batch: &crate::fs::watcher::WatchBatch) -> FsApplied {
+    let mut applied = FsApplied::default();
+    if batch.is_empty() {
+        return applied;
+    }
+    let mut grew_or_shrank = false;
+    // A save through a temp file shows up as a created path.
+    for path in batch.modified.iter().chain(&batch.created) {
+        let Some(id) = find_file_node(state, path) else { continue };
+        let Ok(content) = read_file_content(path) else { continue };
+        let lines_before = state.node_store.get_file(id).map(|n| n.line_count);
+        if state.node_store.replace_content(id, content) {
+            state.top_level_highlights.remove(&id);
+            grew_or_shrank |= lines_before != state.node_store.get_file(id).map(|n| n.line_count);
+            applied.reloaded.push(path.clone());
+        }
+    }
+    let gone: Vec<u64> = state
+        .node_store
+        .file_nodes
+        .values()
+        .filter(|n| batch.removed.iter().any(|r| n.path == *r || n.path.starts_with(r)))
+        .map(|n| n.id)
+        .collect();
+    if !gone.is_empty() {
+        remove_nodes(state, &gone);
+    }
+    if !applied.reloaded.is_empty() {
+        if grew_or_shrank {
+            state.layout_dirty = true;
+        }
+        rebuild_edges(state);
+    }
+    applied.tree_stale = !batch.created.is_empty() || !batch.removed.is_empty();
+    // Ask Git again as soon as no request is running.
+    state.folder_files_cache.replace(None);
+    state.changes.requested_at = None;
+    applied
+}
+
+/// Opens the diff window for `path` (a file against Git HEAD).
+pub fn open_diff(state: &mut AppState, path: PathBuf) {
+    state.diff = Some(crate::ui::diff_view::DiffViewState::open(path));
+}
+
+/// Opens the diff of the primary selected file node, when there is one.
+pub fn open_diff_of_selection(state: &mut AppState) {
+    let path = state.selection.primary.and_then(|id| state.node_store.get_file(id)).map(|n| n.path.clone());
+    if let Some(path) = path {
+        open_diff(state, path);
     }
 }
 

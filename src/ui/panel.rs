@@ -409,7 +409,10 @@ pub fn segmented<T: PartialEq + Copy>(ui: &mut egui::Ui, value: &mut T, options:
             ui.set_min_width(ui.available_width());
             let spacing = 2.0;
             let count = options.len().max(1) as f32;
+            // Whole pixels, so three segments of a third each never add up
+            // to a hair more than the row.
             let width = ((ui.available_width() - spacing * (count - 1.0)) / count).max(1.0);
+            let width = width.floor();
             ui.horizontal(|ui| {
                 ui.spacing_mut().item_spacing.x = spacing;
                 // v2 marks the chosen segment with a lighter gray, not the

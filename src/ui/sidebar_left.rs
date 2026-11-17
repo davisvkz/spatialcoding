@@ -89,8 +89,8 @@ pub fn draw_sidebar_left(
                     .auto_shrink([false, false])
                     .show(ui, |ui| match panel {
                         LeftPanel::Workspace => draw_workspace(ui, state, tree),
-                        LeftPanel::Changes => changes_panel::draw_changes_panel(ui),
-                        LeftPanel::Search => search_panel::draw_search_panel(ui),
+                        LeftPanel::Changes => changes_panel::draw_changes_panel(ui, state),
+                        LeftPanel::Search => search_panel::draw_search_panel(ui, state),
                         LeftPanel::LocalServer => local_server_panel::draw_local_server_panel(ui, state),
                     });
             });
