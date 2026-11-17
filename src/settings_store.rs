@@ -15,18 +15,44 @@ use crate::edges::style::EdgeStyleConfig;
 use crate::layout::settings::LayoutSettings;
 use crate::state::{AppSettings, AppState};
 
+/// Version written to new files. A file without `version` is version 0.
+///
+/// 1: "Open with collapsed folders by default" became off by default (it
+///    folded most of a freshly opened project into tiny cards), so files
+///    written before then lose their stored `true`, which was only ever the
+///    old default.
+pub const CURRENT_VERSION: u32 = 1;
+
+fn legacy_version() -> u32 {
+    0
+}
+
 /// Everything the panels let the user tune.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct PersistedSettings {
+    #[serde(default = "legacy_version")]
+    pub version: u32,
     pub app: AppSettings,
     pub layout: LayoutSettings,
     pub edges: EdgeStyleConfig,
 }
 
+impl Default for PersistedSettings {
+    fn default() -> Self {
+        Self {
+            version: CURRENT_VERSION,
+            app: AppSettings::default(),
+            layout: LayoutSettings::default(),
+            edges: EdgeStyleConfig::default(),
+        }
+    }
+}
+
 impl PersistedSettings {
     pub fn capture(state: &AppState) -> Self {
         Self {
+            version: CURRENT_VERSION,
             app: state.settings.clone(),
             layout: state.layout_settings.clone(),
             edges: state.edge_style.clone(),
@@ -57,12 +83,23 @@ pub fn default_path() -> Option<PathBuf> {
 /// starts with defaults instead of failing.
 pub fn load(path: &Path) -> Option<PersistedSettings> {
     let text = std::fs::read_to_string(path).ok()?;
-    match serde_json::from_str(&text) {
-        Ok(settings) => Some(settings),
+    match serde_json::from_str::<PersistedSettings>(&text) {
+        Ok(settings) => Some(settings.migrated()),
         Err(e) => {
             log::warn!("Ignoring unreadable settings {}: {e}", path.display());
             None
         }
+    }
+}
+
+impl PersistedSettings {
+    /// Brings a file written by an older build up to [`CURRENT_VERSION`].
+    fn migrated(mut self) -> Self {
+        if self.version < 1 {
+            self.app.folders.open_collapsed_by_default = false;
+        }
+        self.version = CURRENT_VERSION;
+        self
     }
 }
 
@@ -109,6 +146,28 @@ mod tests {
         assert_eq!(loaded.layout.folder_padding, LayoutSettings::default().folder_padding);
         assert_eq!(loaded.app.font_size, 14.0);
         assert_eq!(loaded.app.node_width, AppSettings::default().node_width);
+    }
+
+    #[test]
+    fn files_before_version_1_lose_the_old_collapsed_default() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        std::fs::write(&path, r#"{"app": {"folders": {"open_collapsed_by_default": true, "zoom_fog": true}}}"#).unwrap();
+        let loaded = load(&path).unwrap();
+        assert!(!loaded.app.folders.open_collapsed_by_default, "the stored true was the old default");
+        assert!(loaded.app.folders.zoom_fog, "other choices are kept");
+        assert_eq!(loaded.version, CURRENT_VERSION);
+    }
+
+    #[test]
+    fn a_choice_made_since_version_1_is_kept() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        let mut settings = PersistedSettings::default();
+        assert!(!settings.app.folders.open_collapsed_by_default, "off by default");
+        settings.app.folders.open_collapsed_by_default = true;
+        save(&path, &to_json(&settings)).unwrap();
+        assert!(load(&path).unwrap().app.folders.open_collapsed_by_default);
     }
 
     #[test]

@@ -432,17 +432,34 @@ impl SpatialCodingApp {
             .values()
             .filter(|n| n.path.starts_with(&folder.path))
             .count();
-        let name_px = (18.0 * zoom).max(screen_rect.height() * 0.12).min(16.0).min(screen_rect.height() * 0.4);
-        if name_px >= 5.0 {
+        // Sized by the card, so the name stays readable in the overview: about
+        // a third of its height, shrunk to fit its width, at most 16 px.
+        let mut name_px = (screen_rect.height() * 0.34).min(16.0);
+        let name_color = theme.text_primary.gamma_multiply(fog);
+        let name_width = painter
+            .layout_no_wrap(folder.label.clone(), egui::FontId::proportional(name_px), name_color)
+            .size()
+            .x;
+        let room = screen_rect.width() - 24.0 * zoom.min(1.0);
+        if name_width > room && room > 0.0 {
+            name_px *= room / name_width;
+        }
+        if name_px < 5.0 {
+            return;
+        }
+        let has_detail = name_px * 2.4 <= screen_rect.height();
+        let text_x = screen_rect.left() + (12.0 * zoom).clamp(3.0, 12.0);
+        let center_y = screen_rect.center().y;
+        painter.text(
+            egui::pos2(text_x, center_y - if has_detail { 1.0 } else { -name_px * 0.5 }),
+            egui::Align2::LEFT_BOTTOM,
+            &folder.label,
+            egui::FontId::proportional(name_px),
+            name_color,
+        );
+        if has_detail {
             painter.text(
-                screen_rect.left_center() + egui::vec2(12.0 * zoom, -2.0),
-                egui::Align2::LEFT_BOTTOM,
-                format!("{} {}", crate::ui::icons::FOLDER, folder.label),
-                egui::FontId::proportional(name_px),
-                theme.text_primary.gamma_multiply(fog),
-            );
-            painter.text(
-                screen_rect.left_center() + egui::vec2(12.0 * zoom, 2.0),
+                egui::pos2(text_x, center_y + 2.0),
                 egui::Align2::LEFT_TOP,
                 format!("{inside} files · collapsed"),
                 egui::FontId::proportional(name_px * 0.75),

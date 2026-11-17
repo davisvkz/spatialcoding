@@ -117,7 +117,7 @@ pub struct FoldersSettings {
 impl Default for FoldersSettings {
     fn default() -> Self {
         Self {
-            open_collapsed_by_default: true,
+            open_collapsed_by_default: false,
             reveal_selected: false,
             reveal_diff_files: false,
             reveal_diff_folders: false,

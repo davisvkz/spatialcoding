@@ -11,7 +11,8 @@ source "$(dirname -- "${BASH_SOURCE[0]}")/lib.sh"
 dir=$(fixture showcase)
 checklist "13 · Workspace de exemplo (showcase)" \
   "Painel Workspace → Open All, ou Ctrl+Shift+O|abre ~60 arquivos; node_modules/ e server/target/ não aparecem; .github só com Settings → dot folders" \
-  "Apertar 1 (Apply Layout) e Shift+F|pastas web/, server/, tools/, service/, config/, docs/ viram caixas aninhadas (server/src/domain, server/src/net/handlers…); importadores à esquerda de quem usam" \
+  "Apertar 1 (Apply Layout) e Shift+F|tudo abre expandido (Folders → Open with collapsed folders by default vem desligado); web/, server/, tools/, service/, config/, docs/ viram caixas aninhadas; em server/src o main.rs fica à esquerda e domain/, net/, config.rs e util.rs ficam empilhados (cerca de 1,2:1, não uma fila de 4 colunas); importadores à esquerda de quem usam nos grupos só de arquivos"
+  "Folders → Collapse all folders, depois Fit to nodes|os cartões mostram o nome da pasta e 'N files · collapsed' legíveis, sem ícone quebrado; ligar Open with collapsed folders by default e reabrir colapsa a partir do nível Auto"
   "Dependency Edges → Relationship types (Imports, Inherits, References, Renders)|Imports: web/src/index.ts→App.tsx, models/index.ts→Entity.ts, mod do Rust, from . do Python, imports Go; References: docs e config; alternar cada tipo oculta só aquele tipo" \
   "Com typescript-language-server: Product.ts (extends Entity implements Describable), Order.ts, Repository.ts (implements)|arestas Inherits para Entity.ts, Describable e Repository" \
   "Com typescript-language-server: ProductList.tsx, App.tsx|arestas Renders para <Card>, <Button> e <UI.ProductList> (JSX); o valor de props continua References" \

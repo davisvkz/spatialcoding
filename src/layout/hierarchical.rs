@@ -28,6 +28,10 @@ const FONT_SIZE: f32 = 12.0;
 /// spacing: v2 stacks files much tighter than it spaces columns.
 const VERTICAL_GAP_RATIO: f32 = 0.5;
 
+/// A group wider than this many times its height is "too wide": v2 keeps
+/// folders roughly square, stacking sibling folders instead of chaining them.
+const MAX_GROUP_ASPECT: f32 = 1.6;
+
 /// Gap between a collapsed folder's card and the revealed files under it.
 const REVEALED_GAP: f32 = 24.0;
 
@@ -244,23 +248,56 @@ fn layout_group(
         }
     };
 
-    let ranks = rank_items(items, item_edges);
-    let max_rank = ranks.values().copied().max().unwrap_or(0);
-    let mut columns: Vec<Vec<Item>> = vec![Vec::new(); max_rank + 1];
-    for &item in items {
-        columns[ranks[&item]].push(item);
-    }
-    for column in &mut columns {
-        sort_column(column, settings.sort);
-    }
-    order_by_barycenter(&mut columns, item_edges);
-
     let item_size: HashMap<Item, Vec2> = items
         .iter()
         .map(|&it| (it, size_of(it, &placement.sizes)))
         .collect();
     let v_gap = settings.file_spacing * VERTICAL_GAP_RATIO;
-    let columns = break_ranks(columns, &item_size, v_gap, settings.rank_breaking);
+    let arrange = |stack_folders: bool, max_columns: usize| -> Vec<Vec<Item>> {
+        let edges = item_edges;
+        let ranks = rank_items(items, edges, stack_folders);
+        let last = max_columns - 1;
+        let max_rank = ranks.values().map(|&r| r.min(last)).max().unwrap_or(0);
+        let mut columns: Vec<Vec<Item>> = vec![Vec::new(); max_rank + 1];
+        for &item in items {
+            columns[ranks[&item].min(last)].push(item);
+        }
+        for column in &mut columns {
+            sort_column(column, settings.sort);
+        }
+        order_by_barycenter(&mut columns, edges);
+        break_ranks(columns, &item_size, v_gap, settings.rank_breaking)
+    };
+    let mut columns = arrange(false, usize::MAX);
+
+    // Compact: a group with folders that came out much wider than tall, in 3 or more
+    // columns, is arranged again, least change first, until it is not too
+    // wide: (1) sibling folders stack in one column (an edge between two
+    // folders keeps the target in the source's column, one from a folder to a
+    // file ranks nothing); (2) the same, in at most 3 columns; (3) in at most
+    // 2. Every edge is still drawn. The narrowest candidate wins.
+    let wide = |columns: &[Vec<Item>]| -> f32 {
+        let extent = columns_extent(columns, &item_size, settings, v_gap);
+        extent.x / extent.y.max(1.0)
+    };
+    let count = |columns: &[Vec<Item>]| columns.iter().filter(|c| !c.is_empty()).count();
+    let has_folders = items.iter().any(|it| matches!(it, Item::Folder(_)));
+    if has_folders && count(&columns) >= 3 && wide(&columns) > MAX_GROUP_ASPECT {
+        let mut best = (wide(&columns), None);
+        for max_columns in [usize::MAX, 3, 2] {
+            let candidate = arrange(true, max_columns);
+            let aspect = wide(&candidate);
+            if aspect < best.0 {
+                best = (aspect, Some(candidate));
+            }
+            if aspect <= MAX_GROUP_ASPECT {
+                break;
+            }
+        }
+        if let Some(candidate) = best.1 {
+            columns = candidate;
+        }
+    }
 
     let sizes: Vec<Vec<Vec2>> = columns
         .iter()
@@ -319,6 +356,33 @@ fn layout_group(
     placement.sizes.insert(group, Vec2::new((x - last_gap).max(0.0), height));
 }
 
+/// Size of the columns as `layout_group` places them: each column as wide as
+/// its widest item, a gap between columns, the tallest column's height.
+fn columns_extent(
+    columns: &[Vec<Item>],
+    item_size: &HashMap<Item, Vec2>,
+    settings: &LayoutSettings,
+    v_gap: f32,
+) -> Vec2 {
+    let has_folder = |col: &[Item]| col.iter().any(|it| matches!(it, Item::Folder(_)));
+    let used: Vec<&Vec<Item>> = columns.iter().filter(|c| !c.is_empty()).collect();
+    let mut width = 0.0;
+    let mut height: f32 = 0.0;
+    for (i, column) in used.iter().enumerate() {
+        let sizes: Vec<Vec2> = column.iter().map(|it| item_size[it]).collect();
+        width += sizes.iter().map(|s| s.x).fold(0.0, f32::max);
+        height = height.max(column_height(&sizes, v_gap));
+        if let Some(next) = used.get(i + 1) {
+            width += if has_folder(column) || has_folder(next) {
+                settings.folder_spacing
+            } else {
+                settings.file_spacing
+            };
+        }
+    }
+    Vec2::new(width, height)
+}
+
 fn column_height(sizes: &[Vec2], v_gap: f32) -> f32 {
     sizes.iter().map(|s| s.y).sum::<f32>() + sizes.len().saturating_sub(1) as f32 * v_gap
 }
@@ -364,7 +428,11 @@ fn break_ranks(columns: Vec<Vec<Item>>, size: &HashMap<Item, Vec2>, v_gap: f32, 
 
 /// Longest-path rank of each item after dropping the back edges a DFS finds
 /// (visiting items in a fixed order), so cycles still spread into columns.
-fn rank_items(items: &[Item], item_edges: &HashSet<(Item, Item)>) -> HashMap<Item, usize> {
+/// With `stack_folders`, an edge between two folders puts the target in the
+/// source's column instead of the next one, and an edge from a folder to a
+/// file does not rank the file at all, so what a folder merely uses stays
+/// beside the files that use the folders (v2's compact look).
+fn rank_items(items: &[Item], item_edges: &HashSet<(Item, Item)>, stack_folders: bool) -> HashMap<Item, usize> {
     let mut ordered: Vec<Item> = items.to_vec();
     ordered.sort();
     let mut out: HashMap<Item, Vec<Item>> = HashMap::new();
@@ -414,9 +482,16 @@ fn rank_items(items: &[Item], item_edges: &HashSet<(Item, Item)>) -> HashMap<Ite
     }
     let mut rank: HashMap<Item, usize> = HashMap::new();
     for &item in finish.iter().rev() {
+        let step = |p: &Item| -> Option<usize> {
+            match (p, item, stack_folders) {
+                (Item::Folder(_), Item::Folder(_), true) => Some(0),
+                (Item::Folder(_), Item::File(_), true) => None,
+                _ => Some(1),
+            }
+        };
         let r = preds
             .get(&item)
-            .map(|ps| ps.iter().filter_map(|p| rank.get(p)).max().map_or(0, |r| r + 1))
+            .map(|ps| ps.iter().filter_map(|p| Some(rank.get(p)? + step(p)?)).max().unwrap_or(0))
             .unwrap_or(0);
         rank.insert(item, r);
     }
@@ -845,6 +920,42 @@ mod tests {
         let origin = nodes.get_folder(pkg).unwrap().collapsed_origin.expect("placed");
         assert!(pos(&nodes, ids[2]).x < origin.x, "top.rs imports into pkg: it sits left of the box");
         assert_close(origin.x - pos(&nodes, ids[2]).x, NODE_WIDTH + LayoutSettings::default().folder_spacing);
+    }
+
+    #[test]
+    fn a_too_wide_group_stacks_sibling_folders_that_only_use_each_other() {
+        let (mut nodes, ids) = tree(&["/r/main.rs", "/r/a/x.rs", "/r/b/y.rs", "/r/c/z.rs"]);
+        let mut edges = EdgeStore::default();
+        edges.add(ids[0], ids[1], None); // main -> a/
+        edges.add(ids[1], ids[2], None); // a/ -> b/
+        edges.add(ids[2], ids[3], None); // b/ -> c/
+        apply_layout(&mut nodes, &edges, &LayoutSettings::default());
+
+        let a = folder_bounds(&mut nodes, "/r/a");
+        let b = folder_bounds(&mut nodes, "/r/b");
+        let c = folder_bounds(&mut nodes, "/r/c");
+        assert_close(a.min.x, b.min.x);
+        assert_close(a.min.x, c.min.x);
+        assert!(!a.intersects(b) && !b.intersects(c), "stacked, not overlapping");
+        assert!(pos(&nodes, ids[0]).x < a.min.x, "main.rs still sits left of the folders it uses");
+    }
+
+    #[test]
+    fn a_too_wide_group_keeps_what_folders_use_beside_the_files_that_use_folders() {
+        let (mut nodes, ids) = tree(&["/r/main.rs", "/r/net/c.rs", "/r/dom/d.rs", "/r/util.rs"]);
+        let mut edges = EdgeStore::default();
+        edges.add(ids[0], ids[1], None); // main -> net/
+        edges.add(ids[0], ids[2], None); // main -> dom/
+        edges.add(ids[1], ids[3], None); // net/ -> util.rs
+        edges.add(ids[1], ids[2], None); // net/ -> dom/
+        edges.add(ids[3], ids[2], None); // util.rs -> dom/
+        apply_layout(&mut nodes, &edges, &LayoutSettings::default());
+
+        let net = folder_bounds(&mut nodes, "/r/net");
+        let dom = folder_bounds(&mut nodes, "/r/dom");
+        assert_close(net.min.x, dom.min.x);
+        assert_close(pos(&nodes, ids[0]).x, pos(&nodes, ids[3]).x);
+        assert!(pos(&nodes, ids[3]).x < net.min.x, "util.rs left of the folder column");
     }
 
     #[test]
