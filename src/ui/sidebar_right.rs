@@ -272,6 +272,19 @@ fn draw_edges_panel(ui: &mut egui::Ui, state: &mut AppState) {
     });
 
     section(ui, "Connections", |ui| {
+        ui.checkbox(&mut state.edge_style.show_ports, "Ports")
+            .on_hover_text(
+                "Mark each connected line with a circle on the node border and a row band; \
+                 edges end at the circle. Off: edges touch the identifier.",
+            );
+        ui.add_enabled_ui(state.edge_style.show_ports, |ui| {
+            ui.horizontal(|ui| {
+                ui.color_edit_button_rgb(&mut state.edge_style.import_port_color);
+                ui.label("Import");
+                ui.color_edit_button_rgb(&mut state.edge_style.symbol_port_color);
+                ui.label("Symbol");
+            });
+        });
         ui.checkbox(
             &mut state.edge_style.show_connection_markers,
             "Connection Markers",

@@ -3,6 +3,7 @@ use egui::{Color32, Pos2, Rect, Stroke, Vec2};
 use crate::analysis::dependencies::LineSpan;
 use crate::canvas::viewport::Viewport;
 use crate::edges::edge_store::{EdgeChange, EdgeKind, EdgeStore, NameSpan};
+use crate::edges::ports::{side_facing, PortSide};
 use crate::edges::style::{EdgeStyle, EdgeStyleConfig, GradientGapMode, OpacityMode};
 use crate::nodes::file_node::{FileNode, HEADER_HEIGHT};
 use crate::nodes::lod::LodLevel;
@@ -47,7 +48,11 @@ pub fn draw_edges(
     let stroke_px = 1.0 * viewport.zoom.clamp(0.6, 1.4);
     let min_len_px = config.min_size_pct * MIN_VISIBLE_LEN_PX;
     let nothing_selected = selection.count() == 0 && selection.symbols().is_empty();
-    let code_visible = LodLevel::from_zoom(viewport.zoom) != LodLevel::TitleOnly;
+    // With ports on, edges end at the port on the node border (its line's
+    // y on the facing side), the point `anchor` returns; otherwise they
+    // touch the identifier glyphs.
+    let glyph_ends =
+        !config.show_ports && LodLevel::from_zoom(viewport.zoom) != LodLevel::TitleOnly;
 
     // Two passes, as v2: the dim web first, then the selection's edges on top.
     for connected_pass in [false, true] {
@@ -86,13 +91,13 @@ pub fn draw_edges(
 
             let src_screen = edge
                 .source_name_span
-                .filter(|_| code_visible && !src.collapsed)
+                .filter(|_| glyph_ends && !src.collapsed)
                 .and_then(|name| symbol_rect(src, name))
                 .map(|rect| glyph_anchor(rect, src_dir))
                 .unwrap_or_else(|| viewport.world_to_screen(src_point));
             let tgt_screen = edge
                 .name_span
-                .filter(|_| code_visible && !tgt.collapsed)
+                .filter(|_| glyph_ends && !tgt.collapsed)
                 .and_then(|name| symbol_rect(tgt, name))
                 .map(|rect| glyph_anchor(rect, tgt_dir))
                 .unwrap_or_else(|| viewport.world_to_screen(tgt_point));
@@ -264,7 +269,8 @@ fn glyph_anchor(rect: Rect, outward: f32) -> Pos2 {
 }
 
 /// Where an edge meets `node`: on the side facing `toward_x`, at the first
-/// line of `span` when the node draws it, else at the header. Returns the
+/// line of `span` when the node draws it (where its port sits), else at the
+/// header. Returns the
 /// point and the outward direction of that side (+1 right, -1 left).
 fn anchor(
     node: &FileNode,
@@ -273,10 +279,9 @@ fn anchor(
     toward_x: f32,
     font_size: f32,
 ) -> (Pos2, f32) {
-    let dir = if toward_x >= rect.center().x {
-        1.0
-    } else {
-        -1.0
+    let dir = match side_facing(rect.left(), rect.right(), toward_x) {
+        PortSide::Right => 1.0,
+        PortSide::Left => -1.0,
     };
     let x = if dir > 0.0 { rect.right() } else { rect.left() };
     let y = span

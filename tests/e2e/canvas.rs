@@ -386,6 +386,8 @@ fn edge_endpoints_touch_the_usage_and_definition_glyphs_at_different_zooms() {
     app.set_size(Vec2::new(2400.0, 900.0));
     {
         let s = app.app_state_mut();
+        // Glyph anchors are the Ports-off mode.
+        s.edge_style.show_ports = false;
         s.left_panel = None;
         s.edge_style.relationships
             [spatialcoding::edges::style::RelationshipType::Imports.index()]
@@ -428,6 +430,94 @@ fn edge_endpoints_touch_the_usage_and_definition_glyphs_at_different_zooms() {
 }
 
 #[test]
+fn ports_mark_connected_lines_on_the_border_and_edges_end_there() {
+    let fx = fixture();
+    let mut app = app_with(&fx);
+    let source = app.open(&fx.path("src/main.rs"));
+    let target = app.open(&fx.path("src/util.rs"));
+    app.set_size(Vec2::new(2400.0, 900.0));
+    {
+        let s = app.app_state_mut();
+        s.left_panel = None;
+        assert!(s.edge_style.show_ports, "ports are on by default");
+        s.edge_style.relationships
+            [spatialcoding::edges::style::RelationshipType::Imports.index()]
+        .visible = false;
+        s.node_store.get_file_mut(source).unwrap().position = Pos2::ZERO;
+        s.node_store.get_file_mut(target).unwrap().position = Pos2::new(900.0, 0.0);
+        s.selection.select(source);
+    }
+    app.show_at(Pos2::new(800.0, 60.0), Pos2::new(1200.0, 300.0));
+    let s = app.app_state();
+    let edge = s
+        .edge_store
+        .all_edges()
+        .find(|e| e.relationship == spatialcoding::edges::style::RelationshipType::References)
+        .unwrap();
+    let port = |id, line: usize, right: bool| {
+        let node = s.node_store.get_file(id).unwrap();
+        let rect = node.world_rect(s.settings.node_width, s.settings.font_size);
+        let y = node.line_anchor_y(line, s.settings.font_size).unwrap();
+        let x = if right { rect.right() } else { rect.left() };
+        s.viewport.world_to_screen(Pos2::new(x, y))
+    };
+    let usage_port = port(source, edge.source_span.unwrap().start, true);
+    let definition_port = port(target, edge.target_span.unwrap().start, false);
+    let shapes = frame_shapes(&app);
+    let endpoints = shapes
+        .iter()
+        .find_map(|shape| match shape {
+            egui::Shape::CubicBezier(b) => Some((b.points[0], b.points[3])),
+            _ => None,
+        })
+        .unwrap();
+    assert!((endpoints.0 - usage_port).length() < 0.5, "{endpoints:?} vs {usage_port:?}");
+    assert!((endpoints.1 - definition_port).length() < 0.5, "{endpoints:?} vs {definition_port:?}");
+    for at in [usage_port, definition_port] {
+        assert!(
+            shapes.iter().any(|shape| matches!(
+                shape,
+                egui::Shape::Circle(c) if (c.center - at).length() < 0.5 && c.fill.a() > 0
+            )),
+            "a port circle is painted at {at:?}"
+        );
+        assert!(
+            shapes.iter().any(|shape| matches!(
+                shape,
+                egui::Shape::Rect(r) if r.rect.min.y < at.y && at.y < r.rect.max.y
+                    && r.rect.width() > 100.0 && r.fill.a() > 0 && r.fill.a() < 80
+            )),
+            "a translucent band marks the row at {at:?}"
+        );
+    }
+
+    app.app_state_mut().edge_style.show_ports = false;
+    app.run();
+    assert!(
+        !frame_shapes(&app).iter().any(|shape| matches!(
+            shape,
+            egui::Shape::Circle(c) if (c.center - usage_port).length() < 0.5
+        )),
+        "Ports off paints no circles"
+    );
+
+    // Title-only zoom draws blocks: no ports even with Ports on.
+    {
+        let s = app.app_state_mut();
+        s.edge_style.show_ports = true;
+        s.viewport.zoom = 0.08;
+        s.viewport.target_zoom = 0.08;
+    }
+    app.run();
+    assert!(
+        !frame_shapes(&app)
+            .iter()
+            .any(|shape| matches!(shape, egui::Shape::Circle(_))),
+        "title-only zoom paints no ports"
+    );
+}
+
+#[test]
 fn file_nodes_show_and_navigate_to_code_after_line_fifty() {
     use spatialcoding::nodes::file_node::{line_height, CODE_PADDING, HEADER_HEIGHT};
     let fx = fixture();
@@ -439,6 +529,7 @@ fn file_nodes_show_and_navigate_to_code_after_line_fifty() {
     )
     .unwrap();
     let mut app = app_with(&fx);
+    app.app_state_mut().edge_style.show_ports = false;
     app.app_state_mut().edge_style.relationships
         [spatialcoding::edges::style::RelationshipType::Imports.index()]
     .visible = false;
@@ -500,6 +591,7 @@ fn minified_edges_touch_identifier_bars_and_collapsed_nodes_use_header_fallbacks
     let target = app.open(&fx.path("src/util.rs"));
     {
         let s = app.app_state_mut();
+        s.edge_style.show_ports = false;
         s.left_panel = None;
         s.edge_style.relationships
             [spatialcoding::edges::style::RelationshipType::Imports.index()]

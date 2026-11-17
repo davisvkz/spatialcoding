@@ -139,6 +139,14 @@ pub struct EdgeStyleConfig {
     pub reexport_color: [f32; 3],
     #[serde(default = "default_barrel_color")]
     pub barrel_color: [f32; 3],
+    /// Ports: a circle on the node border and a row band at each connected
+    /// line; edges then end at the port instead of the identifier.
+    #[serde(default = "default_true")]
+    pub show_ports: bool,
+    #[serde(default = "default_import_port_color")]
+    pub import_port_color: [f32; 3],
+    #[serde(default = "default_symbol_port_color")]
+    pub symbol_port_color: [f32; 3],
 }
 
 fn default_gradient_gap_mode() -> GradientGapMode {
@@ -162,6 +170,15 @@ fn default_true() -> bool {
 fn default_reexport_color() -> [f32; 3] {
     // Warm amber: lifted from v2's re-export highlight hue.
     [0.98, 0.72, 0.30]
+}
+fn default_import_port_color() -> [f32; 3] {
+    // Muted teal: imports read apart from symbols without competing with
+    // the selection's light blue.
+    [0.36, 0.62, 0.66]
+}
+fn default_symbol_port_color() -> [f32; 3] {
+    // Neutral grey, as the v2 Code Canvas ports.
+    [0.48, 0.50, 0.54]
 }
 fn default_barrel_color() -> [f32; 3] {
     // Cool cyan: distinct from re-export amber so the two highlight at once.
@@ -259,6 +276,9 @@ impl Default for EdgeStyleConfig {
             highlight_barrel: false,
             reexport_color: default_reexport_color(),
             barrel_color: default_barrel_color(),
+            show_ports: true,
+            import_port_color: default_import_port_color(),
+            symbol_port_color: default_symbol_port_color(),
         }
     }
 }
@@ -320,5 +340,16 @@ mod tests {
         assert!(!config.folder_levels && !config.highlight_reverse_layout);
         assert_eq!(config.folder_depth, 1);
         assert!(!config.highlight_changes && !config.diff_colors && !config.show_deleted);
+    }
+
+    #[test]
+    fn legacy_configs_turn_ports_on_with_default_colors() {
+        let mut value = serde_json::to_value(EdgeStyleConfig::default()).unwrap();
+        for key in ["show_ports", "import_port_color", "symbol_port_color"] {
+            value.as_object_mut().unwrap().remove(key);
+        }
+        let config: EdgeStyleConfig = serde_json::from_value(value).unwrap();
+        assert!(config.show_ports);
+        assert_ne!(config.import_port_color, config.symbol_port_color);
     }
 }

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Dependency edges from the language servers (TASK-4, TASK-30, TASK-31).
+# Dependency edges from the language servers (TASK-4, TASK-30, TASK-31, TASK-43).
 # Usage: 04-edges.sh [rust|ts|python|go|mixed]   (default: rust)
 # Edges only appear for languages whose server is installed (see 12-lsp.sh):
 # rust-analyzer, typescript-language-server, pyright/basedpyright/pylsp, gopls.
@@ -28,8 +28,11 @@ checklist "04 · Arestas de dependência via LSP ($lang)" \
   "Após remover/adicionar imports, reabrir os arquivos e atualizar a comparação; ativar Changes/Diff Colors/Deleted|Changes realça as mudanças; adicionadas verdes/removidas vermelhas; Deleted oculta as removidas, que usam headers sem marcar linhas antigas no código atual" \
   "Editar baseline ou abrir/fechar arquivos durante a comparação|resultado antigo não reaparece; controles aguardam nova comparação; vínculos somente do LSP são explicitamente não comparados" \
   "Clicar num arquivo|borda branca no nó; as arestas dele (entrando e saindo) ficam azul-claras, opacas e por cima das outras, com ponta de seta no destino; as demais continuam visíveis, mais apagadas" \
-  "Com o arquivo selecionado e zoom médio/próximo|não existem badges/etiquetas de símbolo com borda azul; as setas encostam no próprio nome no código" \
-  "Aproximar (Ctrl+roda) um arquivo selecionado|a aresta sai do identificador USADO e chega ao nome na DEFINIÇÃO, não à borda do arquivo nem à primeira linha de comentários do statement; alinhamento acompanha o zoom" \
+  "Com zoom médio/próximo, olhar as bordas dos arquivos|cada linha ligada por aresta tem um círculo (port) na borda voltada para o outro arquivo e uma faixa na linha; as arestas terminam no círculo; não existem badges de símbolo com borda azul" \
+  "Comparar uma linha de import (ex.: mod/use em main.rs, reexport em util.rs) com um uso ou definição de símbolo|ports de import teal, de símbolo cinza; várias arestas da mesma linha compartilham um único círculo; ports da seleção ficam mais claros" \
+  "Edges → Connections → trocar as cores Import/Symbol e depois desmarcar Ports|cores mudam nos círculos e faixas; sem Ports, círculos e faixas somem e as arestas voltam a encostar no nome no código" \
+  "Com Ports desmarcado, aproximar (Ctrl+roda) um arquivo selecionado|a aresta sai do identificador USADO e chega ao nome na DEFINIÇÃO, não à borda do arquivo nem à primeira linha de comentários do statement; alinhamento acompanha o zoom" \
+  "Recolher um nó ou afastar até só restarem blocos|sem ports; as arestas usam o header" \
   "Com o arquivo selecionado, olhar o código dos dois lados|os statements de uso e as definições inteiras ficam destacados na cor do tipo do símbolo (fn, struct…, editável na aba Edges), com uma barra na borda esquerda" \
   "Na definição, olhar o nome do símbolo (ex.: 'pub struct Server', 'pub fn bind') em zooms diferentes|a marca mais forte cobre exatamente o nome, sem começar no meio dele nem passar para o '{' ou o '('" \
   "Após indexar, clicar exatamente em bind no código de server.rs (não na margem)|somente as conexões de bind e seus statements ficam destacados; Server e addr, no mesmo arquivo, não ganham destaque; a câmera não salta" \

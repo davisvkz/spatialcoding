@@ -1,8 +1,10 @@
+use std::collections::HashMap;
 use std::path::PathBuf;
 
 use crate::canvas::minimap::Minimap;
 use crate::cli::StartupOptions;
 use crate::canvas::renderer::CanvasRenderer;
+use crate::edges::ports::{self, Port, PortKind, PortSide};
 use crate::edges::renderer as edge_renderer;
 use crate::fs::tree::TreeNode;
 use crate::highlight::syntect_hl::Highlighter;
@@ -138,8 +140,10 @@ impl SpatialCodingApp {
 
         self.update_folder_bounds();
         self.draw_folder_nodes(&painter);
-        self.draw_file_nodes(&painter, canvas_rect);
+        let ports = self.collect_ports();
+        self.draw_file_nodes(&painter, canvas_rect, &ports);
         self.draw_edges(&painter);
+        self.draw_ports(&painter, canvas_rect, &ports);
 
         if self.state.settings.show_minimap {
             let node_rects = self.collect_node_rects();
@@ -257,7 +261,64 @@ impl SpatialCodingApp {
         );
     }
 
-    fn draw_file_nodes(&mut self, painter: &egui::Painter, canvas_rect: egui::Rect) {
+    /// Ports of this frame, or none while they are off or nodes are blocks.
+    fn collect_ports(&self) -> HashMap<u64, Vec<Port>> {
+        let state = &self.state;
+        if !state.edge_style.show_ports
+            || LodLevel::from_zoom(state.viewport.zoom) == LodLevel::TitleOnly
+        {
+            return HashMap::new();
+        }
+        ports::collect_ports(
+            &state.edge_store,
+            &state.node_store,
+            &state.edge_style,
+            &state.selection,
+            state.settings.node_width,
+            state.settings.font_size,
+        )
+    }
+
+    /// Port circles on the node borders, over the edge ends they collect.
+    fn draw_ports(
+        &self,
+        painter: &egui::Painter,
+        canvas_rect: egui::Rect,
+        ports: &HashMap<u64, Vec<Port>>,
+    ) {
+        let viewport = &self.state.viewport;
+        let font_size = self.state.settings.font_size;
+        let radius = (line_height(font_size) * viewport.zoom * 0.3).clamp(2.5, 6.0);
+        let visible_world = viewport.visible_world_rect(canvas_rect);
+        for (id, node_ports) in ports {
+            let Some(node) = self.state.node_store.get_file(*id) else { continue };
+            let world_rect = node.world_rect(self.state.settings.node_width, font_size);
+            if !world_rect.intersects(visible_world) {
+                continue;
+            }
+            for port in node_ports {
+                let Some(y) = node.line_anchor_y(port.line, font_size) else { continue };
+                let x = match port.side {
+                    PortSide::Left => world_rect.left(),
+                    PortSide::Right => world_rect.right(),
+                };
+                let center = viewport.world_to_screen(egui::pos2(x, y));
+                painter.circle(
+                    center,
+                    radius,
+                    port_color(&self.state.edge_style, port),
+                    egui::Stroke::new(1.5_f32, self.state.theme.node_bg),
+                );
+            }
+        }
+    }
+
+    fn draw_file_nodes(
+        &mut self,
+        painter: &egui::Painter,
+        canvas_rect: egui::Rect,
+        ports: &HashMap<u64, Vec<Port>>,
+    ) {
         let zoom = self.state.viewport.zoom;
         let lod = LodLevel::from_zoom(zoom);
         let theme = &self.state.theme;
@@ -341,6 +402,25 @@ impl SpatialCodingApp {
                 .target
                 .filter(|t| self.state.selection.primary == Some(t.node_id));
             let hl_origin = egui::pos2(screen_rect.left(), code_origin.y);
+
+            // Port rows: a band across each connected line, in the port's
+            // import/symbol color, brighter when it carries the selection.
+            for port in ports.get(&node.id).into_iter().flatten() {
+                if let Some(rect) = cst_panel::highlight_rect(
+                    hl_origin, screen_rect.width(), line_h,
+                    port.line, port.line, node.visible_lines(),
+                ) {
+                    let color = port_color(&self.state.edge_style, port);
+                    let (fill, edge) = if port.emphasized { (0.16, 0.40) } else { (0.08, 0.22) };
+                    code_clip.rect_filled(rect, 0.0, color.gamma_multiply(fill));
+                    code_clip.rect_stroke(
+                        rect.shrink2(egui::vec2(0.0, 0.5)),
+                        0.0,
+                        egui::Stroke::new(1.0_f32, color.gamma_multiply(edge)),
+                        egui::StrokeKind::Inside,
+                    );
+                }
+            }
 
             // Edge highlights: block + left border + optional name highlight.
             if let Some(highlights) = edge_spans.get(&node.id) {
@@ -728,6 +808,22 @@ fn x_at_byte(spans: &HighlightedLine, at: usize, width: &dyn Fn(&str) -> f32) ->
         offset += text.len();
     }
     None
+}
+
+/// Fill of a port and its row band: the import or symbol color, brighter
+/// when the port carries the selection.
+fn port_color(style: &crate::edges::style::EdgeStyleConfig, port: &Port) -> egui::Color32 {
+    let rgb = match port.kind {
+        PortKind::Import => style.import_port_color,
+        PortKind::Symbol => style.symbol_port_color,
+    };
+    let byte = |c: f32| (c.clamp(0.0, 1.0) * 255.0) as u8;
+    let color = egui::Color32::from_rgb(byte(rgb[0]), byte(rgb[1]), byte(rgb[2]));
+    if port.emphasized {
+        color.lerp_to_gamma(egui::Color32::WHITE, 0.35)
+    } else {
+        color
+    }
 }
 
 #[cfg(test)]
