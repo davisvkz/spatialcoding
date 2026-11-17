@@ -41,8 +41,30 @@ pub fn bubble_frame(theme: &Theme) -> egui::Frame {
     egui::Frame::NONE
         .fill(theme.panel_bg)
         .stroke(egui::Stroke::new(1.0_f32, theme.panel_border))
+        .corner_radius(10.0)
+        .inner_margin(egui::Margin::symmetric(8, 6))
+}
+
+/// The white call-to-action button of v2 ("Open All 320", "Apply Layout"):
+/// white fill, dark medium-weight text. `full_width` stretches it across the
+/// available width.
+pub fn cta_button(ui: &mut egui::Ui, text: &str, full_width: bool) -> egui::Response {
+    let theme = Theme::dark();
+    let rich = egui::RichText::new(text)
+        .family(egui::FontFamily::Name(icons::MEDIUM_FAMILY.into()))
+        .size(if full_width { 12.0 } else { 10.0 })
+        .color(theme.cta_fg);
+    let button = egui::Button::new(rich)
+        .fill(theme.cta_bg)
+        .stroke(egui::Stroke::NONE)
         .corner_radius(8.0)
-        .inner_margin(egui::Margin::symmetric(8, 8))
+        .min_size(egui::vec2(if full_width { ui.available_width() } else { 0.0 }, 24.0));
+    let response = ui.add(button);
+    response.widget_info({
+        let label = text.to_owned();
+        move || WidgetInfo::labeled(WidgetType::Button, true, label.clone())
+    });
+    response
 }
 
 /// One entry of a panel's kebab menu.
@@ -121,9 +143,14 @@ pub fn panel_header(ui: &mut egui::Ui, spec: HeaderSpec<'_>) -> HeaderResponse {
     } = spec;
     let menu_label = menu_label.map_or_else(|| format!("{title} menu"), str::to_owned);
     ui.horizontal(|ui| {
-        ui.label(icons::icon(icon, 14.0));
-        ui.add_space(4.0);
-        let heading = ui.label(egui::RichText::new(title).strong());
+        ui.label(icons::icon(icon, 14.0).color(ui.visuals().weak_text_color()));
+        ui.add_space(2.0);
+        let heading = ui.label(
+            egui::RichText::new(title)
+                .family(egui::FontFamily::Name(icons::MEDIUM_FAMILY.into()))
+                .size(11.0)
+                .color(ui.visuals().text_color()),
+        );
         let ak_title = format!("{title} panel");
         heading.widget_info(move || WidgetInfo::labeled(WidgetType::Label, true, ak_title.clone()));
         if let Some((label, value)) = switch {
@@ -170,8 +197,7 @@ pub fn panel_header(ui: &mut egui::Ui, spec: HeaderSpec<'_>) -> HeaderResponse {
             }
         });
     });
-    ui.add_space(4.0);
-    ui.separator();
+    ui.add_space(2.0);
     out
 }
 
@@ -389,7 +415,7 @@ pub fn segmented<T: PartialEq + Copy>(ui: &mut egui::Ui, value: &mut T, options:
                 // v2 marks the chosen segment with a lighter gray, not the
                 // accent color.
                 let visuals = ui.visuals_mut();
-                visuals.selection.bg_fill = visuals.widgets.inactive.weak_bg_fill.gamma_multiply(1.6);
+                visuals.selection.bg_fill = visuals.widgets.active.bg_fill;
                 visuals.selection.stroke.color = visuals.strong_text_color();
                 for &(option, label) in options {
                     let selected = *value == option;

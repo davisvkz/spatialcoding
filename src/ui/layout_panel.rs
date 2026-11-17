@@ -4,17 +4,14 @@
 
 use crate::layout::settings::{HAlign, SortMode, VAlign};
 use crate::state::AppState;
-use crate::ui::panel::{section, segmented, slider_row};
+use crate::ui::panel::{cta_button, section, segmented, slider_row};
 
 /// v2's tooltip for Rank Breaking.
 const RANK_BREAKING_HELP: &str = "Splits tall columns so nodes can spread horizontally. \
 Lower values break columns more aggressively. Off keeps all nodes in a single column per rank.";
 
 pub fn draw_layout_panel(ui: &mut egui::Ui, state: &mut AppState) {
-    if ui
-        .add(egui::Button::new("Apply Layout").min_size(egui::vec2(ui.available_width(), 28.0)))
-        .clicked()
-    {
+    if cta_button(ui, "Apply Layout", true).clicked() {
         crate::layout::hierarchical::apply_layout(
             &mut state.node_store,
             &state.edge_store,

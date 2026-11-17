@@ -77,7 +77,8 @@ fn import_actions_follow_the_selection_both_ways() {
     app.settle_edges();
     assert_eq!(open_paths(&app), vec!["web/a.ts", "web/app.ts"]);
 
-    app.get_by_label("Clear all nodes").click();
+    // The toolbar has a button of the same name; the panel's comes last.
+    app.get_all_by_label("Clear all nodes").last().unwrap().click();
     app.run();
     assert!(app.app_state().node_store.file_nodes.is_empty());
     let importer = app.open(&fx.path("web/app.ts"));

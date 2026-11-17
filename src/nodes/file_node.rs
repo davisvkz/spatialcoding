@@ -1,13 +1,19 @@
 use std::path::{Path, PathBuf};
 
-/// World-space height of the file header bar.
-pub const HEADER_HEIGHT: f32 = 28.0;
-/// World-space vertical padding around the code area.
-pub const CODE_PADDING: f32 = 4.0;
+/// World-space height of the strip above the code (v2: `HEADER_HEIGHT`).
+pub const HEADER_HEIGHT: f32 = 20.0;
+/// World-space vertical padding around the code area (v2: `CONTENT_PADDING`).
+pub const CODE_PADDING: f32 = 20.0;
+/// World-space distance from the node's left edge to the code, leaving room
+/// for the line-number gutter.
+pub const CODE_PAD_X: f32 = 56.0;
+/// World-space distance from the node's left edge to the right edge of the
+/// line numbers.
+pub const GUTTER_RIGHT: f32 = 44.0;
 
-/// World-space height of one code line.
+/// World-space height of one code line: v2 uses 18 px for its 11 px code.
 pub fn line_height(font_size: f32) -> f32 {
-    font_size * 1.4
+    font_size * 18.0 / 11.0
 }
 
 pub struct FileNode {

@@ -6,7 +6,8 @@ use crate::fs::tree::TreeNode;
 use crate::state::{AppState, LeftPanel};
 use crate::ui::icons;
 use crate::ui::panel::{
-    bubble_frame, panel_header, panel_slot_frame, rail_frame, HeaderSpec, PANEL_WIDTH, RAIL_WIDTH,
+    bubble_frame, cta_button, panel_header, panel_slot_frame, rail_frame, HeaderSpec, PANEL_WIDTH,
+    RAIL_WIDTH,
 };
 use crate::ui::{changes_panel, local_server_panel, search_panel};
 
@@ -14,7 +15,7 @@ const PANELS: &[(&str, &str, LeftPanel)] = &[
     (icons::FOLDER_TREE, "Workspace", LeftPanel::Workspace),
     (icons::GIT_BRANCH, "Changes", LeftPanel::Changes),
     (icons::SEARCH, "Search", LeftPanel::Search),
-    (icons::SERVER, "Local Server", LeftPanel::LocalServer),
+    (icons::PLUG, "Local Server", LeftPanel::LocalServer),
 ];
 
 pub fn draw_sidebar_left(
@@ -45,19 +46,19 @@ pub fn draw_sidebar_left(
             // Settings/Help buttons in accessibility queries.
             ui.with_layout(egui::Layout::bottom_up(egui::Align::Center), |ui| {
                 ui.add_space(6.0);
-                if icons::rail_icon_button(ui, icons::USER, "Account", false).clicked() {
+                if icons::rail_icon_button(ui, icons::USER, "Sign in", false).clicked() {
                     // TODO: user/account dialog.
                 }
-                if icons::rail_icon_button(ui, icons::SETTINGS, "App Preferences", state.show_settings)
+                if icons::rail_icon_button(ui, icons::SETTINGS, "Settings", state.show_settings)
                     .clicked()
                 {
                     state.show_settings = !state.show_settings;
                 }
-                if icons::rail_icon_button(ui, icons::HELP, "Help & Shortcuts", state.show_shortcuts).clicked()
+                if icons::rail_icon_button(ui, icons::HELP, "Help", state.show_shortcuts).clicked()
                 {
                     state.show_shortcuts = !state.show_shortcuts;
                 }
-                icons::rail_icon_button(ui, icons::BUG, "Report Bug", false);
+                icons::rail_icon_button(ui, icons::BUG, "Send feedback", false);
             });
         });
 
@@ -103,11 +104,20 @@ fn draw_workspace(ui: &mut egui::Ui, state: &mut AppState, tree: &mut Option<Tre
     };
     // v2 shows an "Open All N" CTA at the top of the Workspace panel.
     let count = count_files_root(root);
-    if ui.button(format!("Open All {count}")).clicked() {
+    if cta_button(ui, &format!("Open All {count}"), false).clicked() {
         crate::workspace::open_all_files(state);
     }
-    ui.add_space(6.0);
-    draw_tree_node(ui, root, state);
+    ui.add_space(4.0);
+    // v2 lists the folder's children directly, without a row for the root.
+    match root {
+        TreeNode::Dir { children, .. } => {
+            ui.spacing_mut().item_spacing.y = 0.0;
+            for child in children.iter_mut() {
+                draw_tree_node(ui, child, state, 0);
+            }
+        }
+        TreeNode::File { .. } => draw_tree_node(ui, root, state, 0),
+    }
 }
 
 fn count_files_root(node: &TreeNode) -> usize {
@@ -117,41 +127,48 @@ fn count_files_root(node: &TreeNode) -> usize {
     }
 }
 
-fn draw_tree_node(ui: &mut egui::Ui, node: &mut TreeNode, state: &mut AppState) {
+/// Height of a tree row and the indent per level, as in v2.
+const ROW_HEIGHT: f32 = 22.0;
+const INDENT: f32 = 12.0;
+
+fn draw_tree_node(ui: &mut egui::Ui, node: &mut TreeNode, state: &mut AppState, depth: usize) {
     match node {
         TreeNode::Dir {
             name,
-            path,
+            path: _,
             children,
             expanded,
             ..
         } => {
-            use egui::collapsing_header::CollapsingState;
-
             let file_count = count_files(children);
-            let header = format!("{name} ({file_count})");
-            let id = ui.make_persistent_id(&*path);
-            let (_, header_response, _) =
-                CollapsingState::load_with_default_open(ui.ctx(), id, *expanded)
-                    .show_header(ui, |ui| ui.selectable_label(false, &header).clicked())
-                    .body(|ui| {
-                        for child in children.iter_mut() {
-                            draw_tree_node(ui, child, state);
-                        }
-                    });
-
-            if let Some(mut collapsing) = CollapsingState::load(ui.ctx(), id) {
-                if header_response.inner {
-                    collapsing.toggle(ui);
-                    collapsing.store(ui.ctx());
+            let label = format!("{name} ({file_count})");
+            let row = TreeRow {
+                depth,
+                chevron: Some(*expanded),
+                badge: None,
+                name,
+                count: Some(file_count),
+                label: &label,
+            };
+            if tree_row(ui, &state.theme, row).clicked() {
+                *expanded = !*expanded;
+            }
+            if *expanded {
+                for child in children.iter_mut() {
+                    draw_tree_node(ui, child, state, depth + 1);
                 }
-                *expanded = collapsing.is_open();
             }
         }
         TreeNode::File { name, path } => {
-            let icon = file_icon(name);
-            let label = format!("{icon} {name}");
-            if ui.selectable_label(false, &label).clicked() {
+            let row = TreeRow {
+                depth,
+                chevron: None,
+                badge: Some(file_badge(name)),
+                name,
+                count: None,
+                label: name,
+            };
+            if tree_row(ui, &state.theme, row).clicked() {
                 crate::workspace::open_file(state, path);
             }
         }
@@ -168,17 +185,117 @@ fn count_files(children: &[TreeNode]) -> usize {
         .sum()
 }
 
-fn file_icon(name: &str) -> &'static str {
-    match name.rsplit('.').next() {
-        Some("rs") => "\u{1f9f1}",
-        Some("toml") => "\u{2699}",
-        Some("md") => "\u{1f4dd}",
-        Some("json") => "\u{1f4cb}",
-        Some("js" | "ts" | "jsx" | "tsx") => "\u{1f4dc}",
-        Some("py") => "\u{1f40d}",
-        Some("html" | "css") => "\u{1f310}",
-        _ => "\u{1f4c4}",
+/// A small colored marker in front of a file name.
+struct Badge {
+    text: &'static str,
+    color: egui::Color32,
+    /// `text` is a Lucide glyph, not letters.
+    icon: bool,
+}
+
+fn file_badge(name: &str) -> Badge {
+    let (text, rgb, icon) = match name.rsplit('.').next() {
+        Some("ts" | "tsx") => ("TS", (0x3b, 0x82, 0xf6), false),
+        Some("js" | "jsx" | "mjs" | "cjs") => ("JS", (0xfa, 0xcc, 0x15), false),
+        Some("json") => ("{}", (0xfa, 0xcc, 0x15), false),
+        Some("rs") => ("RS", (0xf9, 0x73, 0x16), false),
+        Some("py") => ("PY", (0x60, 0xa5, 0xfa), false),
+        Some("go") => ("GO", (0x22, 0xd3, 0xee), false),
+        Some("md") => (icons::INFO, (0x60, 0xa5, 0xfa), true),
+        Some("toml" | "yaml" | "yml") => (icons::SETTINGS, (0x71, 0x71, 0x7a), true),
+        _ => (icons::FILE, (0x71, 0x71, 0x7a), true),
+    };
+    Badge {
+        text,
+        color: egui::Color32::from_rgb(rgb.0, rgb.1, rgb.2),
+        icon,
     }
+}
+
+struct TreeRow<'a> {
+    depth: usize,
+    /// `Some(open)` draws a chevron (a folder).
+    chevron: Option<bool>,
+    badge: Option<Badge>,
+    name: &'a str,
+    count: Option<usize>,
+    /// Accessible name of the row.
+    label: &'a str,
+}
+
+/// One 22px row of the Workspace tree: chevron or file badge, 12px name and
+/// a muted count on the right.
+fn tree_row(ui: &mut egui::Ui, theme: &crate::ui::theme::Theme, row: TreeRow<'_>) -> egui::Response {
+    use egui::{Align2, FontId};
+    let (rect, response) = ui.allocate_exact_size(
+        egui::vec2(ui.available_width(), ROW_HEIGHT),
+        egui::Sense::click(),
+    );
+    let ak_label = row.label.to_owned();
+    response.widget_info(move || {
+        egui::WidgetInfo::labeled(egui::WidgetType::Button, true, ak_label.clone())
+    });
+    if !ui.is_rect_visible(rect) {
+        return response;
+    }
+    let painter = ui.painter();
+    if response.hovered() {
+        painter.rect_filled(rect, 4.0, theme.control_bg);
+    }
+    let mid = rect.center().y;
+    let mut x = rect.left() + 8.0 + row.depth as f32 * INDENT;
+    if let Some(open) = row.chevron {
+        let ch = if open { icons::CHEVRON_DOWN } else { icons::CHEVRON_RIGHT };
+        painter.text(
+            egui::pos2(x + 6.0, mid),
+            Align2::CENTER_CENTER,
+            ch,
+            FontId::new(11.0, egui::FontFamily::Name(icons::ICON_FAMILY.into())),
+            theme.text_muted,
+        );
+        x += 16.0;
+    } else if let Some(badge) = &row.badge {
+        let font = if badge.icon {
+            FontId::new(11.0, egui::FontFamily::Name(icons::ICON_FAMILY.into()))
+        } else {
+            FontId::new(8.5, egui::FontFamily::Name(icons::MEDIUM_FAMILY.into()))
+        };
+        painter.text(
+            egui::pos2(x + 15.0, mid),
+            Align2::CENTER_CENTER,
+            badge.text,
+            font,
+            badge.color,
+        );
+        x += 26.0;
+    }
+    let right = rect.right() - 8.0;
+    let count_w = if let Some(count) = row.count {
+        painter
+            .text(
+                egui::pos2(right, mid),
+                Align2::RIGHT_CENTER,
+                count.to_string(),
+                FontId::proportional(10.0),
+                theme.text_muted,
+            )
+            .width()
+            + 8.0
+    } else {
+        0.0
+    };
+    let clip = painter.with_clip_rect(egui::Rect::from_min_max(
+        egui::pos2(x, rect.top()),
+        egui::pos2(right - count_w, rect.bottom()),
+    ));
+    clip.text(
+        egui::pos2(x, mid),
+        Align2::LEFT_CENTER,
+        row.name,
+        FontId::proportional(12.0),
+        theme.text_primary,
+    );
+    response
 }
 
 #[cfg(test)]

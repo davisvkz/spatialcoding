@@ -9,7 +9,7 @@ use crate::edges::renderer as edge_renderer;
 use crate::fs::tree::TreeNode;
 use crate::highlight::syntect_hl::Highlighter;
 use crate::input;
-use crate::nodes::file_node::{line_height, CODE_PADDING, HEADER_HEIGHT};
+use crate::nodes::file_node::{line_height, CODE_PADDING, CODE_PAD_X, GUTTER_RIGHT, HEADER_HEIGHT};
 use crate::nodes::lod::LodLevel;
 use crate::nodes::selection::SelectedSymbol;
 use crate::state::{AppState, Tool};
@@ -36,8 +36,10 @@ pub struct SpatialCodingApp {
 impl SpatialCodingApp {
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
         ui::icons::install(&cc.egui_ctx);
+        let state = AppState::default();
+        ui::theme::apply_style(&cc.egui_ctx, &state.theme);
         Self {
-            state: AppState::default(),
+            state,
             file_tree: None,
             highlighter: Highlighter::new(),
             minimap: Minimap::default(),
@@ -206,6 +208,14 @@ impl SpatialCodingApp {
                 .draw(ui, &self.state.viewport, &node_rects, canvas_rect);
         }
 
+        // v2 frames the canvas in a thin rounded outline.
+        painter.rect_stroke(
+            canvas_rect,
+            10.0,
+            egui::Stroke::new(1.0_f32, self.state.theme.canvas_frame_border),
+            egui::StrokeKind::Inside,
+        );
+
         if response.double_clicked()
             && let Some(pos) = response.interact_pointer_pos()
         {
@@ -268,7 +278,7 @@ impl SpatialCodingApp {
         let line = ((world.y - code_y) / line_height(font_size)).floor() as usize;
         if line >= node.visible_lines() { return None }
         let spans = self.highlighter.highlight_file(&node.path, &node.content).get(line)?;
-        let code_x = self.state.viewport.world_to_screen(node.position).x + 8.0 * zoom;
+        let code_x = self.state.viewport.world_to_screen(node.position).x + CODE_PAD_X * zoom;
         for occurrence in self.state.deps.symbol_occurrences(&node.path, line) {
             let (_, start, end) = occurrence.name_span;
             let Some((x0, x1)) = name_x_range(painter, lod, spans, start, end, font_size * zoom) else { continue };
@@ -601,7 +611,7 @@ impl SpatialCodingApp {
             let highlighted = self.highlighter.highlight_file(&node.path, &node.content);
             let lines = &highlighted[..highlighted.len().min(node.visible_lines())];
             let code_origin = egui::pos2(
-                screen_rect.left() + 8.0 * zoom,
+                screen_rect.left() + CODE_PAD_X * zoom,
                 header_rect.bottom() + CODE_PADDING * zoom,
             );
             let line_h = line_height(font_size) * zoom;
@@ -730,6 +740,14 @@ impl SpatialCodingApp {
 
             match lod {
                 LodLevel::Full => {
+                    draw_line_numbers(
+                        &code_clip,
+                        lines.len(),
+                        egui::pos2(screen_rect.left() + GUTTER_RIGHT * zoom, code_origin.y),
+                        line_h,
+                        font_size * zoom,
+                        theme.line_number,
+                    );
                     draw_code_text(&code_clip, lines, code_origin, line_h, font_size * zoom)
                 }
                 LodLevel::Minified => {
@@ -770,8 +788,8 @@ impl SpatialCodingApp {
                 (line_top + (line_h - height) * 0.5, height)
             };
             let rect = egui::Rect::from_min_max(
-                egui::pos2(origin.x + 8.0 * zoom + x0, top),
-                egui::pos2(origin.x + 8.0 * zoom + x1, top + height),
+                egui::pos2(origin.x + CODE_PAD_X * zoom + x0, top),
+                egui::pos2(origin.x + CODE_PAD_X * zoom + x1, top + height),
             );
             viewport.world_to_screen_rect(node.world_rect(node_width, font_size)).contains_rect(rect).then_some(rect)
         };
@@ -861,15 +879,23 @@ impl eframe::App for SpatialCodingApp {
             }
         }
 
-        egui::TopBottomPanel::top("toolbar").show(ctx, |ui| {
-            ui::toolbar::draw_toolbar(ui, &mut self.state);
-        });
+        egui::TopBottomPanel::top("toolbar")
+            .exact_height(ui::toolbar::TOOLBAR_HEIGHT)
+            .show_separator_line(false)
+            .frame(egui::Frame::NONE.fill(self.state.theme.chrome_bg))
+            .show(ctx, |ui| {
+                ui::toolbar::draw_toolbar(ui, &mut self.state);
+            });
 
         ui::sidebar_left::draw_sidebar_left(ctx, &mut self.state, &mut self.file_tree);
         ui::sidebar_right::draw_sidebar_right(ctx, &mut self.state);
 
         egui::CentralPanel::default()
-            .frame(egui::Frame::NONE.fill(self.state.theme.canvas_bg))
+            .frame(
+                egui::Frame::NONE
+                    .fill(self.state.theme.chrome_bg)
+                    .inner_margin(egui::Margin { left: 0, right: 0, top: 0, bottom: 4 }),
+            )
             .show(ctx, |ui| {
                 self.draw_canvas(ui);
             });
@@ -986,6 +1012,28 @@ fn draw_fitted_label(
     painter.text(pos, align, text, egui::FontId::proportional(px), color);
 }
 
+/// Full LOD: the line numbers, right-aligned at `right_top.x`.
+fn draw_line_numbers(
+    painter: &egui::Painter,
+    count: usize,
+    right_top: egui::Pos2,
+    line_h: f32,
+    font_px: f32,
+    color: egui::Color32,
+) {
+    let font = egui::FontId::monospace(font_px * 0.9);
+    let rows = visible_code_rows(right_top.y, line_h, count, painter.clip_rect());
+    for i in rows {
+        painter.text(
+            egui::pos2(right_top.x, right_top.y + i as f32 * line_h),
+            egui::Align2::RIGHT_TOP,
+            (i + 1).to_string(),
+            font.clone(),
+            color,
+        );
+    }
+}
+
 /// Full LOD: real syntax-highlighted text.
 fn draw_code_text(
     painter: &egui::Painter,
@@ -1092,12 +1140,12 @@ fn visual_width(s: &str) -> usize {
 
 /// Font of the code text inside a file node, for a node font size of `font_px`.
 fn code_font(font_px: f32) -> egui::FontId {
-    egui::FontId::monospace(font_px * 0.85)
+    egui::FontId::monospace(font_px)
 }
 
 /// Approximate column width of the code font, as the minified bars use it.
 fn code_char_width(font_px: f32) -> f32 {
-    font_px * 0.85 * MONO_ADVANCE
+    font_px * MONO_ADVANCE
 }
 
 /// Horizontal range, relative to the code origin, of bytes `start..end` of a

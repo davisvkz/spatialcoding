@@ -1,62 +1,118 @@
+//! The 33px top bar of v2: a folder pill, the Select and Move tools, and the
+//! Clear all / Clear selected buttons, all icon-only.
+
 use crate::state::{AppState, Tool};
+use crate::ui::icons;
+
+/// Height of the top bar, as in v2.
+pub const TOOLBAR_HEIGHT: f32 = 33.0;
 
 pub fn draw_toolbar(ui: &mut egui::Ui, state: &mut AppState) {
-    ui.horizontal(|ui| {
+    let theme = state.theme.clone();
+    ui.horizontal_centered(|ui| {
+        // Aligned with the rails' icons: v2 puts the pill 44px from the edge.
+        ui.add_space(4.0);
+        ui.spacing_mut().item_spacing.x = 8.0;
+
         let folder_label = state
             .loaded_dir
             .as_ref()
             .and_then(|p| p.file_name())
             .map(|n| n.to_string_lossy().to_string())
             .unwrap_or_else(|| "No folder".into());
-
-        if ui.button(&folder_label).clicked() {
+        if folder_pill(ui, &theme, &folder_label).clicked() {
             // TODO: open folder picker
         }
 
-        ui.separator();
+        separator(ui, &theme);
 
-        let select_text = if state.active_tool == Tool::Select {
-            egui::RichText::new("Select").strong()
-        } else {
-            egui::RichText::new("Select")
-        };
-        if ui.button(select_text).clicked() {
+        if icons::toolbar_icon_button(ui, icons::POINTER, "Select tool", state.active_tool == Tool::Select)
+            .clicked()
+        {
             state.active_tool = Tool::Select;
         }
-
-        let move_text = if state.active_tool == Tool::Move {
-            egui::RichText::new("Move").strong()
-        } else {
-            egui::RichText::new("Move")
-        };
-        if ui.button(move_text).clicked() {
+        if icons::toolbar_icon_button(ui, icons::HAND, "Move tool", state.active_tool == Tool::Move)
+            .clicked()
+        {
             state.active_tool = Tool::Move;
         }
 
-        ui.separator();
+        separator(ui, &theme);
 
-        let has_nodes = !state.node_store.file_nodes.is_empty()
-            || !state.node_store.folder_nodes.is_empty();
-        if ui
-            .add_enabled(has_nodes, egui::Button::new("Clear All"))
-            .clicked()
-        {
+        let has_nodes =
+            !state.node_store.file_nodes.is_empty() || !state.node_store.folder_nodes.is_empty();
+        let clear_all = ui
+            .add_enabled_ui(has_nodes, |ui| {
+                icons::toolbar_icon_button(ui, icons::CLOSE, "Clear all nodes", false)
+            })
+            .inner;
+        if clear_all.clicked() {
             crate::workspace::clear_canvas(state);
         }
 
         let has_selection = state.selection.count() > 0;
-        if ui
-            .add_enabled(has_selection, egui::Button::new("Clear Selected"))
-            .clicked()
-        {
+        let clear_selected = ui
+            .add_enabled_ui(has_selection, |ui| {
+                icons::toolbar_icon_button(ui, icons::TRASH, "Clear selected nodes", false)
+            })
+            .inner;
+        if clear_selected.clicked() {
             let ids: Vec<u64> = state.selection.selected_ids().collect();
             crate::workspace::remove_nodes(state, &ids);
         }
-
-        ui.separator();
-
-        if ui.button("Settings").clicked() {
-            state.show_settings = !state.show_settings;
-        }
     });
+}
+
+/// The folder selector: folder glyph, name and a chevron in a 150x22 pill.
+fn folder_pill(ui: &mut egui::Ui, theme: &crate::ui::theme::Theme, name: &str) -> egui::Response {
+    use egui::{Align2, FontId};
+    let (rect, response) = ui.allocate_exact_size(egui::vec2(150.0, 22.0), egui::Sense::click());
+    if ui.is_rect_visible(rect) {
+        let fill = if response.hovered() {
+            theme.control_bg.lerp_to_gamma(egui::Color32::WHITE, 0.05)
+        } else {
+            theme.control_bg
+        };
+        let border = egui::Color32::from_white_alpha(20);
+        ui.painter()
+            .rect(rect, 11.0, fill, egui::Stroke::new(1.0_f32, border), egui::StrokeKind::Inside);
+        let icon_font = FontId::new(12.0, egui::FontFamily::Name(icons::ICON_FAMILY.into()));
+        let mid = rect.center().y;
+        ui.painter().text(
+            egui::pos2(rect.left() + 9.0, mid),
+            Align2::LEFT_CENTER,
+            icons::FOLDER,
+            icon_font.clone(),
+            theme.text_secondary,
+        );
+        ui.painter().text(
+            egui::pos2(rect.right() - 9.0, mid),
+            Align2::RIGHT_CENTER,
+            icons::CHEVRON_DOWN,
+            icon_font,
+            theme.text_muted,
+        );
+        let clip = ui.painter().with_clip_rect(egui::Rect::from_min_max(
+            egui::pos2(rect.left() + 26.0, rect.top()),
+            egui::pos2(rect.right() - 24.0, rect.bottom()),
+        ));
+        clip.text(
+            egui::pos2(rect.left() + 26.0, mid),
+            Align2::LEFT_CENTER,
+            name,
+            FontId::proportional(11.0),
+            theme.text_primary,
+        );
+    }
+    let ak_label = name.to_owned();
+    response.widget_info(move || {
+        egui::WidgetInfo::labeled(egui::WidgetType::Button, true, ak_label.clone())
+    });
+    response
+}
+
+/// A 1px vertical divider between button groups.
+fn separator(ui: &mut egui::Ui, theme: &crate::ui::theme::Theme) {
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(1.0, 14.0), egui::Sense::hover());
+    ui.painter().rect_filled(rect, 0.0, theme.panel_border);
 }

@@ -15,7 +15,7 @@ impl CanvasRenderer {
         theme: &Theme,
         show_grid: bool,
     ) {
-        painter.rect_filled(rect, 0.0, theme.canvas_bg);
+        painter.rect_filled(rect, 10.0, theme.canvas_bg);
         if !show_grid {
             return;
         }

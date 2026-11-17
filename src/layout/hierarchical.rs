@@ -21,7 +21,7 @@ use crate::layout::settings::{HAlign, LayoutSettings, SortMode, VAlign};
 use crate::nodes::folder_node::{COLLAPSED_FOLDER_SIZE, FOLDER_HEADER_HEIGHT};
 use crate::nodes::node_store::NodeStore;
 
-const NODE_WIDTH: f32 = 700.0;
+const NODE_WIDTH: f32 = 650.0;
 const FONT_SIZE: f32 = 12.0;
 
 /// Vertical gap between items of one column, as a share of the horizontal
@@ -495,7 +495,7 @@ mod tests {
     use super::*;
     use std::path::{Path, PathBuf};
 
-    const NODE_WIDTH: f32 = 700.0;
+    const NODE_WIDTH: f32 = 650.0;
     const SPACING: f32 = 100.0;
     const COLUMN: f32 = NODE_WIDTH + SPACING;
 

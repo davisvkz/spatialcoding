@@ -2,10 +2,9 @@ use egui_kittest::kittest::Queryable;
 
 use crate::common::*;
 
-/// Expands the workspace root and `src/` by clicking their names.
-fn expand_root_and_src(app: &mut App, fx: &Fixture) {
-    app.get_by_label(&format!("{} (7)", fx.name)).click();
-    app.run();
+/// Expands `src/` by clicking its name. v2 lists the folder's children
+/// directly, so the workspace root has no row of its own.
+fn expand_root_and_src(app: &mut App, _fx: &Fixture) {
     app.get_by_label("src (2)").click();
     app.run();
 }
@@ -14,10 +13,8 @@ fn expand_root_and_src(app: &mut App, fx: &Fixture) {
 fn clicking_folder_names_expands_them() {
     let fx = fixture();
     let mut app = app_with(&fx);
-    assert!(
-        app.query_by_label("src (2)").is_none(),
-        "root starts collapsed"
-    );
+    app.get_by_label("src (2)");
+    assert!(app.query_by_label_contains("main.rs").is_none(), "src starts collapsed");
 
     expand_root_and_src(&mut app, &fx);
 

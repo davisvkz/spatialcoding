@@ -501,7 +501,7 @@ fn ports_mark_connected_lines_on_the_border_and_edges_end_there() {
 
 #[test]
 fn file_nodes_show_and_navigate_to_code_after_line_fifty() {
-    use spatialcoding::nodes::file_node::{line_height, CODE_PADDING, HEADER_HEIGHT};
+    use spatialcoding::nodes::file_node::{line_height, CODE_PADDING, CODE_PAD_X, HEADER_HEIGHT};
     let fx = fixture();
     let content = "// filler\n".repeat(119) + "pub fn last_line() {}\n";
     std::fs::write(fx.path("src/util.rs"), content).unwrap();
@@ -569,7 +569,7 @@ fn file_nodes_show_and_navigate_to_code_after_line_fifty() {
 
 #[test]
 fn minified_edges_touch_identifier_bars_and_collapsed_nodes_use_header_fallbacks() {
-    use spatialcoding::nodes::file_node::{line_height, CODE_PADDING, HEADER_HEIGHT};
+    use spatialcoding::nodes::file_node::{line_height, CODE_PADDING, CODE_PAD_X, HEADER_HEIGHT};
     let fx = fixture();
     let mut app = app_with(&fx);
     let source = app.open(&fx.path("src/main.rs"));
@@ -600,7 +600,7 @@ fn minified_edges_touch_identifier_bars_and_collapsed_nodes_use_header_fallbacks
     let line = node.content.lines().nth(name.line).unwrap();
     let col = line[..name.start_byte].chars().count() as f32;
     let expected = s.viewport.world_to_screen(egui::pos2(
-        node.position.x + 8.0 + col * s.settings.font_size * 0.85 * 0.6,
+        node.position.x + CODE_PAD_X + col * s.settings.font_size * 0.6,
         node.position.y
             + HEADER_HEIGHT
             + CODE_PADDING

@@ -6,7 +6,10 @@ use syntect::highlighting::{Style, ThemeSet};
 use syntect::parsing::SyntaxSet;
 use syntect::util::LinesWithEndings;
 
+use super::treesitter_hl::TreeSitterHighlighter;
+
 pub struct Highlighter {
+    tree_sitter: TreeSitterHighlighter,
     syntax_set: SyntaxSet,
     theme_set: ThemeSet,
     cache: HashMap<String, Vec<Vec<(Style, String)>>>,
@@ -15,6 +18,7 @@ pub struct Highlighter {
 impl Highlighter {
     pub fn new() -> Self {
         Self {
+            tree_sitter: TreeSitterHighlighter::default(),
             syntax_set: SyntaxSet::load_defaults_newlines(),
             theme_set: ThemeSet::load_defaults(),
             cache: HashMap::new(),
@@ -23,6 +27,12 @@ impl Highlighter {
 
     pub fn highlight_file(&mut self, path: &Path, content: &str) -> &[Vec<(Style, String)>] {
         let key = path.to_string_lossy().into_owned();
+
+        if !self.cache.contains_key(&key)
+            && let Some(lines) = self.tree_sitter.highlight(path, content)
+        {
+            self.cache.insert(key.clone(), lines);
+        }
 
         if !self.cache.contains_key(&key) {
             let ext = path

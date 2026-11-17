@@ -8,11 +8,11 @@ fn select_and_move_buttons_switch_tools() {
     let mut app = app();
     assert_eq!(app.app_state().active_tool, Tool::Select);
 
-    app.get_by_label("Move").click();
+    app.get_by_label("Move tool").click();
     app.run();
     assert_eq!(app.app_state().active_tool, Tool::Move);
 
-    app.get_by_label("Select").click();
+    app.get_by_label("Select tool").click();
     app.run();
     assert_eq!(app.app_state().active_tool, Tool::Select);
 }
@@ -21,16 +21,16 @@ fn select_and_move_buttons_switch_tools() {
 fn clear_buttons_are_disabled_until_there_is_something_to_clear() {
     let fx = fixture();
     let mut app = app_with(&fx);
-    assert!(app.get_by_label("Clear All").is_disabled());
-    assert!(app.get_by_label("Clear Selected").is_disabled());
+    assert!(app.get_by_label("Clear all nodes").is_disabled());
+    assert!(app.get_by_label("Clear selected nodes").is_disabled());
 
     let main = app.open(&fx.path("src/main.rs"));
-    assert!(!app.get_by_label("Clear All").is_disabled());
-    assert!(app.get_by_label("Clear Selected").is_disabled());
+    assert!(!app.get_by_label("Clear all nodes").is_disabled());
+    assert!(app.get_by_label("Clear selected nodes").is_disabled());
 
     app.app_state_mut().selection.select(main);
     app.run();
-    assert!(!app.get_by_label("Clear Selected").is_disabled());
+    assert!(!app.get_by_label("Clear selected nodes").is_disabled());
 }
 
 #[test]
@@ -42,7 +42,7 @@ fn clear_all_removes_nodes_folders_edges_and_selection() {
     app.app_state_mut().selection.select(main);
     app.run();
 
-    app.get_by_label("Clear All").click();
+    app.get_by_label("Clear all nodes").click();
     app.run();
 
     let s = app.app_state();
@@ -73,7 +73,7 @@ fn clear_selected_removes_nodes_with_their_edges_and_empty_folders() {
     }
     app.run();
 
-    app.get_by_label("Clear Selected").click();
+    app.get_by_label("Clear selected nodes").click();
     app.run();
 
     let s = app.app_state();

@@ -62,7 +62,7 @@ impl CstLanguage {
         }
     }
 
-    fn grammar(self) -> tree_sitter::Language {
+    pub(crate) fn grammar(self) -> tree_sitter::Language {
         match self {
             CstLanguage::Rust => tree_sitter_rust::LANGUAGE.into(),
             CstLanguage::TypeScript => tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into(),
@@ -75,7 +75,7 @@ impl CstLanguage {
 
     /// A parser ready for this language. Fails only if the grammar's ABI is
     /// not supported by the linked tree-sitter runtime.
-    fn parser(self) -> Option<tree_sitter::Parser> {
+    pub(crate) fn parser(self) -> Option<tree_sitter::Parser> {
         let mut parser = tree_sitter::Parser::new();
         match parser.set_language(&self.grammar()) {
             Ok(()) => Some(parser),

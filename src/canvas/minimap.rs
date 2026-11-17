@@ -31,17 +31,23 @@ impl Minimap {
 
         let minimap_rect = Rect::from_min_size(
             Pos2::new(
-                canvas_rect.max.x - self.size.x - 12.0,
-                canvas_rect.max.y - self.size.y - 12.0,
+                canvas_rect.max.x - self.size.x - 6.0,
+                canvas_rect.max.y - self.size.y - 6.0,
             ),
             self.size,
         );
 
         let painter = ui.painter_at(minimap_rect);
 
-        // v2 minimap: dark card, grey outlines for nodes.
-        painter.rect_filled(minimap_rect, 6.0, Color32::from_rgba_premultiplied(14, 14, 14, 230));
-        painter.rect_stroke(minimap_rect, 6.0, egui::Stroke::new(1.0_f32, Color32::from_gray(40)), egui::StrokeKind::Outside);
+        // v2 minimap: dark rounded card, light blocks for nodes and a white
+        // rounded outline for the viewport.
+        painter.rect_filled(minimap_rect, 10.0, Color32::from_rgba_unmultiplied(0x16, 0x16, 0x18, 235));
+        painter.rect_stroke(
+            minimap_rect,
+            10.0,
+            egui::Stroke::new(1.0_f32, Color32::from_rgba_unmultiplied(0x27, 0x27, 0x2a, 178)),
+            egui::StrokeKind::Inside,
+        );
 
         let world_bounds = bounding_rect(node_rects);
         let padded = Rect::from_min_max(
@@ -63,12 +69,7 @@ impl Minimap {
             let min = map_to_minimap(r.min);
             let max = map_to_minimap(r.max);
             let mapped = Rect::from_min_max(min, max);
-            painter.rect_stroke(
-                mapped,
-                0.0,
-                egui::Stroke::new(1.0_f32, Color32::from_gray(110)),
-                egui::StrokeKind::Inside,
-            );
+            painter.rect_filled(mapped, 1.0, Color32::from_rgba_unmultiplied(0xa1, 0xa1, 0xaa, 90));
         }
 
         let visible = viewport.visible_world_rect(canvas_rect);
@@ -77,7 +78,12 @@ impl Minimap {
         let vis_rect = Rect::from_min_max(vis_min, vis_max).intersect(minimap_rect.shrink(6.0));
 
         if vis_rect.is_positive() {
-            painter.rect_stroke(vis_rect, 1.0, egui::Stroke::new(1.5_f32, Color32::from_rgba_premultiplied(255, 255, 255, 160)), egui::StrokeKind::Outside);
+            painter.rect_stroke(
+                vis_rect,
+                3.0,
+                egui::Stroke::new(1.5_f32, Color32::from_white_alpha(190)),
+                egui::StrokeKind::Outside,
+            );
         }
     }
 }
