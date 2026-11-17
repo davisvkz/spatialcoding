@@ -22,8 +22,12 @@ pub struct SpatialCodingApp {
     file_tree: Option<TreeNode>,
     highlighter: Highlighter,
     minimap: Minimap,
-    /// Fit the view to all nodes on the next frame, once the canvas size is known.
-    pending_fit: bool,
+    /// Where the panel settings are kept, when persistence is on (binary only).
+    settings_path: Option<PathBuf>,
+    /// The JSON last written to `settings_path`, to skip unchanged writes.
+    saved_settings: String,
+    /// When the settings were last compared with `saved_settings`.
+    settings_checked_at: f64,
     /// `--layout` was asked: lay out again once the language servers have
     /// answered, since the dependency edges arrive in the background.
     layout_when_indexed: bool,
@@ -37,7 +41,9 @@ impl SpatialCodingApp {
             file_tree: None,
             highlighter: Highlighter::new(),
             minimap: Minimap::default(),
-            pending_fit: false,
+            settings_path: None,
+            saved_settings: String::new(),
+            settings_checked_at: 0.0,
             layout_when_indexed: false,
         }
     }
@@ -50,6 +56,39 @@ impl SpatialCodingApp {
         &mut self.state
     }
 
+    /// Loads the panel settings from `path`, when it exists, and saves them
+    /// back there whenever they change. Off unless called: tests never touch
+    /// the user's settings.
+    pub fn enable_settings_persistence(&mut self, path: PathBuf) {
+        if let Some(saved) = crate::settings_store::load(&path) {
+            saved.apply(&mut self.state);
+        }
+        self.saved_settings = crate::settings_store::to_json(
+            &crate::settings_store::PersistedSettings::capture(&self.state),
+        );
+        self.settings_path = Some(path);
+    }
+
+    /// Writes the settings when they changed, at most about once a second.
+    fn save_settings_if_changed(&mut self, now: f64) {
+        let Some(path) = &self.settings_path else {
+            return;
+        };
+        if now - self.settings_checked_at < 1.0 {
+            return;
+        }
+        self.settings_checked_at = now;
+        let json = crate::settings_store::to_json(
+            &crate::settings_store::PersistedSettings::capture(&self.state),
+        );
+        if json != self.saved_settings {
+            if let Err(e) = crate::settings_store::save(path, &json) {
+                log::warn!("Could not save settings to {}: {e}", path.display());
+            }
+            self.saved_settings = json;
+        }
+    }
+
     pub fn file_tree(&self) -> Option<&TreeNode> {
         self.file_tree.as_ref()
     }
@@ -57,6 +96,9 @@ impl SpatialCodingApp {
     /// Loads `dir` as the workspace, replacing whatever is on the canvas.
     pub fn open_folder(&mut self, dir: PathBuf) {
         workspace::clear_canvas(&mut self.state);
+        // Asked again on the next frame, for the new folder.
+        self.state.changes.reset();
+        self.state.folder_files_cache.replace(None);
         self.file_tree =
             match crate::fs::loader::load_directory(&dir, self.state.settings.show_dot_folders) {
                 Ok(tree) => Some(tree),
@@ -83,7 +125,7 @@ impl SpatialCodingApp {
             self.apply_layout();
             self.layout_when_indexed = self.state.deps.is_waiting();
         }
-        self.pending_fit = !self.state.node_store.file_nodes.is_empty();
+        self.state.pending_fit = !self.state.node_store.file_nodes.is_empty();
     }
 
     fn apply_layout(&mut self) {
@@ -92,27 +134,36 @@ impl SpatialCodingApp {
             &self.state.edge_store,
             &self.state.layout_settings,
         );
+        self.state.layout_dirty = false;
     }
 
     fn draw_canvas(&mut self, ui: &mut egui::Ui) {
         let canvas_rect = ui.available_rect_before_wrap();
         let response = ui.allocate_rect(canvas_rect, egui::Sense::click_and_drag());
 
-        if std::mem::take(&mut self.pending_fit)
+        if std::mem::take(&mut self.state.pending_fit)
             && let Some(world_rect) = input::compute_nodes_bounding_rect(&self.state)
         {
             self.state.viewport.fit_to_rect(world_rect, canvas_rect);
         }
 
         if let Some(world) = self.state.pending_focus.take() {
-            // Jump to a reference: readable text, centered on its line.
+            // Jump to a reference: readable text (unless Keep Zoom), centered
+            // on its line, gliding there with Smooth Transition.
+            let lsp = &self.state.settings.lsp;
             let vp = &mut self.state.viewport;
-            if LodLevel::from_zoom(vp.zoom) != LodLevel::Full {
+            if !lsp.keep_zoom && LodLevel::from_zoom(vp.zoom) != LodLevel::Full {
                 vp.zoom = 1.0;
                 vp.target_zoom = 1.0;
             }
             vp.zoom_center = None;
-            vp.offset = canvas_rect.center().to_vec2() / vp.zoom - world.to_vec2();
+            let target = canvas_rect.center().to_vec2() / vp.zoom - world.to_vec2();
+            if lsp.smooth_transition {
+                vp.pan_target = Some(target);
+            } else {
+                vp.pan_target = None;
+                vp.offset = target;
+            }
         }
 
         self.state
@@ -138,17 +189,31 @@ impl SpatialCodingApp {
             self.state.settings.show_grid,
         );
 
+        self.state.node_store.view = crate::folder_actions::folder_view(&self.state);
         self.update_folder_bounds();
+        let zoom_collapsed = crate::folder_actions::zoom_collapsed(&self.state, self.state.viewport.zoom);
+        self.state.node_store.view.zoom_collapsed = zoom_collapsed;
         self.draw_folder_nodes(&painter);
         let ports = self.collect_ports();
         self.draw_file_nodes(&painter, canvas_rect, &ports);
         self.draw_edges(&painter);
         self.draw_ports(&painter, canvas_rect, &ports);
+        self.draw_out_of_view_references(&painter, canvas_rect);
 
         if self.state.settings.show_minimap {
             let node_rects = self.collect_node_rects();
             self.minimap
                 .draw(ui, &self.state.viewport, &node_rects, canvas_rect);
+        }
+
+        if response.double_clicked()
+            && let Some(pos) = response.interact_pointer_pos()
+        {
+            // Double-click a folder's label band or collapsed box: toggle it.
+            let world_pos = self.state.viewport.screen_to_world(pos);
+            if let Some(folder) = self.state.node_store.folder_at_position(world_pos) {
+                crate::folder_actions::toggle_folder(&mut self.state, folder);
+            }
         }
 
         if response.clicked() {
@@ -223,33 +288,156 @@ impl SpatialCodingApp {
 
     fn draw_folder_nodes(&self, painter: &egui::Painter) {
         let theme = &self.state.theme;
-        for id in self.state.node_store.all_folder_ids() {
-            if let Some(folder) = self.state.node_store.get_folder(id) {
-                let screen_rect = self.state.viewport.world_to_screen_rect(folder.bounds);
-                if !painter.clip_rect().intersects(screen_rect) {
-                    continue;
-                }
-                // v2 folders: unfilled square outline, dim name just above it.
-                painter.rect_filled(screen_rect, 0.0, theme.folder_bg);
-                painter.rect_stroke(
-                    screen_rect,
-                    0.0,
-                    egui::Stroke::new(1.0_f32, theme.folder_border),
-                    egui::StrokeKind::Outside,
-                );
-                // Sized in world units so a nested folder's label never
-                // runs into its parent's at overview zoom; hidden when tiny.
-                let label_px = (FOLDER_LABEL_WORLD_PX * self.state.viewport.zoom).min(16.0);
-                if label_px >= 6.0 {
-                    painter.text(
-                        screen_rect.left_top() - egui::vec2(0.0, 3.0),
-                        egui::Align2::LEFT_BOTTOM,
-                        &folder.label,
-                        egui::FontId::proportional(label_px),
-                        theme.text_muted,
-                    );
-                }
+        let store = &self.state.node_store;
+        let settings = &self.state.settings.folders;
+        let hidden = store.hidden_folders();
+        let zoom = self.state.viewport.zoom;
+        let root = self.state.loaded_dir.clone().unwrap_or_default();
+        let diff_color = egui::Color32::from_rgb(0xe2, 0xb3, 0x4a);
+        let mut ids = store.all_folder_ids();
+        // Outer folders first, so their labels claim space before nested ones.
+        ids.sort_by_key(|&id| (store.folder_depth(id, &root), id));
+        let mut labels: Vec<(egui::Rect, String, f32, egui::Color32)> = Vec::new();
+        for id in ids {
+            if hidden.contains(&id) {
+                continue;
             }
+            let Some(folder) = store.get_folder(id) else { continue };
+            if !folder.bounds.is_positive() {
+                continue;
+            }
+            let changed = settings.diff_highlight
+                && crate::folder_actions::folder_has_changes(&self.state, id);
+            // Zoom Fog: deeper folders fade as the view zooms out.
+            let fog = if settings.zoom_fog {
+                let depth = store.folder_depth(id, &root).max(1) as i32;
+                (zoom / 0.5).clamp(0.1, 1.0).powi(depth).max(0.08)
+            } else {
+                1.0
+            };
+            if store.layout_collapsed(id) {
+                if let Some(card) = folder.collapsed_rect() {
+                    self.draw_folder_card(painter, folder, card, changed, diff_color, fog);
+                }
+                continue;
+            }
+            let screen_rect = self.state.viewport.world_to_screen_rect(folder.bounds);
+            if !painter.clip_rect().intersects(screen_rect) {
+                continue;
+            }
+            if store.view.zoom_collapsed.contains(&id) {
+                self.draw_folder_card(painter, folder, folder.bounds, changed, diff_color, fog);
+                continue;
+            }
+            // Merge Empty Folders: a folder holding only one folder and no
+            // file draws nothing; its child's label carries the path.
+            // Hide Folders: no frame and no name (collapsed cards still show).
+            if settings.hide_folders || (settings.merge_empty && is_pass_through(store, id)) {
+                continue;
+            }
+            // v2 folders: unfilled square outline, dim name just above it.
+            let border = if changed { diff_color } else { theme.folder_border };
+            painter.rect_filled(screen_rect, 0.0, theme.folder_bg);
+            painter.rect_stroke(
+                screen_rect,
+                0.0,
+                egui::Stroke::new(1.0_f32, border.gamma_multiply(fog)),
+                egui::StrokeKind::Outside,
+            );
+            if !settings.show_folder_names {
+                continue;
+            }
+            // Sized in world units so a nested folder's label never runs
+            // into its parent's at overview zoom; hidden below Min Size.
+            let label_px = (FOLDER_LABEL_WORLD_PX * zoom).min(16.0);
+            if label_px < min_label_px(settings.min_size_pct).max(1.0) {
+                continue;
+            }
+            let text = if settings.merge_empty {
+                merged_label(store, id)
+            } else {
+                folder.label.clone()
+            };
+            let color = if changed { diff_color } else { theme.text_muted }.gamma_multiply(fog);
+            let galley_width = painter
+                .layout_no_wrap(text.clone(), egui::FontId::proportional(label_px), color)
+                .size()
+                .x;
+            let anchor = screen_rect.left_top() - egui::vec2(0.0, 3.0);
+            let rect = egui::Rect::from_min_size(
+                anchor - egui::vec2(0.0, label_px * 1.2),
+                egui::vec2(galley_width, label_px * 1.2),
+            );
+            // Merge Overlapping Labels: a label that would cover an earlier
+            // one joins it instead.
+            if settings.merge_overlapping_labels
+                && let Some(existing) = labels.iter_mut().find(|l| l.0.intersects(rect))
+            {
+                existing.1.push_str(" / ");
+                existing.1.push_str(&text);
+                continue;
+            }
+            labels.push((rect, text, label_px, color));
+        }
+        for (rect, text, px, color) in labels {
+            painter.text(
+                rect.left_bottom(),
+                egui::Align2::LEFT_BOTTOM,
+                text,
+                egui::FontId::proportional(px),
+                color,
+            );
+        }
+    }
+
+    /// A collapsed folder: a filled card with its name and file count.
+    fn draw_folder_card(
+        &self,
+        painter: &egui::Painter,
+        folder: &crate::nodes::folder_node::FolderNode,
+        world: egui::Rect,
+        changed: bool,
+        diff_color: egui::Color32,
+        fog: f32,
+    ) {
+        let theme = &self.state.theme;
+        let zoom = self.state.viewport.zoom;
+        let screen_rect = self.state.viewport.world_to_screen_rect(world);
+        if !painter.clip_rect().intersects(screen_rect) {
+            return;
+        }
+        let rounding = (6.0 * zoom).clamp(1.0, 6.0);
+        let border = if changed { diff_color } else { theme.folder_border.gamma_multiply(1.6) };
+        painter.rect_filled(screen_rect, rounding, theme.node_bg.gamma_multiply(fog.max(0.5)));
+        painter.rect_stroke(
+            screen_rect,
+            rounding,
+            egui::Stroke::new(1.0_f32, border.gamma_multiply(fog)),
+            egui::StrokeKind::Outside,
+        );
+        let inside = self
+            .state
+            .node_store
+            .file_nodes
+            .values()
+            .filter(|n| n.path.starts_with(&folder.path))
+            .count();
+        let name_px = (18.0 * zoom).max(screen_rect.height() * 0.12).min(16.0).min(screen_rect.height() * 0.4);
+        if name_px >= 5.0 {
+            painter.text(
+                screen_rect.left_center() + egui::vec2(12.0 * zoom, -2.0),
+                egui::Align2::LEFT_BOTTOM,
+                format!("{} {}", crate::ui::icons::FOLDER, folder.label),
+                egui::FontId::proportional(name_px),
+                theme.text_primary.gamma_multiply(fog),
+            );
+            painter.text(
+                screen_rect.left_center() + egui::vec2(12.0 * zoom, 2.0),
+                egui::Align2::LEFT_TOP,
+                format!("{inside} files · collapsed"),
+                egui::FontId::proportional(name_px * 0.75),
+                theme.text_muted.gamma_multiply(fog),
+            );
         }
     }
 
@@ -269,14 +457,17 @@ impl SpatialCodingApp {
         {
             return HashMap::new();
         }
-        ports::collect_ports(
+        let mut ports = ports::collect_ports(
             &state.edge_store,
             &state.node_store,
             &state.edge_style,
             &state.selection,
             state.settings.node_width,
             state.settings.font_size,
-        )
+        );
+        // Files hidden in a collapsed folder show no ports.
+        ports.retain(|&id, _| !state.node_store.is_file_hidden(id));
+        ports
     }
 
     /// Port circles on the node borders, over the edge ends they collect.
@@ -327,9 +518,12 @@ impl SpatialCodingApp {
         let visible_world = self.state.viewport.visible_world_rect(canvas_rect);
         let edge_spans = self.state.edge_store.focused_spans(&self.state.selection, &self.state.edge_style);
 
+        let store = &self.state.node_store;
+        let hidden_files: std::collections::HashSet<u64> =
+            store.file_nodes.keys().copied().filter(|&id| store.is_file_hidden(id)).collect();
         for node in self.state.node_store.file_nodes.values() {
             let world_rect = node.world_rect(node_width, font_size);
-            if !world_rect.intersects(visible_world) {
+            if !world_rect.intersects(visible_world) || hidden_files.contains(&node.id) {
                 continue;
             }
 
@@ -342,16 +536,20 @@ impl SpatialCodingApp {
             // v2 Code Canvas style: no interior header bar; the file name
             // floats above the rectangle as a secondary label.
             let label_anchor = screen_rect.center_top() - egui::vec2(0.0, 4.0);
-            let label_size = (font_size * zoom).max(10.0).min(14.0);
-            draw_fitted_label(
-                painter,
-                node.file_name(),
-                label_anchor,
-                egui::Align2::CENTER_BOTTOM,
-                screen_rect.width(),
-                label_size,
-                theme.text_secondary,
-            );
+            let label_size = (font_size * zoom).clamp(10.0, 14.0);
+            let names = &self.state.settings.files;
+            if names.show_names {
+                draw_fitted_label(
+                    painter,
+                    node.file_name(),
+                    label_anchor,
+                    egui::Align2::CENTER_BOTTOM,
+                    screen_rect.width(),
+                    label_size,
+                    min_label_px(names.min_size_pct),
+                    theme.text_secondary,
+                );
+            }
 
             if lod == LodLevel::TitleOnly {
                 // Far away: solid block only — the floating label above is the name.
@@ -379,6 +577,22 @@ impl SpatialCodingApp {
                 screen_rect.left_top(),
                 egui::vec2(screen_rect.width(), HEADER_HEIGHT * zoom),
             );
+
+            if node.collapsed {
+                // File nodes › "Collapse long files": frame only, with a note.
+                let note = format!("{} lines · collapsed", node.line_count);
+                draw_fitted_label(
+                    painter,
+                    &note,
+                    screen_rect.center(),
+                    egui::Align2::CENTER_CENTER,
+                    screen_rect.width(),
+                    (font_size * zoom).clamp(6.0, 13.0),
+                    5.0,
+                    theme.text_muted,
+                );
+                continue;
+            }
 
             if node.content.is_empty() {
                 continue;
@@ -453,9 +667,55 @@ impl SpatialCodingApp {
                 }
             }
 
+            // File nodes › "Highlight top-level symbols".
+            if let Some(ranges) = self.state.top_level_highlights.get(&node.id) {
+                for &(start, end) in ranges {
+                    if let Some(rect) = cst_panel::highlight_rect(
+                        hl_origin, screen_rect.width(), line_h,
+                        start, end, node.visible_lines(),
+                    ) {
+                        code_clip.rect_filled(rect, 0.0, theme.accent.gamma_multiply(0.08));
+                        let border = egui::Rect::from_min_size(
+                            rect.left_top(),
+                            egui::vec2(2.0 * zoom, rect.height()),
+                        );
+                        code_clip.rect_filled(border, 0.0, theme.accent.gamma_multiply(0.7));
+                    }
+                }
+            }
+
+            // CST panel: the nodes at the selection's edge ends, outlined,
+            // and a hovered row's ancestors (Single Hover Symbol off).
+            let show_cst = self.state.settings.cst.show_canvas;
+            if show_cst {
+                for &(start, end) in self.state.cst.edge_nodes.get(&node.id).map(Vec::as_slice).unwrap_or(&[]) {
+                    if let Some(rect) = cst_panel::highlight_rect(
+                        hl_origin, screen_rect.width(), line_h,
+                        start, end, node.visible_lines(),
+                    ) {
+                        code_clip.rect_stroke(
+                            rect.shrink(1.0),
+                            2.0,
+                            egui::Stroke::new(1.0_f32, CST_EDGE_NODE_COLOR),
+                            egui::StrokeKind::Inside,
+                        );
+                    }
+                }
+                if self.state.cst.hovered.is_some_and(|h| h.node_id == node.id) {
+                    for &(start, end) in &self.state.cst.hover_ancestors {
+                        if let Some(rect) = cst_panel::highlight_rect(
+                            hl_origin, screen_rect.width(), line_h,
+                            start, end, node.visible_lines(),
+                        ) {
+                            code_clip.rect_filled(rect, 0.0, theme.selection.gamma_multiply(0.08));
+                        }
+                    }
+                }
+            }
+
             // CST/LSP hover highlights and reference-jump target.
             let pointer_lines = [
-                self.state.cst.hovered.map(|h| (h.node_id, h.start_line, h.end_line, 0.25)),
+                self.state.cst.hovered.filter(|_| show_cst).map(|h| (h.node_id, h.start_line, h.end_line, 0.25)),
                 self.state.lsp.hovered.map(|h| (h.node_id, h.start_line, h.end_line, 0.25)),
                 lsp_target.map(|t| (t.node_id, t.start_line, t.end_line, 0.4)),
             ];
@@ -481,6 +741,11 @@ impl SpatialCodingApp {
     }
 
     fn draw_edges(&mut self, painter: &egui::Painter) {
+        // LSP "Dim Dependency Edges": while a symbol is active.
+        let lsp = &self.state.settings.lsp;
+        let symbol_active =
+            !self.state.selection.symbols().is_empty() || self.state.lsp.references.is_some();
+        let symbol_dim = (lsp.dim_edges && symbol_active).then_some(lsp.dim_pct);
         let viewport = &self.state.viewport;
         let zoom = viewport.zoom;
         let lod = LodLevel::from_zoom(zoom);
@@ -521,23 +786,36 @@ impl SpatialCodingApp {
             self.state.settings.font_size,
             &mut symbol_rect,
             self.state.loaded_dir.as_deref(),
+            &edge_renderer::CollapseRouting {
+                proxies: self.state.node_store.collapse_proxies(),
+                merge: self.state.settings.folders.merge_collapsed_edges,
+                symbol_dim,
+            },
         );
     }
 
+    /// LSP "Out of View": a marker on the canvas border toward each file
+    /// holding references that is outside the view.
+    fn draw_out_of_view_references(&self, painter: &egui::Painter, canvas_rect: egui::Rect) {
+        if !self.state.settings.lsp.out_of_view {
+            return;
+        }
+        let inner = canvas_rect.shrink(14.0);
+        for (center, count) in crate::ui::lsp_panel::out_of_view_markers(&self.state, canvas_rect) {
+            let at = egui::pos2(center.x.clamp(inner.left(), inner.right()), center.y.clamp(inner.top(), inner.bottom()));
+            painter.circle_filled(at, 9.0, self.state.theme.selection.gamma_multiply(0.85));
+            painter.text(
+                at,
+                egui::Align2::CENTER_CENTER,
+                count.to_string(),
+                egui::FontId::proportional(10.0),
+                egui::Color32::WHITE,
+            );
+        }
+    }
+
     fn collect_node_rects(&self) -> Vec<egui::Rect> {
-        self.state
-            .node_store
-            .all_file_ids()
-            .iter()
-            .filter_map(|&id| {
-                self.state.node_store.get_file(id).map(|n| {
-                    n.world_rect(
-                        self.state.settings.node_width,
-                        self.state.settings.font_size,
-                    )
-                })
-            })
-            .collect()
+        input::shown_node_rects(&self.state)
     }
 }
 
@@ -548,13 +826,30 @@ impl eframe::App for SpatialCodingApp {
         if self.state.git_comparison.is_loading() {
             ctx.request_repaint_after(std::time::Duration::from_millis(100));
         }
+        // Background information: check back slowly, so an idle UI (and a
+        // test's `run()`) is not kept busy while `git status` runs.
+        if self.state.changes.is_loading() {
+            ctx.request_repaint_after(std::time::Duration::from_secs(1));
+        }
+        let now = ctx.input(|i| i.time);
+        let changes_due = self
+            .state
+            .changes
+            .requested_at
+            .is_none_or(|at| now - at >= crate::git::changes::REFRESH_SECONDS);
+        if changes_due && !self.state.changes.is_loading() {
+            workspace::refresh_working_tree_changes(&mut self.state, now);
+        }
         // The indexer's requests carry no context to wake the UI: check back
         // while answers are on their way.
         if self.state.deps.is_waiting() {
             ctx.request_repaint_after(std::time::Duration::from_millis(100));
         } else if std::mem::take(&mut self.layout_when_indexed) {
             self.apply_layout();
-            self.pending_fit = true;
+            self.state.pending_fit = true;
+        } else if self.state.layout_dirty && self.state.layout_settings.auto_layout {
+            // Auto Layout: files were opened or removed and their edges are in.
+            workspace::apply_layout_keeping_selection(&mut self.state);
         }
 
         if self.state.loaded_dir.is_some() && self.file_tree.is_none() {
@@ -586,6 +881,9 @@ impl eframe::App for SpatialCodingApp {
         if self.state.loaded_dir.is_none() {
             self.draw_welcome_screen(ctx);
         }
+
+        let now = ctx.input(|i| i.time);
+        self.save_settings_if_changed(now);
     }
 }
 
@@ -630,6 +928,44 @@ const MONO_ADVANCE: f32 = 0.6;
 /// Folder label height in world units: fits in the parent folder's padding.
 const FOLDER_LABEL_WORLD_PX: f32 = 36.0;
 
+/// Outline of the CST node at a selected edge's end (CST panel).
+const CST_EDGE_NODE_COLOR: egui::Color32 = egui::Color32::from_rgb(0x8b, 0xd5, 0xa6);
+
+/// A folder that only holds one folder and no file of its own: with Merge
+/// Empty Folders it draws nothing and its child's label says both names.
+fn is_pass_through(store: &crate::nodes::node_store::NodeStore, id: u64) -> bool {
+    let Some(folder) = store.get_folder(id) else { return false };
+    if folder.file_count > 0 {
+        return false;
+    }
+    let children = store.folder_nodes.values().filter(|f| store.folder_parent(f.id) == Some(id)).count();
+    children == 1
+}
+
+/// A folder's label with the pass-through folders above it: `a/b/c`.
+fn merged_label(store: &crate::nodes::node_store::NodeStore, id: u64) -> String {
+    let mut parts = vec![store.get_folder(id).map(|f| f.label.clone()).unwrap_or_default()];
+    let mut parent = store.folder_parent(id);
+    while let Some(p) = parent {
+        if !is_pass_through(store, p) {
+            break;
+        }
+        if let Some(f) = store.get_folder(p) {
+            parts.push(f.label.clone());
+        }
+        parent = store.folder_parent(p);
+    }
+    parts.reverse();
+    parts.join("/")
+}
+
+/// Smallest font size, in screen pixels, at which a name label is drawn:
+/// the File nodes / Folders "Min Size" share of 10 px (50% keeps 5 px).
+pub(crate) fn min_label_px(min_size_pct: f32) -> f32 {
+    min_size_pct.clamp(0.0, 1.0) * 10.0
+}
+
+#[allow(clippy::too_many_arguments)]
 fn draw_fitted_label(
     painter: &egui::Painter,
     text: &str,
@@ -637,11 +973,12 @@ fn draw_fitted_label(
     align: egui::Align2,
     max_width: f32,
     max_px: f32,
+    min_px: f32,
     color: egui::Color32,
 ) {
     let chars = text.chars().count().max(1) as f32;
     let px = max_px.min((max_width - 4.0) / (chars * MONO_ADVANCE));
-    if px < 5.0 {
+    if px < min_px.max(1.0) {
         return;
     }
     // Proportional, as v2's file labels; the mono advance over-estimates

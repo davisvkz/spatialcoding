@@ -146,8 +146,8 @@ fn reference_visibility_controls_update_the_shared_graph_policy() {
     app.get_by_label("Levels").click();
     app.get_by_label("Backwards").click();
     app.get_by_label("Highlight Backwards Edges").click();
-    app.get_by_label("Use Gradient").click();
     app.run();
+    assert!(app.app_state().edge_style.use_gradient, "the gradient is on by default, as in v2");
     let cfg = &app.app_state().edge_style;
     assert!(!cfg.show_all);
     assert!(!cfg.relationships[RelationshipType::References.index()].visible);
@@ -204,8 +204,8 @@ fn right_panel_scroll_reaches_lower_controls_without_moving_header_or_canvas() {
     app.app_state_mut().left_panel = None;
     app.app_state_mut().right_panel = Some(RightPanel::Layout);
     app.run();
-    let header = widget_rect(&app, "Close Panel");
-    let before = widget_rect(&app, "AltRev");
+    let header = widget_rect(&app, "Close Layout");
+    let before = widget_rect(&app, "Alt Rev");
     let offset = app.app_state().viewport.offset;
     let zoom = app.app_state().viewport.zoom;
     let pointer = egui::pos2(1200.0, 250.0);
@@ -217,7 +217,7 @@ fn right_panel_scroll_reaches_lower_controls_without_moving_header_or_canvas() {
         egui::Modifiers::NONE,
     );
 
-    let after = widget_rect(&app, "AltRev");
+    let after = widget_rect(&app, "Alt Rev");
     assert!(
         after.top() < before.top(),
         "body did not scroll: {before:?} -> {after:?}"
@@ -227,7 +227,7 @@ fn right_panel_scroll_reaches_lower_controls_without_moving_header_or_canvas() {
         "lower control is reachable: {after:?}"
     );
     assert_eq!(
-        widget_rect(&app, "Close Panel"),
+        widget_rect(&app, "Close Layout"),
         header,
         "header stays fixed"
     );
@@ -267,7 +267,7 @@ fn right_panel_tabs_keep_independent_scroll_positions() {
     app.run();
     let layout_top = widget_rect(&app, "Apply Layout");
     assert!(
-        layout_top.top() > widget_rect(&app, "Close Panel").bottom(),
+        layout_top.top() > widget_rect(&app, "Close Layout").bottom(),
         "new tab starts at its own top"
     );
     wheel(
@@ -276,7 +276,7 @@ fn right_panel_tabs_keep_independent_scroll_positions() {
         egui::vec2(0.0, -400.0),
         egui::Modifiers::NONE,
     );
-    app.get_by_label("Edges").click();
+    app.get_by_label("Dependency Edges").click();
     app.run();
     assert_eq!(
         widget_rect(&app, "Symbol Colors"),
@@ -308,7 +308,7 @@ fn edges_panel_changes_edge_style() {
     app.app_state_mut().right_panel = Some(RightPanel::Layout);
     app.run();
 
-    app.get_by_label("Edges").click();
+    app.get_by_label("Dependency Edges").click();
     app.run();
     assert_eq!(
         app.app_state().right_panel,
@@ -337,7 +337,7 @@ fn clicking_the_active_tab_collapses_the_panel() {
     app.app_state_mut().right_panel = Some(RightPanel::DependencyEdges);
     app.run();
 
-    app.get_by_label("Edges").click();
+    app.get_by_label("Dependency Edges").click();
     app.run();
     assert_eq!(app.app_state().right_panel, None);
     // The rail is always visible now; Layout is the first rail entry.

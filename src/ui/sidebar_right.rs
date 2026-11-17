@@ -1,33 +1,36 @@
-//! Right side: thin icon rail (Layout / LSP / Edges / Folders / Files / CST /
-//! Agent / Perf) plus a docked panel with a fixed header and scrollable body.
+//! Right side: thin icon rail (Layout / LSP Symbols / Dependency Edges /
+//! Folders / File nodes / CST / Agent notes / Performance) plus a docked panel
+//! with a fixed header and scrollable body.
 
-use crate::analysis::dependencies::indexer::ServerProgress;
-use crate::analysis::lsp::manager::ServerStatus;
-use crate::edges::style::{EdgeStyle, GradientGapMode, OpacityMode, RelationshipType};
-use crate::layout::settings::{HAlign, SortMode, VAlign};
 use crate::state::{AppState, RightPanel};
 use crate::ui::icons;
 use crate::ui::panel::{
-    bubble_frame, panel_header, panel_slot_frame, rail_frame, section, PANEL_WIDTH, RAIL_WIDTH,
+    bubble_frame, panel_header, panel_slot_frame, rail_frame, HeaderSpec, PANEL_WIDTH, RAIL_WIDTH,
 };
-use crate::ui::{agent_panel, cst_panel, files_panel, folders_panel, lsp_panel, performance_panel};
+use crate::ui::panel_menus;
+use crate::ui::{
+    agent_panel, cst_panel, edges_panel, files_panel, folders_panel, layout_panel, lsp_panel,
+    performance_panel,
+};
 
 const PANELS: &[(&str, &str, RightPanel)] = &[
     (icons::LAYOUT, "Layout", RightPanel::Layout),
-    (icons::SYMBOLS, "LSP", RightPanel::LspSymbols),
-    (icons::EDGES, "Edges", RightPanel::DependencyEdges),
+    (icons::SYMBOLS, "LSP Symbols", RightPanel::LspSymbols),
+    (icons::EDGES, "Dependency Edges", RightPanel::DependencyEdges),
     (icons::FOLDERS, "Folders", RightPanel::Folders),
-    (icons::FILE_NODES, "Files", RightPanel::FileNodes),
+    (icons::FILE_NODES, "File nodes", RightPanel::FileNodes),
     (icons::CST_TREE, "CST", RightPanel::Cst),
-    (icons::AGENT_NOTES, "Agent", RightPanel::AgentNotes),
-    (icons::PERF_GAUGE, "Perf", RightPanel::Performance),
+    (icons::AGENT_NOTES, "Agent notes", RightPanel::AgentNotes),
+    (icons::PERF_GAUGE, "Performance", RightPanel::Performance),
 ];
 
 pub fn draw_sidebar_right(ctx: &egui::Context, state: &mut AppState) {
+    lsp_panel::draw_advanced_card(ctx, state);
+    lsp_panel::draw_language_servers(ctx, state);
     // Cross-panel housekeeping: these highlight-caches only live while their
     // panel is open.
     if state.right_panel != Some(RightPanel::Cst) {
-        state.cst.hovered = None;
+        state.cst.clear_highlights();
     }
     if state.right_panel != Some(RightPanel::LspSymbols) {
         state.lsp.hovered = None;
@@ -71,12 +74,18 @@ pub fn draw_sidebar_right(ctx: &egui::Context, state: &mut AppState) {
         .show(ctx, |ui| {
             bubble_frame(&theme).show(ui, |ui| {
                 ui.set_min_width(ui.available_width());
-                let heading = if panel == RightPanel::DependencyEdges {
-                    "Dependency Edges"
-                } else {
-                    title
-                };
-                if panel_header(ui, icon_ch, heading) {
+                let entries = panel_menus::menu(panel, state);
+                let mut spec = HeaderSpec::new(icon_ch, title);
+                spec.menu_label = panel_menus::menu_label(panel);
+                spec.menu = entries.iter().map(|(item, _)| item.clone()).collect();
+                if panel == RightPanel::Cst {
+                    spec.switch = Some(("Toggle CST nodes", &mut state.settings.cst.show_canvas));
+                }
+                let header = panel_header(ui, spec);
+                if let Some(i) = header.menu_clicked {
+                    panel_menus::apply(entries[i].1, state);
+                }
+                if header.close {
                     state.right_panel = None;
                 }
                 // Each tab keeps its own offset. The header stays outside the
@@ -85,9 +94,9 @@ pub fn draw_sidebar_right(ctx: &egui::Context, state: &mut AppState) {
                     .id_salt(("right_panel_body", title))
                     .auto_shrink([false, false])
                     .show(ui, |ui| match panel {
-                        RightPanel::Layout => draw_layout_panel(ui, state),
+                        RightPanel::Layout => layout_panel::draw_layout_panel(ui, state),
                         RightPanel::LspSymbols => lsp_panel::draw_lsp_panel(ui, state),
-                        RightPanel::DependencyEdges => draw_edges_panel(ui, state),
+                        RightPanel::DependencyEdges => edges_panel::draw_edges_panel(ui, state),
                         RightPanel::Folders => folders_panel::draw_folders_panel(ui, state),
                         RightPanel::FileNodes => files_panel::draw_files_panel(ui, state),
                         RightPanel::Cst => cst_panel::draw_cst_panel(ui, state),
@@ -100,344 +109,9 @@ pub fn draw_sidebar_right(ctx: &egui::Context, state: &mut AppState) {
         });
 }
 
-fn draw_layout_panel(ui: &mut egui::Ui, state: &mut AppState) {
-    if ui
-        .add(egui::Button::new("Apply Layout").min_size(egui::vec2(ui.available_width(), 28.0)))
-        .clicked()
-    {
-        crate::layout::hierarchical::apply_layout(
-            &mut state.node_store,
-            &state.edge_store,
-            &state.layout_settings,
-        );
-    }
-
-    section(ui, "Advanced Settings", |ui| {
-        ui.label("File Spacing");
-        ui.add(egui::Slider::new(
-            &mut state.layout_settings.file_spacing,
-            50.0..=2000.0,
-        ));
-        ui.label("Folder Spacing");
-        ui.add(egui::Slider::new(
-            &mut state.layout_settings.folder_spacing,
-            50.0..=2000.0,
-        ));
-        ui.label("Folder Padding");
-        ui.add(egui::Slider::new(
-            &mut state.layout_settings.folder_padding,
-            0.0..=500.0,
-        ));
-    });
-
-    section(ui, "Horizontal Align", |ui| {
-        ui.horizontal(|ui| {
-            ui.radio_value(&mut state.layout_settings.h_align, HAlign::Left, "Left");
-            ui.radio_value(&mut state.layout_settings.h_align, HAlign::Center, "Center");
-            ui.radio_value(&mut state.layout_settings.h_align, HAlign::Right, "Right");
-        });
-    });
-
-    section(ui, "Vertical Align", |ui| {
-        ui.horizontal(|ui| {
-            ui.radio_value(&mut state.layout_settings.v_align, VAlign::Top, "Top");
-            ui.radio_value(&mut state.layout_settings.v_align, VAlign::Center, "Center");
-            ui.radio_value(&mut state.layout_settings.v_align, VAlign::Bottom, "Bottom");
-            ui.radio_value(&mut state.layout_settings.v_align, VAlign::Fill, "Fill");
-        });
-    });
-
-    section(ui, "Sort Mode", |ui| {
-        ui.horizontal(|ui| {
-            ui.radio_value(&mut state.layout_settings.sort, SortMode::Off, "Off");
-            ui.radio_value(&mut state.layout_settings.sort, SortMode::Desc, "Desc");
-            ui.radio_value(&mut state.layout_settings.sort, SortMode::Asc, "Asc");
-        });
-        ui.horizontal(|ui| {
-            ui.radio_value(&mut state.layout_settings.sort, SortMode::Alt, "Alt");
-            ui.radio_value(&mut state.layout_settings.sort, SortMode::AltRev, "AltRev");
-        });
-    });
-}
-
-/// One line of the Edges tab about a language server's dependency analysis,
-/// and whether it reports an error.
-pub fn progress_line(p: &ServerProgress) -> (String, bool) {
-    let name = p.server.name();
-    if let Some(err) = &p.error {
-        let first = err.lines().next().unwrap_or_default();
-        return (format!("{name}: {first}"), true);
-    }
-    let counts = format!("{}/{} files", p.done, p.files);
-    let text = match p.status {
-        Some(ServerStatus::Starting) | None => format!("{name}: starting\u{2026} {counts}"),
-        Some(ServerStatus::Indexing) => format!("{name}: indexing\u{2026} {counts}"),
-        Some(ServerStatus::Failed(ref err)) => return (format!("{name}: {err}"), true),
-        Some(ServerStatus::Ready) if p.done == p.files => {
-            format!("{name}: {} files analyzed", p.files)
-        }
-        Some(ServerStatus::Ready) => format!("{name}: {counts}"),
-    };
-    (text, false)
-}
-
-fn draw_edges_panel(ui: &mut egui::Ui, state: &mut AppState) {
-    let comparison_ready = state.git_comparison.is_ready();
-    section(ui, "Visibility", |ui| {
-        ui.checkbox(&mut state.edge_style.show_all, "All")
-            .on_hover_text(
-                "Show all enabled relationship types; otherwise show only the current selection.",
-            );
-        egui::CollapsingHeader::new("Relationship types")
-            .default_open(true)
-            .show(ui, |ui| {
-                for kind in RelationshipType::ALL {
-                    let settings = &mut state.edge_style.relationships[kind.index()];
-                    ui.horizontal(|ui| {
-                        ui.checkbox(&mut settings.visible, kind.label());
-                        ui.color_edit_button_rgb(&mut settings.color);
-                    });
-                    ui.weak(kind.description());
-                }
-            });
-        ui.weak("Highlights");
-        ui.horizontal(|ui| {
-            ui.checkbox(&mut state.edge_style.highlight_selected, "Selected");
-            ui.add_enabled(
-                comparison_ready,
-                egui::Checkbox::new(&mut state.edge_style.highlight_changes, "Changes"),
-            )
-            .on_disabled_hover_text(
-                "Refresh the Git comparison below to highlight proven graph changes.",
-            );
-        });
-        ui.checkbox(&mut state.edge_style.highlight_backwards, "Backwards")
-            .on_hover_text("Highlight incoming dependencies of the selected symbols/files.");
-        ui.weak("Folder nesting levels");
-        ui.checkbox(&mut state.edge_style.folder_levels, "Levels")
-            .on_hover_text(
-                "Color connections by their workspace-relative source and target folders.",
-            );
-        ui.label(format!("Depth    L{}", state.edge_style.folder_depth));
-        ui.add_enabled(
-            state.edge_style.folder_levels,
-            egui::Slider::new(&mut state.edge_style.folder_depth, 1..=12),
-        );
-        ui.separator();
-        ui.checkbox(
-            &mut state.edge_style.highlight_reverse_layout,
-            "Highlight Backwards Edges",
-        )
-        .on_hover_text(
-            "Highlight edges whose source is to the right of their target on the canvas.",
-        );
-    });
-    section(ui, "Analysis (language servers)", |ui| {
-        let progress = state.deps.progress(&state.lsp.manager);
-        if progress.is_empty() {
-            ui.weak("Open source files to find their dependencies.");
-        }
-        for p in &progress {
-            match progress_line(p) {
-                (text, true) => ui.colored_label(ui.visuals().error_fg_color, text),
-                (text, false) => ui.label(text),
-            };
-        }
-    });
-
-    section(ui, "Style", |ui| {
-        ui.horizontal(|ui| {
-            ui.radio_value(&mut state.edge_style.style, EdgeStyle::Bezier, "Bezier");
-            ui.radio_value(&mut state.edge_style.style, EdgeStyle::Step, "Step");
-        });
-        ui.horizontal(|ui| {
-            ui.radio_value(&mut state.edge_style.style, EdgeStyle::Line, "Line");
-            ui.radio_value(&mut state.edge_style.style, EdgeStyle::Pcb, "PCB");
-        });
-    });
-
-    section(ui, "Opacity", |ui| {
-        ui.horizontal(|ui| {
-            ui.radio_value(
-                &mut state.edge_style.opacity_mode,
-                OpacityMode::Full,
-                "Full",
-            );
-            ui.radio_value(
-                &mut state.edge_style.opacity_mode,
-                OpacityMode::Depth,
-                "Depth",
-            );
-        });
-    });
-
-    section(ui, "Connections", |ui| {
-        ui.checkbox(&mut state.edge_style.show_ports, "Ports")
-            .on_hover_text(
-                "Mark each connected line with a circle on the node border and a row band; \
-                 edges end at the circle. Off: edges touch the identifier.",
-            );
-        ui.add_enabled_ui(state.edge_style.show_ports, |ui| {
-            ui.horizontal(|ui| {
-                ui.color_edit_button_rgb(&mut state.edge_style.import_port_color);
-                ui.label("Import");
-                ui.color_edit_button_rgb(&mut state.edge_style.symbol_port_color);
-                ui.label("Symbol");
-            });
-        });
-        ui.checkbox(
-            &mut state.edge_style.show_connection_markers,
-            "Connection Markers",
-        );
-        ui.checkbox(&mut state.edge_style.show_arrow_heads, "Arrow Heads");
-        ui.checkbox(&mut state.edge_style.only_selected, "Only Selected")
-            .on_hover_text("Arrow heads only on the edges of the selection");
-        ui.checkbox(&mut state.edge_style.scale_arrow_heads, "Scale Arrow Heads");
-        ui.label("Min Size %");
-        ui.add(egui::Slider::new(
-            &mut state.edge_style.min_size_pct,
-            0.0..=1.0,
-        ));
-    });
-
-    section(ui, "Gradient", |ui| {
-        ui.checkbox(&mut state.edge_style.use_gradient, "Use Gradient");
-        ui.add_enabled_ui(state.edge_style.use_gradient, |ui| {
-            ui.horizontal(|ui| {
-                ui.radio_value(
-                    &mut state.edge_style.gradient_gap_mode,
-                    GradientGapMode::Percent,
-                    "%",
-                );
-                ui.radio_value(
-                    &mut state.edge_style.gradient_gap_mode,
-                    GradientGapMode::Fixed,
-                    "Fixed",
-                );
-            });
-            ui.label("Gap %");
-            ui.add_enabled(
-                state.edge_style.gradient_gap_mode == GradientGapMode::Percent,
-                egui::Slider::new(&mut state.edge_style.gradient_gap_pct, 0.0..=1.0),
-            );
-            ui.label("Min Dist (px)");
-            ui.add_enabled(
-                state.edge_style.gradient_gap_mode == GradientGapMode::Fixed,
-                egui::Slider::new(&mut state.edge_style.gradient_min_dist_px, 0.0..=40000.0),
-            );
-        });
-    });
-
-    section(ui, "Diff", |ui| {
-        let baseline_label = ui.label("Git baseline");
-        if ui
-            .add(egui::TextEdit::singleline(&mut state.git_comparison.baseline).hint_text("HEAD"))
-            .labelled_by(baseline_label.id)
-            .changed()
-        {
-            crate::workspace::invalidate_git_comparison(state);
-        }
-        let can_refresh = state.loaded_dir.is_some()
-            && !state.node_store.file_nodes.is_empty()
-            && !state.git_comparison.is_loading();
-        if ui
-            .add_enabled(can_refresh, egui::Button::new("Refresh comparison"))
-            .clicked()
-        {
-            crate::workspace::refresh_git_comparison(state);
-        }
-        let ready = state.git_comparison.is_ready();
-        ui.add_enabled(ready, egui::Checkbox::new(&mut state.edge_style.diff_colors, "Diff Colors"))
-            .on_hover_text("Added = green; deleted = red. Other highlight colors are overridden only for proven changes.");
-        ui.add_enabled(
-            ready,
-            egui::Checkbox::new(&mut state.edge_style.show_deleted, "Deleted"),
-        )
-        .on_hover_text(
-            "Baseline-only links use file headers, never obsolete identifier positions.",
-        );
-        use crate::git::comparison::ComparisonStatus;
-        match &state.git_comparison.status {
-            ComparisonStatus::Idle => {
-                ui.weak("Not compared; refresh after changing the canvas.");
-            }
-            ComparisonStatus::Loading => {
-                ui.spinner();
-                ui.label("Comparing Git graph…");
-            }
-            ComparisonStatus::Unavailable(message) | ComparisonStatus::Error(message) => {
-                ui.colored_label(ui.visuals().error_fg_color, message);
-            }
-            ComparisonStatus::Ready => {
-                if let Some(diff) = &state.git_comparison.diff {
-                    let (added, deleted, unchanged) = diff.counts();
-                    ui.label(format!(
-                        "Baseline: {}",
-                        &diff.commit[..diff.commit.len().min(12)]
-                    ));
-                    ui.label(format!("+{added} / −{deleted} / {unchanged} unchanged"));
-                    let uncovered = state
-                        .edge_store
-                        .all_edges()
-                        .filter(|e| e.change == crate::edges::edge_store::EdgeChange::Uncompared)
-                        .count();
-                    ui.weak(format!("{uncovered} symbol links not compared."));
-                }
-            }
-        }
-        ui.weak("Coverage: local module/document links, between open files only. LSP-only symbol links are not compared.");
-        ui.weak("Canvas snapshot vs commit (not index). Reopen files after external edits.");
-    });
-
-    egui::CollapsingHeader::new("Re-export & Barrel")
-        .default_open(false)
-        .show(ui, |ui| {
-            ui.checkbox(&mut state.edge_style.show_reexport_edges, "Show re-export edges");
-            ui.horizontal(|ui| {
-                ui.checkbox(&mut state.edge_style.highlight_reexport, "Highlight");
-                ui.color_edit_button_rgb(&mut state.edge_style.reexport_color);
-            });
-            ui.add_space(4.0);
-            ui.checkbox(&mut state.edge_style.show_barrel_edges, "Show barrel edges");
-            ui.horizontal(|ui| {
-                ui.checkbox(&mut state.edge_style.highlight_barrel, "Highlight");
-                ui.color_edit_button_rgb(&mut state.edge_style.barrel_color);
-            });
-            ui.add_space(4.0);
-            ui.weak("Barrel = index.{ts,tsx,js,jsx,mjs,cjs} | mod.rs | __init__.py with \u{2265} 4 re-exports.");
-        });
-
-    egui::CollapsingHeader::new("Symbol Colors")
-        .default_open(true)
-        .show(ui, |ui| {
-            let mut counts: std::collections::HashMap<&str, usize> =
-                std::collections::HashMap::new();
-            for e in state.edge_store.all_edges() {
-                if let Some(label) = &e.label {
-                    *counts.entry(label.as_str()).or_default() += 1;
-                }
-            }
-            let mut kinds: Vec<String> = state.edge_style.symbol_colors.keys().cloned().collect();
-            kinds.sort();
-            for kind in &kinds {
-                let count = counts.get(kind.as_str()).copied().unwrap_or(0);
-                ui.horizontal(|ui| {
-                    if let Some(color) = state.edge_style.symbol_colors.get_mut(kind.as_str()) {
-                        ui.color_edit_button_rgb(color);
-                    }
-                    ui.label(kind.as_str());
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        ui.weak(format!("{count}"));
-                    });
-                });
-            }
-        });
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::analysis::lsp::ServerId;
 
     /// Space left for the canvas after the right sidebar draws. A SidePanel
     /// whose frame is wider than its exact width reserves the excess without
@@ -476,42 +150,4 @@ mod tests {
         }
     }
 
-    fn progress(done: usize, status: Option<ServerStatus>, error: Option<&str>) -> ServerProgress {
-        ServerProgress {
-            server: ServerId::Rust,
-            files: 3,
-            done,
-            status,
-            error: error.map(str::to_string),
-        }
-    }
-
-    #[test]
-    fn progress_line_reports_indexing_counts_and_errors() {
-        let name = ServerId::Rust.name();
-        assert_eq!(
-            progress_line(&progress(1, Some(ServerStatus::Indexing), None)),
-            (format!("{name}: indexing\u{2026} 1/3 files"), false)
-        );
-        assert_eq!(
-            progress_line(&progress(0, None, None)).0,
-            format!("{name}: starting\u{2026} 0/3 files")
-        );
-        assert_eq!(
-            progress_line(&progress(3, Some(ServerStatus::Ready), None)).0,
-            format!("{name}: 3 files analyzed")
-        );
-        assert_eq!(
-            progress_line(&progress(2, Some(ServerStatus::Ready), None)).0,
-            format!("{name}: 2/3 files")
-        );
-        assert_eq!(
-            progress_line(&progress(
-                3,
-                Some(ServerStatus::Failed("x".into())),
-                Some("not found\nhint")
-            )),
-            (format!("{name}: not found"), true)
-        );
-    }
 }

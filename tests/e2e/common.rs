@@ -195,6 +195,19 @@ pub fn click_at(harness: &mut App, pos: Pos2, modifiers: Modifiers) {
     harness.run();
 }
 
+/// Left double-click at a screen position. egui needs both clicks within
+/// 0.3 s, so use an app stepping 1/60 s frames (`app_with_stepping`).
+pub fn double_click_at(harness: &mut App, pos: Pos2) {
+    send(harness, Event::PointerMoved(pos));
+    for _ in 0..2 {
+        button(harness, pos, true, Modifiers::NONE);
+        button(harness, pos, false, Modifiers::NONE);
+    }
+    for _ in 0..30 {
+        harness.step();
+    }
+}
+
 /// Left-button drag from `from` to `to` in several small moves.
 pub fn drag(harness: &mut App, from: Pos2, to: Pos2) {
     drag_with(harness, PointerButton::Primary, from, to);
@@ -260,4 +273,27 @@ pub fn wants_repaint(harness: &App) -> bool {
 
 pub fn assert_close(a: Pos2, b: Pos2) {
     assert!((a - b).length() < 1e-2, "{a:?} != {b:?}");
+}
+
+/// Every shape the last frame painted, with `Shape::Vec` flattened.
+pub fn frame_shapes(app: &App) -> Vec<egui::Shape> {
+    fn flatten(shape: &egui::Shape, out: &mut Vec<egui::Shape>) {
+        match shape {
+            egui::Shape::Vec(v) => v.iter().for_each(|s| flatten(s, out)),
+            s => out.push(s.clone()),
+        }
+    }
+    let mut out = Vec::new();
+    for clipped in &app.output().shapes {
+        flatten(&clipped.shape, &mut out);
+    }
+    out
+}
+
+/// How many painted text shapes read exactly `text`.
+pub fn texts_equal(shapes: &[egui::Shape], text: &str) -> usize {
+    shapes
+        .iter()
+        .filter(|s| matches!(s, egui::Shape::Text(t) if t.galley.job.text == text))
+        .count()
 }

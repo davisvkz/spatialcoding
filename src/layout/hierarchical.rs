@@ -6,14 +6,19 @@
 //! its left. Cycles are broken by dropping DFS back edges, so every member
 //! of a cycle still gets its own column. Each column is ordered once by the
 //! barycenter of its predecessors to cut edge crossings.
+//!
+//! Rank Breaking splits a column that is much taller than it is wide into
+//! side-by-side sub-columns of the same rank; H Align places narrower items
+//! inside their column, and V Align places each column (Fill spreads its
+//! items over the tallest column's height).
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 
 use egui::{Pos2, Vec2};
 
 use crate::edges::edge_store::EdgeStore;
-use crate::layout::settings::{LayoutSettings, SortMode, VAlign};
-use crate::nodes::folder_node::FOLDER_HEADER_HEIGHT;
+use crate::layout::settings::{HAlign, LayoutSettings, SortMode, VAlign};
+use crate::nodes::folder_node::{COLLAPSED_FOLDER_SIZE, FOLDER_HEADER_HEIGHT};
 use crate::nodes::node_store::NodeStore;
 
 const NODE_WIDTH: f32 = 700.0;
@@ -22,6 +27,9 @@ const FONT_SIZE: f32 = 12.0;
 /// Vertical gap between items of one column, as a share of the horizontal
 /// spacing: v2 stacks files much tighter than it spaces columns.
 const VERTICAL_GAP_RATIO: f32 = 0.5;
+
+/// Gap between a collapsed folder's card and the revealed files under it.
+const REVEALED_GAP: f32 = 24.0;
 
 /// A box the layout places: a file node or a folder cluster.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -57,16 +65,33 @@ pub fn apply_layout(nodes: &mut NodeStore, edges: &EdgeStore, settings: &LayoutS
     // the top level down to the item that holds it.
     let mut children: BTreeMap<Group, Vec<Item>> = BTreeMap::new();
     let mut group_of: HashMap<Item, Group> = HashMap::new();
+    // A collapsed folder is one compact box: what it holds is not laid out
+    // (its edges still rank the box, through the chains below).
+    let hidden_folders = nodes.layout_hidden_folders();
+    let collapsed = |fid: u64| nodes.layout_collapsed(fid);
+    // Revealed files of each card, in a stable order.
+    let mut revealed: HashMap<u64, Vec<u64>> = HashMap::new();
+    let mut revealed_ids: Vec<u64> = nodes.view.revealed_files.iter().copied().collect();
+    revealed_ids.sort();
+    for file in revealed_ids {
+        if let Some(card) = nodes.layout_card(file) {
+            revealed.entry(card).or_default().push(file);
+        }
+    }
     let folder_ids: Vec<u64> = nodes.all_folder_ids();
     for &fid in &folder_ids {
         let parent = nodes.folder_parent(fid);
-        children.entry(parent).or_default().push(Item::Folder(fid));
         group_of.insert(Item::Folder(fid), parent);
+        if !hidden_folders.contains(&fid) {
+            children.entry(parent).or_default().push(Item::Folder(fid));
+        }
     }
     for fid in nodes.all_file_ids() {
         let group = nodes.file_folder(fid);
-        children.entry(group).or_default().push(Item::File(fid));
         group_of.insert(Item::File(fid), group);
+        if !group.is_some_and(|g| collapsed(g) || hidden_folders.contains(&g)) {
+            children.entry(group).or_default().push(Item::File(fid));
+        }
     }
     // Folders without any file below them have nothing to lay out.
     let mut has_files: HashSet<u64> = HashSet::new();
@@ -85,6 +110,8 @@ pub fn apply_layout(nodes: &mut NodeStore, edges: &EdgeStore, settings: &LayoutS
             Item::File(_) => true,
         });
     }
+    // The contents of collapsed folders are placed with them, not on their own.
+    children.retain(|group, _| !group.is_some_and(|g| collapsed(g) || hidden_folders.contains(&g)));
 
     let chain = |file: u64| -> Vec<Item> {
         // Top-down: outermost folder first, the file last.
@@ -136,7 +163,7 @@ pub fn apply_layout(nodes: &mut NodeStore, edges: &EdgeStore, settings: &LayoutS
     for group in groups {
         let items = &children[&group];
         let item_edges = group_edges.get(&group).unwrap_or(&empty);
-        layout_group(group, items, item_edges, nodes, settings, &mut placement);
+        layout_group(group, items, item_edges, nodes, settings, &revealed, &mut placement);
     }
 
     // Top-down: absolute positions.
@@ -158,6 +185,18 @@ pub fn apply_layout(nodes: &mut NodeStore, edges: &EdgeStore, settings: &LayoutS
                         node.position = pos;
                     }
                 }
+                Item::Folder(id) if nodes.layout_collapsed(id) => {
+                    if let Some(folder) = nodes.get_folder_mut(id) {
+                        folder.collapsed_origin = Some(pos);
+                    }
+                    let mut y = pos.y + COLLAPSED_FOLDER_SIZE.y + REVEALED_GAP;
+                    for &file in revealed.get(&id).map(Vec::as_slice).unwrap_or(&[]) {
+                        if let Some(node) = nodes.get_file_mut(file) {
+                            node.position = Pos2::new(pos.x, y);
+                            y += node.world_rect(NODE_WIDTH, FONT_SIZE).height() + REVEALED_GAP;
+                        }
+                    }
+                }
                 Item::Folder(id) => stack.push((Some(id), pos + inset)),
             }
         }
@@ -172,6 +211,7 @@ fn layout_group(
     item_edges: &HashSet<(Item, Item)>,
     nodes: &NodeStore,
     settings: &LayoutSettings,
+    revealed: &HashMap<u64, Vec<u64>>,
     placement: &mut Placement,
 ) {
     if items.is_empty() {
@@ -185,6 +225,18 @@ fn layout_group(
                 .get_file(id)
                 .map(|n| n.world_rect(NODE_WIDTH, FONT_SIZE).size())
                 .unwrap_or(Vec2::new(NODE_WIDTH, 100.0)),
+            Item::Folder(id) if nodes.layout_collapsed(id) => {
+                // The card, then its revealed files stacked under it.
+                revealed.get(&id).map_or(COLLAPSED_FOLDER_SIZE, |files| {
+                    files.iter().fold(COLLAPSED_FOLDER_SIZE, |acc, &f| {
+                        let size = nodes
+                            .get_file(f)
+                            .map(|n| n.world_rect(NODE_WIDTH, FONT_SIZE).size())
+                            .unwrap_or(Vec2::ZERO);
+                        Vec2::new(acc.x.max(size.x), acc.y + REVEALED_GAP + size.y)
+                    })
+                })
+            }
             Item::Folder(id) => {
                 let content = sizes.get(&Some(id)).copied().unwrap_or(Vec2::ZERO);
                 content + Vec2::new(pad * 2.0, pad * 2.0 + FOLDER_HEADER_HEIGHT)
@@ -203,17 +255,28 @@ fn layout_group(
     }
     order_by_barycenter(&mut columns, item_edges);
 
-    let sizes: Vec<Vec<Vec2>> = columns
+    let item_size: HashMap<Item, Vec2> = items
         .iter()
-        .map(|col| col.iter().map(|&it| size_of(it, &placement.sizes)).collect())
+        .map(|&it| (it, size_of(it, &placement.sizes)))
         .collect();
     let v_gap = settings.file_spacing * VERTICAL_GAP_RATIO;
+    let columns = break_ranks(columns, &item_size, v_gap, settings.rank_breaking);
+
+    let sizes: Vec<Vec<Vec2>> = columns
+        .iter()
+        .map(|col| col.iter().map(|it| item_size[it]).collect())
+        .collect();
     let col_heights: Vec<f32> = sizes
         .iter()
-        .map(|col| col.iter().map(|s| s.y).sum::<f32>() + col.len().saturating_sub(1) as f32 * v_gap)
+        .map(|col| column_height(col, v_gap))
         .collect();
     let height = col_heights.iter().copied().fold(0.0, f32::max);
     let has_folder = |col: &[Item]| col.iter().any(|it| matches!(it, Item::Folder(_)));
+    let h_share = match settings.h_align {
+        HAlign::Left => 0.0,
+        HAlign::Center => 0.5,
+        HAlign::Right => 1.0,
+    };
 
     let mut x = 0.0;
     for (r, column) in columns.iter().enumerate() {
@@ -221,14 +284,22 @@ fn layout_group(
             continue;
         }
         let width = sizes[r].iter().map(|s| s.x).fold(0.0, f32::max);
-        let mut y = match settings.v_align {
-            VAlign::Center => (height - col_heights[r]) * 0.5,
-            VAlign::Bottom => height - col_heights[r],
-            VAlign::Top | VAlign::Fill => 0.0,
+        // Fill spreads a column's items over the full height; a lone item
+        // is centered.
+        let (mut y, gap_y) = match settings.v_align {
+            VAlign::Center => ((height - col_heights[r]) * 0.5, v_gap),
+            VAlign::Bottom => (height - col_heights[r], v_gap),
+            VAlign::Top => (0.0, v_gap),
+            VAlign::Fill if column.len() > 1 => {
+                let used: f32 = sizes[r].iter().map(|s| s.y).sum();
+                (0.0, (height - used) / (column.len() - 1) as f32)
+            }
+            VAlign::Fill => ((height - col_heights[r]) * 0.5, v_gap),
         };
         for (i, &item) in column.iter().enumerate() {
-            placement.offsets.insert(item, Vec2::new(x, y));
-            y += sizes[r][i].y + v_gap;
+            let item_x = x + (width - sizes[r][i].x) * h_share;
+            placement.offsets.insert(item, Vec2::new(item_x, y));
+            y += sizes[r][i].y + gap_y;
         }
         let next_has_folder = columns.get(r + 1).is_some_and(|c| has_folder(c));
         let gap = if has_folder(column) || next_has_folder {
@@ -246,6 +317,49 @@ fn layout_group(
         .map(|c| if has_folder(c) { settings.folder_spacing } else { settings.file_spacing })
         .unwrap_or(0.0);
     placement.sizes.insert(group, Vec2::new((x - last_gap).max(0.0), height));
+}
+
+fn column_height(sizes: &[Vec2], v_gap: f32) -> f32 {
+    sizes.iter().map(|s| s.y).sum::<f32>() + sizes.len().saturating_sub(1) as f32 * v_gap
+}
+
+/// Rank Breaking: a column taller than `level` times its width is split into
+/// `ceil(height / (level * width))` side-by-side columns of balanced height,
+/// keeping its order. Lower levels split sooner; `0` (Off) keeps one column
+/// per rank.
+fn break_ranks(columns: Vec<Vec<Item>>, size: &HashMap<Item, Vec2>, v_gap: f32, level: u32) -> Vec<Vec<Item>> {
+    if level == 0 {
+        return columns;
+    }
+    let mut out = Vec::with_capacity(columns.len());
+    for column in columns {
+        let sizes: Vec<Vec2> = column.iter().map(|it| size[it]).collect();
+        let width = sizes.iter().map(|s| s.x).fold(0.0, f32::max).max(1.0);
+        let height = column_height(&sizes, v_gap);
+        let limit = level as f32 * width;
+        let parts = ((height / limit).ceil() as usize).clamp(1, column.len().max(1));
+        if parts <= 1 {
+            out.push(column);
+            continue;
+        }
+        let target = height / parts as f32;
+        let mut current: Vec<Item> = Vec::new();
+        let mut current_h = 0.0;
+        let mut left = parts;
+        for (i, item) in column.iter().enumerate() {
+            let h = sizes[i].y;
+            let remaining_items = column.len() - i;
+            if !current.is_empty() && left > 1 && (current_h + h > target || remaining_items < left) {
+                out.push(std::mem::take(&mut current));
+                current_h = 0.0;
+                left -= 1;
+            }
+            current_h += h + v_gap;
+            current.push(*item);
+        }
+        out.push(current);
+    }
+    out
 }
 
 /// Longest-path rank of each item after dropping the back edges a DFS finds
@@ -379,7 +493,7 @@ fn interleave<T: Copy>(items: &mut [T]) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
 
     const NODE_WIDTH: f32 = 700.0;
     const SPACING: f32 = 100.0;
@@ -621,6 +735,116 @@ mod tests {
         apply_layout(&mut nodes, &edges, &settings(SortMode::Asc, VAlign::Top));
 
         assert!(pos(&nodes, ids[3]).y < pos(&nodes, ids[2]).y, "d follows a, c follows b");
+    }
+
+    /// `n` files of `lines` lines each, all starting at `UNPLACED`.
+    fn tall_store(n: usize, lines: usize) -> (NodeStore, Vec<u64>) {
+        let mut nodes = NodeStore::default();
+        let ids = (0..n)
+            .map(|i| nodes.add_file(PathBuf::from(format!("t{i}.rs")), "x\n".repeat(lines), UNPLACED))
+            .collect();
+        (nodes, ids)
+    }
+
+    #[test]
+    fn rank_breaking_off_keeps_one_column_and_low_levels_split_it() {
+        let (mut nodes, ids) = tall_store(4, 200);
+        let mut s = settings(SortMode::Asc, VAlign::Top);
+        s.rank_breaking = 0;
+        apply_layout(&mut nodes, &EdgeStore::default(), &s);
+        assert!(ids.iter().all(|&id| pos(&nodes, id).x == 0.0), "Off: one column");
+
+        s.rank_breaking = 1;
+        apply_layout(&mut nodes, &EdgeStore::default(), &s);
+        let mut xs: Vec<f32> = ids.iter().map(|&id| pos(&nodes, id).x).collect();
+        xs.dedup();
+        assert_eq!(xs, vec![0.0, COLUMN, 2.0 * COLUMN, 3.0 * COLUMN], "each tall file gets its own sub-column, in order");
+        assert!(ids.iter().all(|&id| pos(&nodes, id).y == 0.0));
+
+        // A level high enough for the whole column keeps it whole.
+        let total: f32 = ids.iter().map(|&id| height(&nodes, id)).sum();
+        s.rank_breaking = 8;
+        if total + 3.0 * SPACING * VERTICAL_GAP_RATIO <= 8.0 * NODE_WIDTH {
+            apply_layout(&mut nodes, &EdgeStore::default(), &s);
+            assert!(ids.iter().all(|&id| pos(&nodes, id).x == 0.0));
+        }
+    }
+
+    #[test]
+    fn split_columns_keep_balanced_order() {
+        let level = 2;
+        let (mut nodes, ids) = tall_store(6, 120);
+        let mut s = settings(SortMode::Asc, VAlign::Top);
+        s.rank_breaking = level;
+        apply_layout(&mut nodes, &EdgeStore::default(), &s);
+        let xs: Vec<f32> = ids.iter().map(|&id| pos(&nodes, id).x).collect();
+        assert!(xs.windows(2).all(|w| w[0] <= w[1]), "order kept across sub-columns: {xs:?}");
+        assert!(xs.last().unwrap() > &0.0, "the column was split: {xs:?}");
+        for &id in &ids {
+            let column: Vec<u64> = ids.iter().copied().filter(|&o| pos(&nodes, o).x == pos(&nodes, id).x).collect();
+            let h: f32 = column.iter().map(|&o| height(&nodes, o)).sum::<f32>()
+                + (column.len() - 1) as f32 * SPACING * VERTICAL_GAP_RATIO;
+            assert!(h <= level as f32 * NODE_WIDTH + height(&nodes, id), "sub-column of {id} too tall: {h}");
+        }
+    }
+
+    #[test]
+    fn fill_spreads_a_short_column_over_the_tallest_one() {
+        // a -> b, a -> c, a -> d: column 1 holds three files, column 0 one tall file.
+        let mut nodes = NodeStore::default();
+        let a = nodes.add_file(PathBuf::from("a.rs"), "x\n".repeat(200), UNPLACED);
+        let small: Vec<u64> = (0..3)
+            .map(|i| nodes.add_file(PathBuf::from(format!("s{i}.rs")), "x\n".into(), UNPLACED))
+            .collect();
+        let mut edges = EdgeStore::default();
+        for &b in &small {
+            edges.add(a, b, None);
+        }
+        let mut s = settings(SortMode::Asc, VAlign::Fill);
+        s.rank_breaking = 0;
+        apply_layout(&mut nodes, &edges, &s);
+        let tall = height(&nodes, a);
+        let first = pos(&nodes, small[0]).y;
+        let last = small[2];
+        assert_close(first, 0.0);
+        assert_close(pos(&nodes, last).y + height(&nodes, last), tall);
+        let middle = pos(&nodes, small[1]).y + height(&nodes, small[1]) / 2.0;
+        assert_close(middle, tall / 2.0);
+    }
+
+    #[test]
+    fn h_align_places_narrow_items_inside_their_column() {
+        // Column 0 holds a folder (wider than a file) and a file.
+        let mut nodes = NodeStore::default();
+        let root = PathBuf::from("/r");
+        let folder = nodes.add_folder(root.join("pkg"), 0);
+        let inner = nodes.add_file(root.join("pkg/inner.rs"), "x\n".into(), UNPLACED);
+        nodes.get_folder_mut(folder).unwrap().children_ids.push(inner);
+        let top = nodes.add_file(root.join("top.rs"), "x\n".into(), UNPLACED);
+        let folder_width = NODE_WIDTH + 2.0 * LayoutSettings::default().folder_padding;
+        for (align, share) in [(HAlign::Left, 0.0), (HAlign::Center, 0.5), (HAlign::Right, 1.0)] {
+            let mut s = settings(SortMode::Asc, VAlign::Top);
+            s.h_align = align;
+            apply_layout(&mut nodes, &EdgeStore::default(), &s);
+            assert_close(pos(&nodes, top).x, (folder_width - NODE_WIDTH) * share);
+        }
+    }
+
+    #[test]
+    fn a_collapsed_folder_is_laid_out_as_one_compact_box() {
+        let (mut nodes, ids) = tree(&["/r/pkg/a.rs", "/r/pkg/b.rs", "/r/top.rs"]);
+        let pkg = nodes.folder_containing(Path::new("/r/pkg")).unwrap();
+        nodes.get_folder_mut(pkg).unwrap().collapsed = true;
+        let before: Vec<egui::Pos2> = ids[..2].iter().map(|&id| pos(&nodes, id)).collect();
+        let mut edges = EdgeStore::default();
+        edges.add(ids[2], ids[0], None);
+        apply_layout(&mut nodes, &edges, &settings(SortMode::Asc, VAlign::Top));
+
+        let after: Vec<egui::Pos2> = ids[..2].iter().map(|&id| pos(&nodes, id)).collect();
+        assert_eq!(before, after, "hidden files keep their place");
+        let origin = nodes.get_folder(pkg).unwrap().collapsed_origin.expect("placed");
+        assert!(pos(&nodes, ids[2]).x < origin.x, "top.rs imports into pkg: it sits left of the box");
+        assert_close(origin.x - pos(&nodes, ids[2]).x, NODE_WIDTH + LayoutSettings::default().folder_spacing);
     }
 
     #[test]

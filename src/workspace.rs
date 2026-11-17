@@ -21,6 +21,7 @@ const GRID_STEP: egui::Vec2 = egui::vec2(750.0, 400.0);
 pub fn open_file(state: &mut AppState, path: &Path) -> u64 {
     let content = read_file_content(path).unwrap_or_default();
     let id = add_file_node(state, path, content);
+    state.layout_dirty = true;
     rebuild_edges(state);
     id
 }
@@ -34,6 +35,7 @@ pub fn open_files(state: &mut AppState, paths: &[PathBuf]) -> Vec<u64> {
         .values()
         .map(|n| n.path.clone())
         .collect();
+    let folders_before: HashSet<u64> = state.node_store.folder_nodes.keys().copied().collect();
     let mut ids = Vec::new();
     for path in paths {
         if !open.insert(path.clone()) {
@@ -45,8 +47,30 @@ pub fn open_files(state: &mut AppState, paths: &[PathBuf]) -> Vec<u64> {
         }
     }
     if !ids.is_empty() {
+        let mut new_folders: Vec<u64> = state
+            .node_store
+            .folder_nodes
+            .keys()
+            .copied()
+            .filter(|id| !folders_before.contains(id))
+            .collect();
+        new_folders.sort();
+        state.last_opened_folders = new_folders;
+        state.layout_dirty = true;
         rebuild_edges(state);
     }
+    ids
+}
+
+/// Opens many files at once (Open all, a folder scope, folders with
+/// changes): like [`open_files`], then the folders it created at the
+/// collapse depth start collapsed when "Open with collapsed folders by
+/// default" is on.
+pub fn open_files_in_bulk(state: &mut AppState, paths: &[PathBuf]) -> Vec<u64> {
+    state.last_opened_folders.clear();
+    let ids = open_files(state, paths);
+    let new_folders = std::mem::take(&mut state.last_opened_folders);
+    crate::folder_actions::collapse_new_folders(state, &new_folders, ids.len());
     ids
 }
 
@@ -65,7 +89,7 @@ pub fn open_all_files(state: &mut AppState) -> Vec<u64> {
     };
     let mut paths = Vec::new();
     collect_files(&tree, &mut paths);
-    open_files(state, &paths)
+    open_files_in_bulk(state, &paths)
 }
 
 fn collect_files(node: &TreeNode, out: &mut Vec<PathBuf>) {
@@ -86,6 +110,13 @@ fn add_file_node(state: &mut AppState, path: &Path, content: String) -> u64 {
         (count / GRID_COLUMNS) as f32 * GRID_STEP.y,
     );
     let file_id = state.node_store.add_file(path.to_path_buf(), content, position);
+    let files = &state.settings.files;
+    if files.collapse_long
+        && let Some(node) = state.node_store.get_file_mut(file_id)
+        && node.line_count > files.long_max_lines
+    {
+        node.collapsed = true;
+    }
 
     if let Some(parent_dir) = path.parent() {
         let folder_id = find_or_create_folder(state, parent_dir);
@@ -121,6 +152,7 @@ fn find_or_create_folder(state: &mut AppState, dir: &Path) -> u64 {
 /// Removes every node, folder, edge and the selection from the canvas.
 pub fn clear_canvas(state: &mut AppState) {
     state.git_comparison.invalidate();
+    state.top_level_highlights.clear();
     state.node_store.clear();
     state.edge_store.clear();
     state.selection.clear();
@@ -132,6 +164,7 @@ pub fn remove_nodes(state: &mut AppState, ids: &[u64]) {
     state.git_comparison.invalidate();
     let removed: HashSet<u64> = ids.iter().copied().collect();
     for &id in ids {
+        state.top_level_highlights.remove(&id);
         for edge_id in state.edge_store.edges_for_node(id) {
             state.edge_store.remove(edge_id);
         }
@@ -153,7 +186,32 @@ pub fn remove_nodes(state: &mut AppState, ids: &[u64]) {
     for id in empty_folders {
         state.node_store.remove_node(id);
     }
+    if !ids.is_empty() {
+        state.layout_dirty = true;
+    }
     apply_dependency_edges(state);
+}
+
+/// Lays the canvas out with the Layout panel settings, keeping the primary
+/// selection where it is on screen: the view, and a pending jump to a
+/// location, move with it.
+pub fn apply_layout_keeping_selection(state: &mut AppState) {
+    let anchor = state.selection.primary;
+    let before = anchor.and_then(|id| state.node_store.get_file(id)).map(|n| n.position);
+    crate::layout::hierarchical::apply_layout(
+        &mut state.node_store,
+        &state.edge_store,
+        &state.layout_settings,
+    );
+    state.layout_dirty = false;
+    let after = anchor.and_then(|id| state.node_store.get_file(id)).map(|n| n.position);
+    if let (Some(before), Some(after)) = (before, after) {
+        let delta = after - before;
+        state.viewport.offset -= delta;
+        if let Some(focus) = state.pending_focus.as_mut() {
+            *focus += delta;
+        }
+    }
 }
 
 /// Shows line `line` (0-based) of `path`: opens the file if it is not on the
@@ -220,9 +278,11 @@ pub fn poll_lsp(state: &mut AppState) {
         }
     }
     state.deps.tick(&mut state.lsp.manager);
+    auto_open_matches(state);
     if state.deps.take_changed() {
         apply_dependency_edges(state);
     }
+    state.changes.poll();
     if state.git_comparison.poll() {
         // Also reject direct in-memory content changes made without a rebuild.
         let signature = comparison_input(state).map(|input| input.signature());
@@ -230,6 +290,33 @@ pub fn poll_lsp(state: &mut AppState) {
             state.git_comparison.invalidate();
         }
         apply_dependency_edges(state);
+    }
+}
+
+/// LSP "Auto Open Matches": once a symbol's references arrive, open the
+/// files holding them (at most Max files), once per answer.
+fn auto_open_matches(state: &mut AppState) {
+    let ready = state.lsp.references.as_ref().is_some_and(|r| {
+        !r.auto_opened && matches!(r.fetch, crate::ui::lsp_panel::Fetch::Done(Ok(_)))
+    });
+    if !ready {
+        return;
+    }
+    if let Some(refs) = state.lsp.references.as_mut() {
+        refs.auto_opened = true;
+    }
+    if !state.settings.lsp.auto_open_matches {
+        return;
+    }
+    let max = state.settings.lsp.max_files.max(1);
+    let open: HashSet<PathBuf> = state.node_store.file_nodes.values().map(|n| n.path.clone()).collect();
+    let paths: Vec<PathBuf> = crate::ui::lsp_panel::reference_files(state)
+        .into_iter()
+        .filter(|p| !open.contains(p) && p.is_file())
+        .take(max)
+        .collect();
+    if !paths.is_empty() {
+        open_files(state, &paths);
     }
 }
 
@@ -336,6 +423,91 @@ mod tests {
         assert!(matches!(state.git_comparison.status, crate::git::comparison::ComparisonStatus::Error(_)));
         assert!(!state.git_comparison.is_loading());
         assert!(!state.deps.is_waiting());
+    }
+
+    #[test]
+    fn top_level_symbols_are_the_root_declarations_without_comments_or_skipped_imports() {
+        let src = "use std::fmt;\n// note\nfn a() {\n    let x = 1;\n}\nstruct B;\n";
+        let path = Path::new("/p/lib.rs");
+        assert_eq!(top_level_symbols(path, src, true), vec![(2, 4), (5, 5)]);
+        assert_eq!(top_level_symbols(path, src, false), vec![(0, 0), (2, 4), (5, 5)]);
+        assert!(top_level_symbols(Path::new("/p/notes.txt"), src, true).is_empty());
+    }
+
+    #[test]
+    fn long_files_open_collapsed_and_expand_all_restores_them() {
+        let dir = tempfile::tempdir().unwrap();
+        let long = write(dir.path(), "long.rs", &"x\n".repeat(30));
+        let short = write(dir.path(), "short.rs", "x\n");
+        let mut state = state_in(dir.path());
+        state.settings.files.long_max_lines = 10;
+        let ids = open_files(&mut state, &[long, short]);
+        let collapsed: Vec<bool> = ids.iter().map(|id| state.node_store.get_file(*id).unwrap().collapsed).collect();
+        assert_eq!(collapsed, vec![true, false]);
+        assert_eq!(state.node_store.get_file(ids[0]).unwrap().visible_lines(), 0);
+        assert_eq!(collapsed_files(&state), 1);
+        expand_all_files(&mut state);
+        assert_eq!(collapsed_files(&state), 0);
+        assert_eq!(state.node_store.get_file(ids[0]).unwrap().visible_lines(), 30);
+
+        state.settings.files.collapse_long = false;
+        let other = write(dir.path(), "other.rs", &"x\n".repeat(30));
+        let id = open_files(&mut state, &[other])[0];
+        assert!(!state.node_store.get_file(id).unwrap().collapsed, "off: opens expanded");
+    }
+
+    #[test]
+    fn changed_file_actions_use_the_working_tree_change_set() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(dir.path()).unwrap();
+        let a = write(&root, "a.rs", "x\n");
+        let b = write(&root, "b.rs", "x\n");
+        let mut state = state_in(&root);
+        let a_id = open_files(&mut state, std::slice::from_ref(&a))[0];
+        assert!(unchanged_nodes(&state).is_empty(), "unknown changes close nothing");
+        state.changes.set_for_test([b.clone()]);
+        assert_eq!(unopened_changed_files(&state), vec![b.clone()]);
+        assert_eq!(unchanged_nodes(&state), vec![a_id]);
+        let opened = open_changed_files(&mut state);
+        assert_eq!(opened.len(), 1);
+        close_unchanged_files(&mut state);
+        let paths: Vec<PathBuf> = state.node_store.file_nodes.values().map(|n| n.path.clone()).collect();
+        assert_eq!(paths, vec![b]);
+    }
+
+    #[test]
+    fn import_neighbours_follow_local_imports_both_ways() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(dir.path()).unwrap();
+        let app = write(&root, "web/app.ts", "import { a } from './a';\nconsole.log(a);\n");
+        let a = write(&root, "web/a.ts", "export const a = 1;\n");
+        write(&root, "web/unrelated.ts", "export const z = 2;\n");
+        let mut state = state_in(&root);
+        let a_id = open_files(&mut state, std::slice::from_ref(&a))[0];
+        state.selection.select(a_id);
+        assert_eq!(import_neighbours(&state, ImportDirection::Importers), vec![app.clone()]);
+        assert!(import_neighbours(&state, ImportDirection::Imported).is_empty());
+
+        clear_canvas(&mut state);
+        let app_id = open_files(&mut state, std::slice::from_ref(&app))[0];
+        state.selection.select(app_id);
+        assert_eq!(import_neighbours(&state, ImportDirection::Imported), vec![a]);
+    }
+
+    #[test]
+    fn top_level_highlight_toggles_for_the_same_selection_and_drops_removed_nodes() {
+        let dir = tempfile::tempdir().unwrap();
+        let f = write(dir.path(), "m.rs", "fn a() {}\nfn b() {}\n");
+        let mut state = state_in(dir.path());
+        let id = open_files(&mut state, &[f])[0];
+        state.selection.select(id);
+        toggle_top_level_highlights(&mut state);
+        assert_eq!(state.top_level_highlights[&id], vec![(0, 0), (1, 1)]);
+        toggle_top_level_highlights(&mut state);
+        assert!(state.top_level_highlights.is_empty());
+        toggle_top_level_highlights(&mut state);
+        remove_nodes(&mut state, &[id]);
+        assert!(state.top_level_highlights.is_empty());
     }
 
     fn write(dir: &Path, rel: &str, content: &str) -> PathBuf {
@@ -526,4 +698,195 @@ mod tests {
 
         assert!(open_all_files(&mut state).is_empty(), "second run opens nothing new");
     }
+}
+
+// -- File nodes panel actions ------------------------------------------------
+
+/// Asks Git which files of the loaded folder changed; the answer arrives
+/// through [`poll_lsp`]. `now` is the app time, for the periodic refresh.
+pub fn refresh_working_tree_changes(state: &mut AppState, now: f64) {
+    state.folder_files_cache.replace(None);
+    if let Some(root) = state.loaded_dir.clone() {
+        state.changes.request(&root, now);
+    }
+}
+
+/// Changed files of the loaded folder that are not on the canvas yet.
+pub fn unopened_changed_files(state: &AppState) -> Vec<PathBuf> {
+    let Some(root) = state.loaded_dir.as_deref() else {
+        return Vec::new();
+    };
+    let open: HashSet<&Path> = state.node_store.file_nodes.values().map(|n| n.path.as_path()).collect();
+    let mut paths: Vec<PathBuf> = state
+        .changes
+        .paths()
+        .filter(|p| p.starts_with(root) && p.is_file() && !open.contains(p.as_path()))
+        .cloned()
+        .collect();
+    paths.sort();
+    paths
+}
+
+/// Opens every changed file of the folder. Returns the new node ids.
+pub fn open_changed_files(state: &mut AppState) -> Vec<u64> {
+    let paths = unopened_changed_files(state);
+    open_files(state, &paths)
+}
+
+/// File nodes whose file has no change against Git HEAD.
+pub fn unchanged_nodes(state: &AppState) -> Vec<u64> {
+    if !state.changes.is_known() {
+        return Vec::new();
+    }
+    let mut ids: Vec<u64> = state
+        .node_store
+        .file_nodes
+        .values()
+        .filter(|n| !state.changes.is_changed(&n.path))
+        .map(|n| n.id)
+        .collect();
+    ids.sort();
+    ids
+}
+
+/// Removes the file nodes without changes.
+pub fn close_unchanged_files(state: &mut AppState) {
+    let ids = unchanged_nodes(state);
+    remove_nodes(state, &ids);
+}
+
+/// Paths of the files of the loaded folder, as the file tree lists them.
+/// Read once and cached until the folder or the Git change set refreshes.
+pub fn folder_text_files(state: &AppState) -> std::rc::Rc<Vec<PathBuf>> {
+    if let Some(cached) = state.folder_files_cache.borrow().as_ref() {
+        return cached.clone();
+    }
+    let mut paths = Vec::new();
+    if let Some(dir) = state.loaded_dir.as_deref()
+        && let Ok(tree) = load_directory(dir, state.settings.show_dot_folders)
+    {
+        collect_files(&tree, &mut paths);
+    }
+    let paths = std::rc::Rc::new(paths);
+    *state.folder_files_cache.borrow_mut() = Some(paths.clone());
+    paths
+}
+
+/// Every text file of the loaded folder with its content.
+fn workspace_files(state: &AppState) -> Vec<(PathBuf, String)> {
+    folder_text_files(state)
+        .iter()
+        .filter_map(|p| read_file_content(p).ok().map(|text| (p.clone(), text)))
+        .collect()
+}
+
+/// Which way to follow import links from the selection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ImportDirection {
+    /// Files whose imports resolve to a selected file.
+    Importers,
+    /// Files a selected file imports.
+    Imported,
+}
+
+/// Files of the folder linked to the selected file nodes by an import that
+/// resolves locally (decision-27's syntax evidence), not open yet.
+pub fn import_neighbours(state: &AppState, direction: ImportDirection) -> Vec<PathBuf> {
+    let selected: HashSet<PathBuf> = state
+        .selection
+        .selected_ids()
+        .filter_map(|id| state.node_store.get_file(id))
+        .map(|n| n.path.clone())
+        .collect();
+    let Some(root) = state.loaded_dir.clone() else {
+        return Vec::new();
+    };
+    if selected.is_empty() {
+        return Vec::new();
+    }
+    let files = workspace_files(state);
+    let open = OpenFiles::new(files.iter().map(|(p, t)| (p.as_path(), t.as_str())));
+    let opened: HashSet<&Path> = state.node_store.file_nodes.values().map(|n| n.path.as_path()).collect();
+    let mut out: Vec<PathBuf> = crate::analysis::dependencies::local::links(&root, &open)
+        .into_iter()
+        .filter(|l| l.relationship == crate::edges::style::RelationshipType::Imports)
+        .filter_map(|l| match direction {
+            ImportDirection::Importers => selected.contains(&l.target).then_some(l.source),
+            ImportDirection::Imported => selected.contains(&l.source).then_some(l.target),
+        })
+        .filter(|p| !opened.contains(p.as_path()))
+        .collect();
+    out.sort();
+    out.dedup();
+    out
+}
+
+/// Opens the files linked to the selection in `direction`.
+pub fn open_import_neighbours(state: &mut AppState, direction: ImportDirection) -> Vec<u64> {
+    let paths = import_neighbours(state, direction);
+    open_files(state, &paths)
+}
+
+/// Line ranges (0-based, inclusive) of the top-level declarations of a
+/// file: the syntax root's named children, without comments, and without
+/// imports when `skip_imports`.
+pub fn top_level_symbols(path: &Path, content: &str, skip_imports: bool) -> Vec<(usize, usize)> {
+    let Some(tree) = crate::analysis::cst::parse_cst(path, content) else {
+        return Vec::new();
+    };
+    tree.root
+        .children
+        .iter()
+        .filter(|n| n.named && !n.is_error && !n.kind.contains("comment"))
+        .filter(|n| !(skip_imports && is_import_kind(&n.kind)))
+        .map(|n| (n.start_line, n.end_line))
+        .collect()
+}
+
+fn is_import_kind(kind: &str) -> bool {
+    matches!(
+        kind,
+        "use_declaration"
+            | "extern_crate_declaration"
+            | "import_statement"
+            | "import_from_statement"
+            | "future_import_statement"
+            | "import_declaration"
+            | "package_clause"
+    )
+}
+
+/// File nodes › "Highlight top-level symbols": marks the top-level
+/// declarations of the selected files, or clears the marks when they are
+/// already shown for exactly this selection.
+pub fn toggle_top_level_highlights(state: &mut AppState) {
+    let mut ids: Vec<u64> = state.selection.selected_ids().collect();
+    ids.sort();
+    let mut shown: Vec<u64> = state.top_level_highlights.keys().copied().collect();
+    shown.sort();
+    if !ids.is_empty() && ids == shown {
+        state.top_level_highlights.clear();
+        return;
+    }
+    state.top_level_highlights.clear();
+    let skip_imports = state.settings.files.skip_imports;
+    for id in ids {
+        if let Some(node) = state.node_store.get_file(id) {
+            let ranges = top_level_symbols(&node.path, &node.content, skip_imports);
+            state.top_level_highlights.insert(id, ranges);
+        }
+    }
+}
+
+/// File nodes collapsed by "Collapse long files" (or by hand).
+pub fn collapsed_files(state: &AppState) -> usize {
+    state.node_store.file_nodes.values().filter(|n| n.collapsed).count()
+}
+
+/// "Expand all N collapsed files".
+pub fn expand_all_files(state: &mut AppState) {
+    for node in state.node_store.file_nodes.values_mut() {
+        node.collapsed = false;
+    }
+    state.layout_dirty = true;
 }

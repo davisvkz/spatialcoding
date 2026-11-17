@@ -274,27 +274,6 @@ fn escape_clears_the_selection() {
 }
 
 /// Every shape of the last frame, with nested `Shape::Vec`s flattened.
-fn frame_shapes(app: &App) -> Vec<egui::Shape> {
-    fn flatten(shape: &egui::Shape, out: &mut Vec<egui::Shape>) {
-        match shape {
-            egui::Shape::Vec(v) => v.iter().for_each(|s| flatten(s, out)),
-            s => out.push(s.clone()),
-        }
-    }
-    let mut out = Vec::new();
-    for clipped in &app.output().shapes {
-        flatten(&clipped.shape, &mut out);
-    }
-    out
-}
-
-fn texts_equal(shapes: &[egui::Shape], text: &str) -> usize {
-    shapes
-        .iter()
-        .filter(|s| matches!(s, egui::Shape::Text(t) if t.galley.job.text == text))
-        .count()
-}
-
 /// Strongest alpha among bezier edges whose stroke is blue-dominant.
 fn max_bezier_alpha(shapes: &[egui::Shape]) -> u8 {
     shapes
@@ -331,6 +310,9 @@ fn selecting_a_node_lifts_its_edges_without_adding_symbol_badges() {
         s.viewport.zoom = 0.6;
         s.viewport.target_zoom = 0.6;
         s.right_panel = None;
+        // Alphas are read from solid strokes; the default gradient paints
+        // per-vertex colors instead.
+        s.edge_style.use_gradient = false;
     }
     app.show_at(Pos2::new(800.0, 60.0), Pos2::new(700.0, 300.0));
 
@@ -529,6 +511,9 @@ fn file_nodes_show_and_navigate_to_code_after_line_fifty() {
     )
     .unwrap();
     let mut app = app_with(&fx);
+    // The edge must arrive from the right: keep the grid placement (main.rs
+    // right of util.rs) instead of the auto layout's importer-left order.
+    app.app_state_mut().layout_settings.auto_layout = false;
     app.app_state_mut().edge_style.show_ports = false;
     app.app_state_mut().edge_style.relationships
         [spatialcoding::edges::style::RelationshipType::Imports.index()]
@@ -600,7 +585,7 @@ fn minified_edges_touch_identifier_bars_and_collapsed_nodes_use_header_fallbacks
         s.node_store.get_file_mut(target).unwrap().position = Pos2::new(900.0, 0.0);
         s.viewport.zoom = 0.25;
         s.viewport.target_zoom = 0.25;
-        s.edge_style.min_size_pct = 0.0;
+        s.edge_style.hide_short_pct = 0.0;
         s.selection.select(source);
     }
     app.show_at(Pos2::new(800.0, 60.0), CANVAS_SPOT);

@@ -28,7 +28,11 @@ fn cst_tab_asks_for_a_selection() {
     let mut app = app_with(&fx);
     app.app_state_mut().right_panel = Some(RightPanel::Cst);
     app.run();
+    app.get_by_label("Open some files on the canvas to start populating the CST nodes list.");
 
+    app.open(&fx.path("src/main.rs"));
+    app.app_state_mut().selection.clear();
+    app.run();
     app.get_by_label("Select a file node to see its syntax tree.");
 }
 
@@ -50,7 +54,9 @@ fn cst_tab_shows_the_tree_of_the_selected_rust_file() {
     app.run();
     app.get_by_label("name: identifier \"main\"  L3");
 
-    app.get_by_label("Show anonymous nodes").click();
+    app.get_by_label("Toggle settings").click();
+    app.run();
+    app.get_by_label("Show Hidden Types").click();
     app.run();
     app.get_by_label("fn  L3");
 }
@@ -112,4 +118,68 @@ fn highlight_rects(app: &App) -> Vec<egui::Rect> {
             _ => None,
         })
         .collect()
+}
+
+#[test]
+fn toggle_cst_nodes_switch_stops_painting_cst_highlights() {
+    let fx = fixture();
+    let mut app = app_with(&fx);
+    select_and_open_cst(&mut app, &fx, "src/main.rs");
+    app.get_by_label("Toggle CST nodes").click();
+    app.run();
+    assert!(!app.app_state().settings.cst.show_canvas);
+    app.get_by_label("function_item  L3\u{2013}5").hover();
+    app.run();
+    assert!(app.app_state().cst.hovered.is_some(), "the row is still hovered");
+    assert!(highlight_rects(&app).is_empty(), "but nothing is painted");
+}
+
+#[test]
+fn single_hover_off_also_marks_the_hovered_rows_ancestors() {
+    let fx = fixture();
+    let mut app = app_with(&fx);
+    select_and_open_cst(&mut app, &fx, "src/main.rs");
+    app.get_by_label("Toggle settings").click();
+    app.run();
+    app.get_by_label("Single Hover Symbol").click();
+    app.run();
+    app.get_by_label("function_item  L3\u{2013}5").hover();
+    app.run();
+    assert_eq!(app.app_state().cst.hover_ancestors, vec![(0, 4)], "source_file");
+}
+
+#[test]
+fn max_depth_limits_rows_and_the_count() {
+    let fx = fixture();
+    let mut app = app_with(&fx);
+    select_and_open_cst(&mut app, &fx, "src/main.rs");
+    app.app_state_mut().settings.cst.max_depth = 1;
+    app.run();
+    app.get_by_label("(3)");
+    app.app_state_mut().settings.cst.max_depth = 0;
+    app.run();
+    app.get_by_label("(1)");
+    assert!(app.query_by_label("mod_item  L1").is_none());
+}
+
+#[test]
+fn selected_edges_outline_their_end_cst_nodes_and_reset_restores_defaults() {
+    let fx = fixture();
+    let mut app = app_with(&fx);
+    let main = select_and_open_cst(&mut app, &fx, "src/main.rs");
+    let util = app.open(&fx.path("src/util.rs"));
+    app.app_state_mut().selection.select(main);
+    app.run();
+    let nodes = app.app_state().cst.edge_nodes.clone();
+    assert!(nodes.contains_key(&main) && nodes.contains_key(&util), "{nodes:?}");
+
+    app.get_by_label("Selected Edge CST Nodes").click();
+    app.run();
+    assert!(app.app_state().cst.edge_nodes.is_empty());
+
+    app.get_by_label("CST menu").click();
+    app.run();
+    app.get_by_label("Reset CST settings").click();
+    app.run();
+    assert!(app.app_state().settings.cst.selected_edge_nodes);
 }

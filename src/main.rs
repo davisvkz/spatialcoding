@@ -30,6 +30,9 @@ fn main() -> eframe::Result {
         options,
         Box::new(move |cc| {
             let mut app = SpatialCodingApp::new(cc);
+            if let Some(path) = spatialcoding::settings_store::default_path() {
+                app.enable_settings_persistence(path);
+            }
             app.apply_startup(&startup);
             Ok(Box::new(app))
         }),

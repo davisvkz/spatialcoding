@@ -1,0 +1,359 @@
+//! Right-rail "Dependency Edges" panel: which relationships show, how edges
+//! are drawn, the Git comparison and the barrel/re-export toggles. Visual
+//! reference: v2.codecanvas.app.
+
+use crate::analysis::dependencies::indexer::ServerProgress;
+use crate::analysis::lsp::manager::ServerStatus;
+use crate::edges::style::{EdgeStyle, GradientGapMode, OpacityMode, RelationshipType};
+use crate::state::AppState;
+use crate::ui::panel::{section, segmented, slider_row, switch, Section};
+
+/// One line of the Edges tab about a language server's dependency analysis,
+/// and whether it reports an error.
+pub fn progress_line(p: &ServerProgress) -> (String, bool) {
+    let name = p.server.name();
+    if let Some(err) = &p.error {
+        let first = err.lines().next().unwrap_or_default();
+        return (format!("{name}: {first}"), true);
+    }
+    let counts = format!("{}/{} files", p.done, p.files);
+    let text = match p.status {
+        Some(ServerStatus::Starting) | None => format!("{name}: starting\u{2026} {counts}"),
+        Some(ServerStatus::Indexing) => format!("{name}: indexing\u{2026} {counts}"),
+        Some(ServerStatus::Failed(ref err)) => return (format!("{name}: {err}"), true),
+        Some(ServerStatus::Ready) if p.done == p.files => {
+            format!("{name}: {} files analyzed", p.files)
+        }
+        Some(ServerStatus::Ready) => format!("{name}: {counts}"),
+    };
+    (text, false)
+}
+
+/// v2's "Barrel and Re-export" info text, adapted to the languages this
+/// app classifies.
+const BARREL_HELP: &str = "Barrel files and Rust facade modules re-export symbols so they can be \
+imported from one place. Barrel edges trace that intermediate public binding. Re-export edges \
+connect the consumer directly to the original source.\n\nJavaScript and TypeScript use barrel \
+index files, both inline (export { x } from './x') and import-then-export. Rust uses pub use in \
+mod.rs, Python re-exports in __init__.py. A file counts as a barrel with at least 4 re-exports. \
+Facade hops do not affect layout or cycle detection.";
+
+pub fn draw_edges_panel(ui: &mut egui::Ui, state: &mut AppState) {
+    let comparison_ready = state.git_comparison.is_ready();
+    section(ui, "Visibility", |ui| {
+        switch(ui, &mut state.edge_style.show_all, "All").on_hover_text(
+            "Show all enabled relationship types; otherwise show only the current selection.",
+        );
+        egui::CollapsingHeader::new("Relationship types")
+            .default_open(true)
+            .show(ui, |ui| {
+                for kind in RelationshipType::ALL {
+                    let settings = &mut state.edge_style.relationships[kind.index()];
+                    ui.horizontal(|ui| {
+                        ui.checkbox(&mut settings.visible, kind.label());
+                        ui.color_edit_button_rgb(&mut settings.color);
+                    });
+                    ui.weak(kind.description());
+                }
+            });
+        ui.weak("Highlights");
+        ui.horizontal(|ui| {
+            ui.checkbox(&mut state.edge_style.highlight_selected, "Selected");
+            ui.add_enabled(
+                comparison_ready,
+                egui::Checkbox::new(&mut state.edge_style.highlight_changes, "Changes"),
+            )
+            .on_disabled_hover_text(
+                "Refresh the Git comparison below to highlight proven graph changes.",
+            );
+        });
+        ui.checkbox(&mut state.edge_style.highlight_backwards, "Backwards")
+            .on_hover_text("Highlight incoming dependencies of the selected symbols/files.");
+        ui.weak("Folder nesting levels");
+        ui.checkbox(&mut state.edge_style.folder_levels, "Levels")
+            .on_hover_text(
+                "Color connections by their workspace-relative source and target folders.",
+            );
+        ui.label(format!("Depth    L{}", state.edge_style.folder_depth));
+        ui.add_enabled(
+            state.edge_style.folder_levels,
+            egui::Slider::new(&mut state.edge_style.folder_depth, 1..=12),
+        );
+        ui.separator();
+        switch(ui, &mut state.edge_style.highlight_reverse_layout, "Highlight Backwards Edges")
+            .on_hover_text(
+                "Highlight edges whose source is to the right of their target on the canvas.",
+            );
+    });
+
+    section(ui, "Style", |ui| {
+        let style = &mut state.edge_style;
+        ui.label("Style");
+        segmented(
+            ui,
+            &mut style.style,
+            &[
+                (EdgeStyle::Bezier, "Bezier"),
+                (EdgeStyle::Step, "Step"),
+                (EdgeStyle::Line, "Line"),
+                (EdgeStyle::Pcb, "PCB"),
+            ],
+        );
+        ui.label("Opacity");
+        segmented(
+            ui,
+            &mut style.opacity_mode,
+            &[(OpacityMode::Full, "Full"), (OpacityMode::Depth, "Depth")],
+        );
+        ui.add_space(4.0);
+        switch(ui, &mut style.show_connection_markers, "Connection Markers");
+        switch(ui, &mut style.show_arrow_heads, "Arrow Heads");
+        ui.add_enabled_ui(style.show_arrow_heads, |ui| {
+            ui.checkbox(&mut style.only_selected, "Only selected")
+                .on_hover_text("Arrow heads only on the edges of the selection");
+        });
+        switch(ui, &mut style.scale_arrow_heads, "Scale Arrow Heads")
+            .on_hover_text("Arrow heads shrink with the zoom, down to Min Size.");
+        ui.add_enabled_ui(style.scale_arrow_heads, |ui| {
+            slider_row(ui, "Min Size", &mut style.min_size_pct, 0.0..=1.0, percent);
+        });
+    });
+
+    // The legend's switch and the body need the style at once: switch a copy.
+    let mut use_gradient = state.edge_style.use_gradient;
+    let gradient_was_on = use_gradient;
+    Section::new("Gradient")
+        .switch("Edge gradient", &mut use_gradient)
+        .show(ui, |ui| {
+            let style = &mut state.edge_style;
+            ui.add_enabled_ui(gradient_was_on, |ui| {
+                ui.label("Gradient Gap");
+                segmented(
+                    ui,
+                    &mut style.gradient_gap_mode,
+                    &[(GradientGapMode::Percent, "%"), (GradientGapMode::Fixed, "Fixed")],
+                );
+                ui.add_enabled_ui(style.gradient_gap_mode == GradientGapMode::Percent, |ui| {
+                    slider_row(ui, "Gap %", &mut style.gradient_gap_pct, 0.0..=1.0, percent);
+                });
+                slider_row(ui, "Min Dist", &mut style.gradient_min_dist_sq, 0.0..=40_000.0, |v| {
+                    format!("{v:.0}")
+                })
+                .on_hover_text(
+                    "Squared screen distance (px²) under which edges draw solid; \
+                     40000 is 200 px. In Fixed mode the solid ends add up to this distance.",
+                );
+            });
+        });
+    state.edge_style.use_gradient = use_gradient;
+
+    section(ui, "Diff", |ui| {
+        let baseline_label = ui.label("Git baseline");
+        if ui
+            .add(egui::TextEdit::singleline(&mut state.git_comparison.baseline).hint_text("HEAD"))
+            .labelled_by(baseline_label.id)
+            .changed()
+        {
+            crate::workspace::invalidate_git_comparison(state);
+        }
+        let can_refresh = state.loaded_dir.is_some()
+            && !state.node_store.file_nodes.is_empty()
+            && !state.git_comparison.is_loading();
+        if ui
+            .add_enabled(can_refresh, egui::Button::new("Refresh comparison"))
+            .clicked()
+        {
+            crate::workspace::refresh_git_comparison(state);
+        }
+        let ready = state.git_comparison.is_ready();
+        const NOT_READY: &str = "Refresh the Git comparison first.";
+        ui.add_enabled_ui(ready, |ui| {
+            switch(ui, &mut state.edge_style.diff_colors, "Diff Colors").on_hover_text(
+                "Added = green; deleted = red. Other highlight colors are overridden only for proven changes.",
+            );
+            switch(ui, &mut state.edge_style.show_deleted, "Deleted").on_hover_text(
+                "Baseline-only links use file headers, never obsolete identifier positions.",
+            );
+        })
+        .response
+        .on_disabled_hover_text(NOT_READY);
+        use crate::git::comparison::ComparisonStatus;
+        match &state.git_comparison.status {
+            ComparisonStatus::Idle => {
+                ui.weak("Not compared; refresh after changing the canvas.");
+            }
+            ComparisonStatus::Loading => {
+                ui.spinner();
+                ui.label("Comparing Git graph…");
+            }
+            ComparisonStatus::Unavailable(message) | ComparisonStatus::Error(message) => {
+                ui.colored_label(ui.visuals().error_fg_color, message);
+            }
+            ComparisonStatus::Ready => {
+                if let Some(diff) = &state.git_comparison.diff {
+                    let (added, deleted, unchanged) = diff.counts();
+                    ui.label(format!(
+                        "Baseline: {}",
+                        &diff.commit[..diff.commit.len().min(12)]
+                    ));
+                    ui.label(format!("+{added} / −{deleted} / {unchanged} unchanged"));
+                    let uncovered = state
+                        .edge_store
+                        .all_edges()
+                        .filter(|e| e.change == crate::edges::edge_store::EdgeChange::Uncompared)
+                        .count();
+                    ui.weak(format!("{uncovered} symbol links not compared."));
+                }
+            }
+        }
+        ui.weak("Coverage: local module/document links, between open files only. LSP-only symbol links are not compared.");
+        ui.weak("Canvas snapshot vs commit (not index). Reopen files after external edits.");
+    });
+
+    Section::new("Barrel and Re-export").info(BARREL_HELP).show(ui, |ui| {
+        let style = &mut state.edge_style;
+        facade_row(
+            ui,
+            (&mut style.show_reexport_edges, "Show re-export edges"),
+            (&mut style.highlight_reexport, "Highlight re-export edges"),
+            &mut style.reexport_color,
+        );
+        facade_row(
+            ui,
+            (&mut style.show_barrel_edges, "Show barrel edges"),
+            (&mut style.highlight_barrel, "Highlight barrel edges"),
+            &mut style.barrel_color,
+        );
+    });
+
+    section(ui, "Analysis (language servers)", |ui| {
+        let progress = state.deps.progress(&state.lsp.manager);
+        if progress.is_empty() {
+            ui.weak("Open source files to find their dependencies.");
+        }
+        for p in &progress {
+            match progress_line(p) {
+                (text, true) => ui.colored_label(ui.visuals().error_fg_color, text),
+                (text, false) => ui.label(text),
+            };
+        }
+    });
+
+    section(ui, "Ports", |ui| {
+        let style = &mut state.edge_style;
+        switch(ui, &mut style.show_ports, "Ports").on_hover_text(
+            "Mark each connected line with a circle on the node border and a row band; \
+             edges end at the circle. Off: edges touch the identifier.",
+        );
+        ui.add_enabled_ui(style.show_ports, |ui| {
+            ui.horizontal(|ui| {
+                ui.color_edit_button_rgb(&mut style.import_port_color);
+                ui.label("Import");
+                ui.color_edit_button_rgb(&mut style.symbol_port_color);
+                ui.label("Symbol");
+            });
+        });
+        slider_row(ui, "Hide Short Edges", &mut style.hide_short_pct, 0.0..=1.0, |v| {
+            format!("{:.0} px", v * 40.0)
+        })
+        .on_hover_text("Hide edges shorter than this on screen.");
+    });
+
+    egui::CollapsingHeader::new("Symbol Colors")
+        .default_open(true)
+        .show(ui, |ui| {
+            let mut counts: std::collections::HashMap<&str, usize> =
+                std::collections::HashMap::new();
+            for e in state.edge_store.all_edges() {
+                if let Some(label) = &e.label {
+                    *counts.entry(label.as_str()).or_default() += 1;
+                }
+            }
+            let mut kinds: Vec<String> = state.edge_style.symbol_colors.keys().cloned().collect();
+            kinds.sort();
+            for kind in &kinds {
+                let count = counts.get(kind.as_str()).copied().unwrap_or(0);
+                ui.horizontal(|ui| {
+                    if let Some(color) = state.edge_style.symbol_colors.get_mut(kind.as_str()) {
+                        ui.color_edit_button_rgb(color);
+                    }
+                    ui.label(kind.as_str());
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        ui.weak(format!("{count}"));
+                    });
+                });
+            }
+        });
+}
+
+fn percent(v: f64) -> String {
+    format!("{:.0}%", v * 100.0)
+}
+
+/// "Show … edges" switch with a "Highlight" checkbox and its color on the
+/// right, as v2's Barrel and Re-export rows. The checkbox's accessible name
+/// says what it highlights.
+fn facade_row(
+    ui: &mut egui::Ui,
+    (show, show_label): (&mut bool, &str),
+    (highlight, highlight_label): (&mut bool, &str),
+    color: &mut [f32; 3],
+) {
+    ui.horizontal(|ui| {
+        switch(ui, show, show_label);
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            ui.color_edit_button_rgb(color);
+            let response = ui.checkbox(highlight, "Highlight");
+            let label = highlight_label.to_owned();
+            let checked = *highlight;
+            response.widget_info(move || {
+                egui::WidgetInfo::selected(egui::WidgetType::Checkbox, true, checked, label.clone())
+            });
+        });
+    });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::analysis::lsp::ServerId;
+
+    fn progress(done: usize, status: Option<ServerStatus>, error: Option<&str>) -> ServerProgress {
+        ServerProgress {
+            server: ServerId::Rust,
+            files: 3,
+            done,
+            status,
+            error: error.map(str::to_string),
+        }
+    }
+
+    #[test]
+    fn progress_line_reports_indexing_counts_and_errors() {
+        let name = ServerId::Rust.name();
+        assert_eq!(
+            progress_line(&progress(1, Some(ServerStatus::Indexing), None)),
+            (format!("{name}: indexing\u{2026} 1/3 files"), false)
+        );
+        assert_eq!(
+            progress_line(&progress(0, None, None)).0,
+            format!("{name}: starting\u{2026} 0/3 files")
+        );
+        assert_eq!(
+            progress_line(&progress(3, Some(ServerStatus::Ready), None)).0,
+            format!("{name}: 3 files analyzed")
+        );
+        assert_eq!(
+            progress_line(&progress(2, Some(ServerStatus::Ready), None)).0,
+            format!("{name}: 2/3 files")
+        );
+        assert_eq!(
+            progress_line(&progress(
+                3,
+                Some(ServerStatus::Failed("x".into())),
+                Some("not found\nhint")
+            )),
+            (format!("{name}: not found"), true)
+        );
+    }
+}

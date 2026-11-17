@@ -148,7 +148,9 @@ mod tests {
     }
 
     fn collect(edges: &EdgeStore, nodes: &NodeStore, selection: &Selection) -> HashMap<u64, Vec<Port>> {
-        collect_ports(edges, nodes, &EdgeStyleConfig::default(), selection, WIDTH, FONT)
+        // Re-export edges are hidden by default (as in v2); these tests need them.
+        let config = EdgeStyleConfig { show_reexport_edges: true, ..Default::default() };
+        collect_ports(edges, nodes, &config, selection, WIDTH, FONT)
     }
 
     #[test]

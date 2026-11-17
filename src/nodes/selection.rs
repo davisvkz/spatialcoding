@@ -108,6 +108,11 @@ impl Selection {
         &self.symbols
     }
 
+    /// Drops the picked symbols, keeping the selected files.
+    pub fn clear_symbols(&mut self) {
+        self.symbols.clear();
+    }
+
     /// Symbol focus takes precedence over whole-file edge highlighting. The
     /// clicked file stays selected for dragging; picking never moves the camera.
     pub fn select_symbol(&mut self, clicked_node: u64, symbol: SelectedSymbol, additive: bool) {

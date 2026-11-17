@@ -25,7 +25,12 @@ pub enum SortMode {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct LayoutSettings {
+    /// Lay out again whenever files are opened or removed (kebab "Disable
+    /// Auto Layout" turns it off).
+    pub auto_layout: bool,
+    /// 0 (Off) to 8: split columns taller than this many times their width.
     pub rank_breaking: u32,
     pub h_align: HAlign,
     pub v_align: VAlign,
@@ -38,14 +43,15 @@ pub struct LayoutSettings {
 impl Default for LayoutSettings {
     fn default() -> Self {
         Self {
+            auto_layout: true,
             rank_breaking: 6,
             h_align: HAlign::Right,
             v_align: VAlign::Center,
             sort: SortMode::Desc,
-            // Tighter than before: v2 packs columns and folders closely.
-            file_spacing: 220.0,
-            folder_spacing: 300.0,
-            folder_padding: 40.0,
+            // v2 Code Canvas defaults.
+            file_spacing: 500.0,
+            folder_spacing: 500.0,
+            folder_padding: 80.0,
         }
     }
 }

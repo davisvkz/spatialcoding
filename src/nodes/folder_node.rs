@@ -4,6 +4,10 @@ use std::path::PathBuf;
 /// layout reserves the same space so laid-out folders never overlap.
 pub const FOLDER_HEADER_HEIGHT: f32 = 28.0;
 
+/// World size of a collapsed folder's box: a compact card with the folder's
+/// name and file count, standing in for everything inside it.
+pub const COLLAPSED_FOLDER_SIZE: egui::Vec2 = egui::vec2(360.0, 96.0);
+
 pub struct FolderNode {
     pub id: u64,
     pub path: PathBuf,
@@ -11,6 +15,9 @@ pub struct FolderNode {
     pub file_count: usize,
     pub bounds: egui::Rect,
     pub collapsed: bool,
+    /// Top-left of the compact box while collapsed: where the expanded
+    /// folder began, or where the layout placed the box.
+    pub collapsed_origin: Option<egui::Pos2>,
     pub children_ids: Vec<u64>,
 }
 
@@ -28,8 +35,15 @@ impl FolderNode {
             file_count,
             bounds: egui::Rect::NOTHING,
             collapsed: false,
+            collapsed_origin: None,
             children_ids: Vec::new(),
         }
+    }
+
+    /// The compact box drawn while collapsed.
+    pub fn collapsed_rect(&self) -> Option<egui::Rect> {
+        self.collapsed
+            .then(|| egui::Rect::from_min_size(self.collapsed_origin.unwrap_or(egui::Pos2::ZERO), COLLAPSED_FOLDER_SIZE))
     }
 
     pub fn update_bounds(&mut self, child_rects: &[egui::Rect], padding: f32) {

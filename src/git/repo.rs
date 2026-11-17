@@ -104,15 +104,50 @@ impl GitRepo {
         None
     }
 
-    /// Get list of changed files (working tree vs HEAD).
-    pub fn changed_files(&self) -> Vec<PathBuf> {
-        Vec::new()
+    /// Absolute paths of the files `git status` reports: staged, unstaged
+    /// and untracked (not ignored), both sides of a rename. Read-only:
+    /// optional locks are off, so the index is not refreshed on disk.
+    pub fn changed_files(&self) -> Result<Vec<PathBuf>, String> {
+        let out = command(
+            &self.root,
+            &["status", "--porcelain=v1", "-z", "--untracked-files=all", "--no-renames"],
+        )?;
+        Ok(parse_porcelain_z(&out)
+            .into_iter()
+            .map(|relative| self.root.join(relative))
+            .collect())
+    }
+
+    pub fn root(&self) -> &Path {
+        &self.root
     }
 
     /// Get unified diff for a file.
     pub fn file_diff(&self, _path: &Path) -> Option<String> {
         None
     }
+}
+
+/// Paths of `git status --porcelain=v1 -z` entries (`XY path\0`; a rename
+/// or copy carries its source path as the next entry).
+fn parse_porcelain_z(out: &[u8]) -> Vec<String> {
+    let mut paths = Vec::new();
+    let mut entries = out.split(|b| *b == 0).filter(|e| !e.is_empty());
+    while let Some(entry) = entries.next() {
+        if entry.len() < 4 {
+            continue;
+        }
+        let status = &entry[..2];
+        if let Ok(path) = std::str::from_utf8(&entry[3..]) {
+            paths.push(path.to_owned());
+        }
+        if (status.contains(&b'R') || status.contains(&b'C'))
+            && let Some(Ok(source)) = entries.next().map(std::str::from_utf8)
+        {
+            paths.push(source.to_owned());
+        }
+    }
+    paths
 }
 
 fn command(root: &Path, args: &[&str]) -> Result<Vec<u8>, String> {
@@ -134,4 +169,38 @@ fn command(root: &Path, args: &[&str]) -> Result<Vec<u8>, String> {
             .to_string());
     }
     Ok(output.stdout)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn porcelain_entries_yield_every_path_including_rename_sources() {
+        let out = b" M src/a.rs\0?? new.txt\0R  b2.rs\0b.rs\0A  dir/c d.rs\0";
+        assert_eq!(
+            parse_porcelain_z(out),
+            vec!["src/a.rs", "new.txt", "b2.rs", "b.rs", "dir/c d.rs"]
+        );
+    }
+
+    #[test]
+    fn changed_files_lists_modified_and_untracked_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(dir.path()).unwrap();
+        let git = |args: &[&str]| {
+            assert!(Command::new("git").arg("-C").arg(&root).args(args).output().unwrap().status.success());
+        };
+        git(&["init", "-q"]);
+        std::fs::write(root.join("kept.rs"), "a").unwrap();
+        std::fs::write(root.join("edited.rs"), "a").unwrap();
+        git(&["add", "."]);
+        git(&["-c", "user.name=T", "-c", "user.email=t@e", "commit", "-qm", "init"]);
+        std::fs::write(root.join("edited.rs"), "b").unwrap();
+        std::fs::write(root.join("added.rs"), "c").unwrap();
+        let repo = GitRepo::open(&root).unwrap();
+        let mut changed = repo.changed_files().unwrap();
+        changed.sort();
+        assert_eq!(changed, vec![root.join("added.rs"), root.join("edited.rs")]);
+    }
 }

@@ -21,11 +21,10 @@ pub fn handle_shortcuts(ctx: &egui::Context, state: &mut AppState) -> bool {
         // Space held detection for pan mode
         state.space_held = i.key_down(egui::Key::Space);
 
-        // Shift+F: Fit to screen
+        // Shift+F: Fit to screen. The canvas fits next frame, against its own
+        // rect rather than the whole window.
         if i.key_pressed(egui::Key::F) && i.modifiers.shift {
-            if let Some(world_rect) = compute_nodes_bounding_rect(state) {
-                state.viewport.fit_to_rect(world_rect, screen_rect);
-            }
+            state.pending_fit = true;
             consumed = true;
         }
 
@@ -83,21 +82,32 @@ pub fn handle_shortcuts(ctx: &egui::Context, state: &mut AppState) -> bool {
     consumed
 }
 
+/// World rects of everything shown on the canvas: file nodes outside
+/// collapsed folders, and the collapsed folders' boxes.
+pub(crate) fn shown_node_rects(state: &AppState) -> Vec<egui::Rect> {
+    let store = &state.node_store;
+    let hidden_folders = store.hidden_folders();
+    let files = store
+        .file_nodes
+        .values()
+        .filter(|n| !store.is_file_hidden(n.id))
+        .map(|n| n.world_rect(state.settings.node_width, state.settings.font_size));
+    let folders = store
+        .folder_nodes
+        .values()
+        .filter(|f| !hidden_folders.contains(&f.id))
+        .filter_map(|f| {
+            if store.layout_collapsed(f.id) {
+                f.collapsed_rect()
+            } else {
+                store.view.zoom_collapsed.contains(&f.id).then_some(f.bounds)
+            }
+        });
+    files.chain(folders).collect()
+}
+
 pub(crate) fn compute_nodes_bounding_rect(state: &AppState) -> Option<egui::Rect> {
-    let mut rects = Vec::new();
-    for id in state.node_store.all_file_ids() {
-        if let Some(node) = state.node_store.get_file(id) {
-            rects.push(node.world_rect(state.settings.node_width, state.settings.font_size));
-        }
-    }
-    if rects.is_empty() {
-        return None;
-    }
-    let mut combined = rects[0];
-    for r in &rects[1..] {
-        combined = combined.union(*r);
-    }
-    Some(combined)
+    shown_node_rects(state).into_iter().reduce(|a, b| a.union(b))
 }
 
 #[cfg(test)]

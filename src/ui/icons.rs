@@ -97,6 +97,11 @@ pub const PLAY: &str = "\u{e13c}";
 pub const CLOSE: &str = "\u{e1b2}";
 pub const CHEVRON_LEFT: &str = "\u{e06e}";
 pub const CHEVRON_RIGHT: &str = "\u{e06f}";
+pub const CHEVRON_UP: &str = "\u{e070}";
+pub const CHEVRON_DOWN: &str = "\u{e06d}";
+pub const INFO: &str = "\u{e0f9}";
+pub const ROTATE_CCW: &str = "\u{e148}";
+pub const PAUSE: &str = "\u{e12e}";
 
 // Panel bodies
 pub const COPY: &str = "\u{e09e}";
@@ -107,3 +112,25 @@ pub const FOLDER: &str = "\u{e0d7}";
 pub const FILE: &str = "\u{e0c0}";
 pub const TERMINAL: &str = "\u{e181}";
 pub const CIRCLE_DOT: &str = "\u{e345}";
+
+// File nodes actions
+pub const FILES: &str = "\u{e0cf}";
+pub const FILE_DIFF: &str = "\u{e317}";
+pub const FILE_MINUS: &str = "\u{e0c6}";
+pub const ARROW_LEFT_TO_LINE: &str = "\u{e457}";
+pub const ARROW_RIGHT_TO_LINE: &str = "\u{e459}";
+pub const SCAN: &str = "\u{e257}";
+pub const CHECK_SQUARE: &str = "\u{e16a}";
+pub const SQUARE: &str = "\u{e167}";
+pub const LAYERS: &str = "\u{e529}";
+
+// Folders actions
+pub const CHEVRONS_UP: &str = "\u{e074}";
+pub const CHEVRONS_DOWN: &str = "\u{e071}";
+pub const FOLDER_CLOSED: &str = "\u{e330}";
+pub const FOLDER_OPEN: &str = "\u{e247}";
+pub const FOLDER_UP: &str = "\u{e33d}";
+pub const FOLDER_DOWN: &str = "\u{e332}";
+pub const FOLDER_X: &str = "\u{e33e}";
+pub const FOLDER_INPUT: &str = "\u{e334}";
+pub const SLASH: &str = "\u{e51d}";

@@ -83,11 +83,12 @@ pub enum GradientGapMode {
     /// Percentage of the edge's drawn length (0..=1).
     Percent,
     /// Drop by a fixed world-pixel amount from the total; edges shorter than
-    /// `gradient_min_dist_px` are drawn solid in the target color.
+    /// the Min Dist (`gradient_min_dist_sq`) are drawn solid in the target color.
     Fixed,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct EdgeStyleConfig {
     #[serde(default)]
     pub highlight_changes: bool,
@@ -113,21 +114,26 @@ pub struct EdgeStyleConfig {
     pub show_arrow_heads: bool,
     pub only_selected: bool,
     pub scale_arrow_heads: bool,
+    /// Smallest arrow-head scale while Scale Arrow Heads shrinks them with
+    /// the zoom (v2 "Min Size", 0..1).
     pub min_size_pct: f32,
+    /// Hide edges shorter on screen than this share of 40 px (0 shows all).
+    pub hide_short_pct: f32,
     pub use_gradient: bool,
     #[serde(default = "default_gradient_gap_mode")]
     pub gradient_gap_mode: GradientGapMode,
     #[serde(default = "default_gradient_gap_pct")]
     pub gradient_gap_pct: f32,
-    #[serde(default = "default_gradient_min_dist_px")]
-    pub gradient_min_dist_px: f32,
+    /// Squared screen distance (px²) under which an edge draws solid, as
+    /// v2's "Min Dist" (40000 = 200 px). In Fixed mode the solid tails also
+    /// add up to this distance.
+    pub gradient_min_dist_sq: f32,
     pub base_color: [f32; 3],
     /// Color of edges touching the selection (v2: light blue, fully opaque).
     #[serde(default = "default_selected_color")]
     pub selected_color: [f32; 3],
     #[serde(default = "default_symbol_colors")]
     pub symbol_colors: HashMap<String, [f32; 3]>,
-    #[serde(default = "default_true")]
     pub show_reexport_edges: bool,
     #[serde(default = "default_true")]
     pub show_barrel_edges: bool,
@@ -158,8 +164,8 @@ fn default_folder_depth() -> usize {
 fn default_gradient_gap_pct() -> f32 {
     0.8
 }
-fn default_gradient_min_dist_px() -> f32 {
-    40.0
+fn default_gradient_min_dist_sq() -> f32 {
+    40_000.0
 }
 fn default_selected_color() -> [f32; 3] {
     [0.72, 0.84, 1.0]
@@ -255,22 +261,23 @@ impl Default for EdgeStyleConfig {
             // v2 keeps the rest of the web visible (dimmed) around a selection.
             show_all: true,
             highlight_backwards: false,
-            show_connection_markers: false,
+            show_connection_markers: true,
             // Arrow heads only on the selection's edges while `only_selected`
             // is on, as v2's "Arrow Heads › Only selected".
             show_arrow_heads: true,
             only_selected: true,
-            scale_arrow_heads: false,
+            scale_arrow_heads: true,
             min_size_pct: 0.5,
-            use_gradient: false,
+            hide_short_pct: 0.5,
+            use_gradient: true,
             gradient_gap_mode: default_gradient_gap_mode(),
             gradient_gap_pct: default_gradient_gap_pct(),
-            gradient_min_dist_px: default_gradient_min_dist_px(),
+            gradient_min_dist_sq: default_gradient_min_dist_sq(),
             // Cool blue-grey, measured from v2 Code Canvas idle edges.
             base_color: [0.55, 0.61, 0.75],
             selected_color: default_selected_color(),
             symbol_colors: default_symbol_colors(),
-            show_reexport_edges: true,
+            show_reexport_edges: false,
             show_barrel_edges: true,
             highlight_reexport: false,
             highlight_barrel: false,

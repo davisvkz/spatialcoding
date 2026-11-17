@@ -1,5 +1,7 @@
-//! Right-sidebar "CST" tab: the tree-sitter syntax tree of the primary
-//! selected file node. Hovering a row highlights its lines on the canvas
+//! Right-rail "CST" panel: the tree-sitter syntax tree of the primary
+//! selected file node, filtered by the CST settings (depth, hidden types,
+//! semantic nodes). Hovering a row highlights its lines on the canvas, and
+//! the syntax nodes at the ends of the selection's edges are outlined
 //! (painted by the app shell through [`highlight_rect`]).
 
 use std::collections::hash_map::DefaultHasher;
@@ -7,7 +9,9 @@ use std::hash::{Hash, Hasher};
 
 use crate::analysis::cst::{parse_cst, CstNode, CstTree};
 use crate::nodes::node_store::NodeStore;
-use crate::state::AppState;
+use crate::state::{AppState, CstSettings};
+use crate::ui::icons;
+use crate::ui::panel::{switch, Section};
 
 const ERROR_COLOR: egui::Color32 = egui::Color32::from_rgb(0xef, 0x44, 0x44);
 
@@ -23,10 +27,17 @@ pub struct CstHover {
 #[derive(Default)]
 pub struct CstPanelState {
     cached: Option<CachedCst>,
-    /// Also list anonymous tokens (`fn`, `(`, `;`, ...).
-    pub show_anonymous: bool,
+    /// Trees of the files at the ends of selected edges, by node id.
+    edge_trees: std::collections::HashMap<u64, CachedCst>,
     /// Set while the pointer is over a row; reset every frame the panel draws.
     pub hovered: Option<CstHover>,
+    /// With Single Hover Symbol off: the hovered row's ancestors' lines.
+    pub hover_ancestors: Vec<(usize, usize)>,
+    /// "Selected Edge CST Nodes": per file node, the lines of the innermost
+    /// named CST node at each end of the selection's edges.
+    pub edge_nodes: std::collections::HashMap<u64, Vec<(usize, usize)>>,
+    /// The settings group under the gear is open.
+    pub show_settings: bool,
     /// How many times a file was parsed (cache misses).
     parses: usize,
 }
@@ -37,6 +48,13 @@ struct CachedCst {
     tree: Option<CstTree>,
 }
 
+fn source_hash(node: &crate::nodes::file_node::FileNode) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    node.path.hash(&mut hasher);
+    node.content.hash(&mut hasher);
+    hasher.finish()
+}
+
 impl CstPanelState {
     /// Makes [`Self::tree`] match file node `node_id`, parsing only when the
     /// node or its path/content changed since the last call.
@@ -45,11 +63,7 @@ impl CstPanelState {
             self.cached = None;
             return;
         };
-        let mut hasher = DefaultHasher::new();
-        node.path.hash(&mut hasher);
-        node.content.hash(&mut hasher);
-        let source_hash = hasher.finish();
-
+        let source_hash = source_hash(node);
         let fresh = self
             .cached
             .as_ref()
@@ -68,25 +82,158 @@ impl CstPanelState {
     pub fn tree(&self) -> Option<&CstTree> {
         self.cached.as_ref()?.tree.as_ref()
     }
+
+    /// The (cached) tree of any file node, for edge-end highlights.
+    fn tree_of(&mut self, node_store: &NodeStore, node_id: u64) -> Option<&CstTree> {
+        let node = node_store.get_file(node_id)?;
+        let hash = source_hash(node);
+        let fresh = self.edge_trees.get(&node_id).is_some_and(|c| c.source_hash == hash);
+        if !fresh {
+            self.parses += 1;
+            let tree = parse_cst(&node.path, &node.content);
+            self.edge_trees.insert(node_id, CachedCst { node_id, source_hash: hash, tree });
+        }
+        self.edge_trees.get(&node_id)?.tree.as_ref()
+    }
+
+    /// Clears what the canvas paints for this panel.
+    pub fn clear_highlights(&mut self) {
+        self.hovered = None;
+        self.hover_ancestors.clear();
+        self.edge_nodes.clear();
+    }
+}
+
+/// Grammar kinds that only group other nodes. "Semantic Nodes Only" lists
+/// their children in their place.
+pub fn is_wrapper(kind: &str) -> bool {
+    kind.ends_with("_list")
+        || matches!(
+            kind,
+            "block"
+                | "statement_block"
+                | "compound_statement"
+                | "parameters"
+                | "formal_parameters"
+                | "arguments"
+                | "argument_list"
+                | "type_arguments"
+                | "type_parameters"
+                | "parenthesized_expression"
+                | "expression_statement"
+                | "class_body"
+                | "interface_body"
+        )
+}
+
+/// The rows the tree lists under `node`: its children after the Hidden
+/// Types and Semantic Nodes Only filters (wrappers replaced by their own
+/// listed children).
+fn listed_children<'a>(node: &'a CstNode, settings: &CstSettings) -> Vec<&'a CstNode> {
+    let mut out = Vec::new();
+    for child in &node.children {
+        if !(settings.show_hidden_types || child.named || child.is_error) {
+            continue;
+        }
+        if settings.semantic_only && child.named && !child.is_error && is_wrapper(&child.kind) {
+            out.extend(listed_children(child, settings));
+        } else {
+            out.push(child);
+        }
+    }
+    out
+}
+
+/// How many rows the tree lists, within the depth limit.
+fn count_rows(node: &CstNode, settings: &CstSettings, depth: usize) -> usize {
+    1 + if settings.limit_depth && depth >= settings.max_depth {
+        0
+    } else {
+        listed_children(node, settings)
+            .into_iter()
+            .map(|c| count_rows(c, settings, depth + 1))
+            .sum()
+    }
+}
+
+/// The innermost named node covering `line`, as (start, end) lines.
+fn innermost_at(node: &CstNode, line: usize) -> Option<(usize, usize)> {
+    if line < node.start_line || line > node.end_line {
+        return None;
+    }
+    node.children
+        .iter()
+        .filter(|c| c.named)
+        .find_map(|c| innermost_at(c, line))
+        .or(Some((node.start_line, node.end_line)))
+}
+
+/// Limit CST depth and Max depth, shared by the CST settings and
+/// Performance › CST Depth.
+pub fn draw_depth_controls(ui: &mut egui::Ui, settings: &mut CstSettings) {
+    switch(ui, &mut settings.limit_depth, "Limit CST depth")
+        .on_hover_text("List syntax nodes only down to Max depth.");
+    ui.add_enabled_ui(settings.limit_depth, |ui| {
+        ui.horizontal(|ui| {
+            ui.label("Max depth");
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                let response = ui.add(egui::DragValue::new(&mut settings.max_depth).range(1..=64usize));
+                response.widget_info(|| {
+                    egui::WidgetInfo::labeled(egui::WidgetType::DragValue, true, "Max CST depth")
+                });
+            });
+        });
+    });
 }
 
 pub fn draw_cst_panel(ui: &mut egui::Ui, state: &mut AppState) {
-    state.cst.hovered = None;
-    ui.heading("Syntax Tree");
+    state.cst.clear_highlights();
+    let settings = state.settings.cst.clone();
+
+    if settings.selected_edge_nodes && settings.show_canvas {
+        collect_edge_nodes(state);
+    }
+
+    let primary = state.selection.primary.filter(|id| state.node_store.get_file(*id).is_some());
+    let count = primary.and_then(|id| {
+        state.cst.sync(&state.node_store, id);
+        state.cst.tree().map(|t| count_rows(&t.root, &settings, 0))
+    });
+    ui.horizontal(|ui| {
+        ui.weak(format!("({})", count.unwrap_or(0)));
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            let gear = icons::tool_icon_button(ui, icons::SETTINGS, "Toggle settings");
+            if gear.clicked() {
+                state.cst.show_settings = !state.cst.show_settings;
+            }
+        });
+    });
+    switch(ui, &mut state.settings.cst.selected_edge_nodes, "Selected Edge CST Nodes")
+        .on_hover_text("Outline the syntax node at each end of the selection's edges.");
+    if state.cst.show_settings {
+        Section::new("Settings").show(ui, |ui| {
+            let cst = &mut state.settings.cst;
+            Section::new("CST Depth").show(ui, |ui| draw_depth_controls(ui, cst));
+            switch(ui, &mut cst.show_hidden_types, "Show Hidden Types")
+                .on_hover_text("Also list anonymous tokens such as fn, ( and ;.");
+            switch(ui, &mut cst.semantic_only, "Semantic Nodes Only")
+                .on_hover_text("Skip blocks, parameter and argument lists and similar wrappers.");
+            switch(ui, &mut cst.single_hover, "Single Hover Symbol")
+                .on_hover_text("Hovering a row highlights only its node, not the nodes around it.");
+        });
+    }
     ui.separator();
 
-    let Some(node_id) = state
-        .selection
-        .primary
-        .filter(|id| state.node_store.get_file(*id).is_some())
-    else {
-        ui.label("Select a file node to see its syntax tree.");
+    let Some(node_id) = primary else {
+        if state.node_store.file_nodes.is_empty() {
+            ui.label("Open some files on the canvas to start populating the CST nodes list.");
+        } else {
+            ui.label("Select a file node to see its syntax tree.");
+        }
         return;
     };
     let node = state.node_store.get_file(node_id).unwrap();
     ui.label(egui::RichText::new(node.file_name()).strong());
-
-    state.cst.sync(&state.node_store, node_id);
     let Some(tree) = state.cst.tree() else {
         ui.label(format!("No syntax tree: {} is not supported.", node.language));
         return;
@@ -96,29 +243,58 @@ pub fn draw_cst_panel(ui: &mut egui::Ui, state: &mut AppState) {
         ui.colored_label(ERROR_COLOR, "Large file: only the first nodes are shown.");
     }
 
-    ui.checkbox(&mut state.cst.show_anonymous, "Show anonymous nodes");
-    ui.separator();
-
-    let show_anonymous = state.cst.show_anonymous;
-    let mut hovered = None;
+    let settings = state.settings.cst.clone();
+    let mut hovered: Option<Vec<(usize, usize)>> = None;
     if let Some(tree) = state.cst.tree() {
         let id = ui.make_persistent_id(("cst", node_id));
-        draw_node(ui, &tree.root, show_anonymous, id, true, &mut hovered);
+        let mut path = Vec::new();
+        draw_node(ui, &tree.root, &settings, id, 0, &mut path, &mut hovered);
     }
-    state.cst.hovered = hovered.map(|(start_line, end_line)| CstHover {
-        node_id,
-        start_line,
-        end_line,
-    });
+    if let Some(mut chain) = hovered {
+        let (start_line, end_line) = chain.pop().expect("the hovered row itself");
+        state.cst.hovered = Some(CstHover { node_id, start_line, end_line });
+        if !settings.single_hover {
+            state.cst.hover_ancestors = chain;
+        }
+    }
+}
+
+/// Fills [`CstPanelState::edge_nodes`] from the selection's visible edges.
+fn collect_edge_nodes(state: &mut AppState) {
+    let mut ends: Vec<(u64, usize)> = Vec::new();
+    for edge in state.edge_store.all_edges() {
+        if !edge.is_selected(&state.selection) || !edge.is_visible_for(&state.edge_style, &state.selection) {
+            continue;
+        }
+        if let Some(span) = edge.source_span {
+            ends.push((edge.source_node, span.start));
+        }
+        if let Some(span) = edge.target_span {
+            ends.push((edge.target_node, span.start));
+        }
+    }
+    ends.sort();
+    ends.dedup();
+    // Bounded: a hub file can carry hundreds of edges.
+    for (node_id, line) in ends.into_iter().take(200) {
+        let Some(tree) = state.cst.tree_of(&state.node_store, node_id) else { continue };
+        if let Some(range) = innermost_at(&tree.root, line) {
+            let ranges = state.cst.edge_nodes.entry(node_id).or_default();
+            if !ranges.contains(&range) {
+                ranges.push(range);
+            }
+        }
+    }
 }
 
 fn draw_node(
     ui: &mut egui::Ui,
     node: &CstNode,
-    show_anonymous: bool,
+    settings: &CstSettings,
     id: egui::Id,
-    is_root: bool,
-    hovered: &mut Option<(usize, usize)>,
+    depth: usize,
+    path: &mut Vec<(usize, usize)>,
+    hovered: &mut Option<Vec<(usize, usize)>>,
 ) {
     let mut text = egui::RichText::new(row_label(node)).monospace();
     if node.is_error {
@@ -127,29 +303,32 @@ fn draw_node(
         text = text.weak();
     }
 
-    let children: Vec<(usize, &CstNode)> = node
-        .children
-        .iter()
-        .enumerate()
-        .filter(|(_, c)| show_anonymous || c.named || c.is_error)
-        .collect();
+    let at_limit = settings.limit_depth && depth >= settings.max_depth;
+    let children = if at_limit { Vec::new() } else { listed_children(node, settings) };
+    path.push((node.start_line, node.end_line));
 
     let response = if children.is_empty() {
-        ui.label(text)
+        let hidden_below = at_limit && !listed_children(node, settings).is_empty();
+        if hidden_below {
+            ui.label(text.clone()).on_hover_text("Deeper nodes are past Max depth.")
+        } else {
+            ui.label(text)
+        }
     } else {
         egui::CollapsingHeader::new(text)
             .id_salt(id)
-            .default_open(is_root)
+            .default_open(depth == 0)
             .show(ui, |ui| {
-                for (i, child) in children {
-                    draw_node(ui, child, show_anonymous, id.with(i), false, hovered);
+                for (i, child) in children.into_iter().enumerate() {
+                    draw_node(ui, child, settings, id.with(i), depth + 1, path, hovered);
                 }
             })
             .header_response
     };
     if response.hovered() {
-        *hovered = Some((node.start_line, node.end_line));
+        *hovered = Some(path.clone());
     }
+    path.pop();
 }
 
 /// `field: kind "text"  L3–L7`, with 1-based lines.
@@ -201,6 +380,46 @@ mod tests {
         let mut store = NodeStore::default();
         let id = store.add_file(PathBuf::from(path), content.to_string(), egui::Pos2::ZERO);
         (store, id)
+    }
+
+    fn rust_tree(src: &str) -> CstTree {
+        parse_cst(std::path::Path::new("/p/a.rs"), src).unwrap()
+    }
+
+    fn kinds(nodes: &[&CstNode]) -> Vec<String> {
+        nodes.iter().map(|n| n.kind.clone()).collect()
+    }
+
+    #[test]
+    fn semantic_nodes_only_lists_a_wrappers_children_in_its_place() {
+        let tree = rust_tree("fn f(a: u8) {\n    let x = a;\n}\n");
+        let function = &tree.root.children[0];
+        let mut settings = CstSettings { semantic_only: false, ..Default::default() };
+        let plain = kinds(&listed_children(function, &settings));
+        assert!(plain.contains(&"parameters".to_owned()) && plain.contains(&"block".to_owned()), "{plain:?}");
+        settings.semantic_only = true;
+        let semantic = kinds(&listed_children(function, &settings));
+        assert!(!semantic.contains(&"block".to_owned()) && !semantic.contains(&"parameters".to_owned()));
+        assert!(semantic.contains(&"parameter".to_owned()) && semantic.contains(&"let_declaration".to_owned()), "{semantic:?}");
+        settings.show_hidden_types = true;
+        assert!(kinds(&listed_children(function, &settings)).contains(&"fn".to_owned()));
+    }
+
+    #[test]
+    fn max_depth_bounds_the_listed_rows() {
+        let tree = rust_tree("mod m {\n    fn f() {\n        let x = 1;\n    }\n}\n");
+        let deep = CstSettings { limit_depth: false, ..Default::default() };
+        let one = CstSettings { limit_depth: true, max_depth: 1, ..Default::default() };
+        assert_eq!(count_rows(&tree.root, &one, 0), 2, "source_file and mod_item");
+        assert!(count_rows(&tree.root, &deep, 0) > count_rows(&tree.root, &one, 0));
+    }
+
+    #[test]
+    fn innermost_named_node_covers_the_line() {
+        let tree = rust_tree("fn f() {\n    let x = 1;\n}\n");
+        assert_eq!(innermost_at(&tree.root, 1), Some((1, 1)), "the let statement");
+        assert_eq!(innermost_at(&tree.root, 0), Some((0, 0)));
+        assert_eq!(innermost_at(&tree.root, 99), None);
     }
 
     #[test]

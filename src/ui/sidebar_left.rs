@@ -5,7 +5,9 @@
 use crate::fs::tree::TreeNode;
 use crate::state::{AppState, LeftPanel};
 use crate::ui::icons;
-use crate::ui::panel::{bubble_frame, panel_header, panel_slot_frame, rail_frame, PANEL_WIDTH, RAIL_WIDTH};
+use crate::ui::panel::{
+    bubble_frame, panel_header, panel_slot_frame, rail_frame, HeaderSpec, PANEL_WIDTH, RAIL_WIDTH,
+};
 use crate::ui::{changes_panel, local_server_panel, search_panel};
 
 const PANELS: &[(&str, &str, LeftPanel)] = &[
@@ -79,7 +81,7 @@ pub fn draw_sidebar_left(
         .show(ctx, |ui| {
             bubble_frame(&theme).show(ui, |ui| {
                 ui.set_min_width(ui.available_width());
-                if panel_header(ui, icon_ch, title) {
+                if panel_header(ui, HeaderSpec::new(icon_ch, title)).close {
                     state.left_panel = None;
                 }
                 egui::ScrollArea::vertical()

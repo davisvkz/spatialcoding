@@ -1,3 +1,4 @@
+use std::collections::{HashMap, HashSet};
 use egui::{Color32, Pos2, Rect, Stroke, Vec2};
 
 use crate::analysis::dependencies::LineSpan;
@@ -10,11 +11,30 @@ use crate::nodes::lod::LodLevel;
 use crate::nodes::node_store::NodeStore;
 use crate::nodes::selection::Selection;
 
+/// Where edges of files hidden in collapsed folders go: each hidden file's
+/// collapsed folder and its box (`NodeStore::collapse_proxies`), and whether
+/// edges that end up between the same two boxes are drawn once.
+#[derive(Default)]
+pub struct CollapseRouting {
+    pub proxies: HashMap<u64, (u64, Rect)>,
+    pub merge: bool,
+    /// LSP "Dim Dependency Edges": while a symbol is active, edges not
+    /// linked to it keep only `1 - dim` of their opacity.
+    pub symbol_dim: Option<f32>,
+}
+
+/// An edge end after collapse routing: a shown file or a collapsed folder.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum EndKey {
+    File(u64),
+    Folder(u64),
+}
+
 /// Shortest horizontal reach of a bezier's control points, in screen pixels,
 /// so edges between vertically stacked nodes still bend outward.
 const MIN_BEZIER_REACH: f32 = 40.0;
 
-/// Visible pixel length under which an edge is dropped: `min_size_pct=1.0`
+/// Visible pixel length under which an edge is dropped: `hide_short_pct=1.0`
 /// hides edges shorter than this many pixels on screen.
 const MIN_VISIBLE_LEN_PX: f32 = 40.0;
 
@@ -42,11 +62,12 @@ pub fn draw_edges(
     font_size: f32,
     symbol_rect: &mut dyn FnMut(&FileNode, NameSpan) -> Option<Rect>,
     workspace_root: Option<&std::path::Path>,
+    collapse: &CollapseRouting,
 ) {
     let clip = painter.clip_rect();
     // Stroke scales softly with zoom so edges stay sub-pixel thin in overview.
     let stroke_px = 1.0 * viewport.zoom.clamp(0.6, 1.4);
-    let min_len_px = config.min_size_pct * MIN_VISIBLE_LEN_PX;
+    let min_len_px = config.hide_short_pct * MIN_VISIBLE_LEN_PX;
     let nothing_selected = selection.count() == 0 && selection.symbols().is_empty();
     // With ports on, edges end at the port on the node border (its line's
     // y on the facing side), the point `anchor` returns; otherwise they
@@ -54,6 +75,8 @@ pub fn draw_edges(
     let glyph_ends =
         !config.show_ports && LodLevel::from_zoom(viewport.zoom) != LodLevel::TitleOnly;
 
+    // Edges merged into one per pair of ends, when a collapsed folder is one.
+    let mut merged: HashSet<(bool, (EndKey, EndKey))> = HashSet::new();
     // Two passes, as v2: the dim web first, then the selection's edges on top.
     for connected_pass in [false, true] {
         for edge in edges.all_edges() {
@@ -71,33 +94,44 @@ pub fn draw_edges(
             ) else {
                 continue;
             };
+            let src_proxy = collapse.proxies.get(&edge.source_node).copied();
+            let tgt_proxy = collapse.proxies.get(&edge.target_node).copied();
+            if src_proxy.is_some() || tgt_proxy.is_some() {
+                let key = |node: u64, proxy: Option<(u64, Rect)>| {
+                    proxy.map_or(EndKey::File(node), |(folder, _)| EndKey::Folder(folder))
+                };
+                let ends = (key(edge.source_node, src_proxy), key(edge.target_node, tgt_proxy));
+                // Both ends inside one collapsed folder: nothing to draw.
+                if ends.0 == ends.1 {
+                    continue;
+                }
+                if collapse.merge && !merged.insert((connected_pass, ends)) {
+                    continue;
+                }
+            }
 
-            let src_rect = src.world_rect(node_width, font_size);
-            let tgt_rect = tgt.world_rect(node_width, font_size);
-            let (src_point, src_dir) = anchor(
-                src,
-                src_rect,
-                edge.source_span,
-                tgt_rect.center().x,
-                font_size,
-            );
-            let (tgt_point, tgt_dir) = anchor(
-                tgt,
-                tgt_rect,
-                edge.target_span,
-                src_rect.center().x,
-                font_size,
-            );
+            let src_rect = src_proxy.map_or_else(|| src.world_rect(node_width, font_size), |p| p.1);
+            let tgt_rect = tgt_proxy.map_or_else(|| tgt.world_rect(node_width, font_size), |p| p.1);
+            let (src_point, src_dir) = match src_proxy {
+                Some(_) => box_anchor(src_rect, tgt_rect.center().x),
+                None => anchor(src, src_rect, edge.source_span, tgt_rect.center().x, font_size),
+            };
+            let (tgt_point, tgt_dir) = match tgt_proxy {
+                Some(_) => box_anchor(tgt_rect, src_rect.center().x),
+                None => anchor(tgt, tgt_rect, edge.target_span, src_rect.center().x, font_size),
+            };
+            let src_glyphs = glyph_ends && src_proxy.is_none();
+            let tgt_glyphs = glyph_ends && tgt_proxy.is_none();
 
             let src_screen = edge
                 .source_name_span
-                .filter(|_| glyph_ends && !src.collapsed)
+                .filter(|_| src_glyphs && !src.collapsed)
                 .and_then(|name| symbol_rect(src, name))
                 .map(|rect| glyph_anchor(rect, src_dir))
                 .unwrap_or_else(|| viewport.world_to_screen(src_point));
             let tgt_screen = edge
                 .name_span
-                .filter(|_| glyph_ends && !tgt.collapsed)
+                .filter(|_| tgt_glyphs && !tgt.collapsed)
                 .and_then(|name| symbol_rect(tgt, name))
                 .map(|rect| glyph_anchor(rect, tgt_dir))
                 .unwrap_or_else(|| viewport.world_to_screen(tgt_point));
@@ -110,11 +144,12 @@ pub fn draw_edges(
                 continue;
             }
 
-            let alpha = if changes_highlight {
+            let mut alpha = if changes_highlight {
                 CONNECTED_ALPHA
             } else {
                 compute_alpha(config, is_connected, nothing_selected)
             };
+            alpha = symbol_dimmed(alpha, is_connected, collapse.symbol_dim);
             if alpha < 2 {
                 continue;
             }
@@ -247,11 +282,7 @@ pub fn draw_edges(
             }
 
             if arrow_head_visible(config, is_connected, nothing_selected) {
-                let arrow_size = if config.scale_arrow_heads {
-                    8.0 * viewport.zoom.clamp(0.5, 1.5)
-                } else {
-                    8.0
-                };
+                let arrow_size = arrow_head_size(config, viewport.zoom);
                 draw_arrow_head(painter, arrives_from, tgt_screen, color, arrow_size);
             }
         }
@@ -289,6 +320,23 @@ fn anchor(
         .and_then(|s| node.line_anchor_y(s.start, font_size))
         .unwrap_or(rect.top() + HEADER_HEIGHT * 0.5);
     (Pos2::new(x, y), dir)
+}
+
+/// LSP "Dim Dependency Edges": an edge not linked to the active symbol
+/// keeps `1 - dim` of its alpha.
+pub(crate) fn symbol_dimmed(alpha: u8, connected: bool, dim: Option<f32>) -> u8 {
+    match dim.filter(|_| !connected) {
+        Some(dim) => (alpha as f32 * (1.0 - dim.clamp(0.0, 1.0))).round() as u8,
+        None => alpha,
+    }
+}
+
+/// Middle of the side of a collapsed folder's box facing `toward_x`.
+fn box_anchor(rect: Rect, toward_x: f32) -> (Pos2, f32) {
+    match side_facing(rect.left(), rect.right(), toward_x) {
+        PortSide::Right => (rect.right_center(), 1.0),
+        PortSide::Left => (rect.left_center(), -1.0),
+    }
 }
 
 fn compute_alpha(config: &EdgeStyleConfig, is_connected: bool, nothing_selected: bool) -> u8 {
@@ -354,6 +402,17 @@ fn gradient_endpoints(
     (start, end)
 }
 
+/// Arrow-head length in screen pixels: 8 px, or with Scale Arrow Heads 8 px
+/// times the zoom, never below Min Size (and never above 1.5x).
+pub(crate) fn arrow_head_size(config: &EdgeStyleConfig, zoom: f32) -> f32 {
+    const BASE: f32 = 8.0;
+    if !config.scale_arrow_heads {
+        return BASE;
+    }
+    let min = config.min_size_pct.clamp(0.05, 1.0);
+    BASE * zoom.clamp(min, 1.5)
+}
+
 /// Fraction of the drawn span that fades between start and end colors. The
 /// solid tail at each end gets `(1 - frac) / 2` of the length, matching the
 /// v2 Code Canvas Gradient Gap control.
@@ -361,16 +420,15 @@ pub(crate) fn gradient_fade_fraction(config: &EdgeStyleConfig, span_len_px: f32)
     if !config.use_gradient || span_len_px <= 0.0 {
         return 1.0;
     }
+    // Edges shorter than Min Dist draw solid in the target color: the
+    // gradient would be imperceptible anyway.
+    let min_dist = config.gradient_min_dist_sq.max(0.0).sqrt();
+    if span_len_px <= min_dist {
+        return 0.0;
+    }
     let raw = match config.gradient_gap_mode {
         GradientGapMode::Percent => config.gradient_gap_pct,
-        GradientGapMode::Fixed => {
-            if span_len_px <= config.gradient_min_dist_px {
-                // Edges shorter than the min distance draw solid in the
-                // target color: the gradient would be imperceptible anyway.
-                return 0.0;
-            }
-            (span_len_px - config.gradient_min_dist_px) / span_len_px
-        }
+        GradientGapMode::Fixed => (span_len_px - min_dist) / span_len_px,
     };
     raw.clamp(0.0, 1.0)
 }
@@ -669,7 +727,36 @@ mod tests {
         cfg.use_gradient = true;
         cfg.gradient_gap_mode = GradientGapMode::Percent;
         cfg.gradient_gap_pct = 0.6;
+        cfg.gradient_min_dist_sq = 100.0 * 100.0;
         assert!((gradient_fade_fraction(&cfg, 200.0) - 0.6).abs() < 1e-5);
+        assert_eq!(gradient_fade_fraction(&cfg, 99.0), 0.0, "shorter than Min Dist: solid");
+    }
+
+    #[test]
+    fn symbol_dim_fades_only_edges_off_the_active_symbol() {
+        assert_eq!(symbol_dimmed(200, false, Some(0.8)), 40);
+        assert_eq!(symbol_dimmed(200, true, Some(0.8)), 200);
+        assert_eq!(symbol_dimmed(200, false, None), 200);
+        assert_eq!(symbol_dimmed(200, false, Some(1.5)), 0, "clamped");
+    }
+
+    #[test]
+    fn min_dist_default_is_v2s_40000_squared_px() {
+        let cfg = EdgeStyleConfig::default();
+        assert_eq!(cfg.gradient_min_dist_sq, 40_000.0);
+        assert_eq!(gradient_fade_fraction(&cfg, 199.0), 0.0);
+        assert!((gradient_fade_fraction(&cfg, 201.0) - cfg.gradient_gap_pct).abs() < 1e-5);
+    }
+
+    #[test]
+    fn scaled_arrow_heads_shrink_with_zoom_down_to_min_size() {
+        let mut cfg = EdgeStyleConfig { scale_arrow_heads: true, min_size_pct: 0.5, ..Default::default() };
+        assert_eq!(arrow_head_size(&cfg, 1.0), 8.0);
+        assert_eq!(arrow_head_size(&cfg, 0.1), 4.0, "clamped at Min Size");
+        cfg.min_size_pct = 0.25;
+        assert_eq!(arrow_head_size(&cfg, 0.1), 2.0);
+        cfg.scale_arrow_heads = false;
+        assert_eq!(arrow_head_size(&cfg, 0.1), 8.0);
     }
 
     #[test]
@@ -677,7 +764,7 @@ mod tests {
         let mut cfg = EdgeStyleConfig::default();
         cfg.use_gradient = true;
         cfg.gradient_gap_mode = GradientGapMode::Fixed;
-        cfg.gradient_min_dist_px = 40.0;
+        cfg.gradient_min_dist_sq = 40.0 * 40.0;
         // 200 - 40 = 160 of fade over 200 of span = 0.8
         assert!((gradient_fade_fraction(&cfg, 200.0) - 0.8).abs() < 1e-5);
         // span shorter than the min distance: fade collapses so the edge
@@ -687,7 +774,7 @@ mod tests {
 
     #[test]
     fn gradient_fade_disabled_when_use_gradient_off() {
-        let cfg = EdgeStyleConfig::default();
+        let cfg = EdgeStyleConfig { use_gradient: false, ..Default::default() };
         assert_eq!(gradient_fade_fraction(&cfg, 200.0), 1.0);
     }
 

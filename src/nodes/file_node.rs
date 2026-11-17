@@ -43,8 +43,10 @@ impl FileNode {
         egui::Rect::from_min_size(self.position, egui::vec2(node_width, height))
     }
 
+    /// Code lines the node draws: none while collapsed (only its frame and
+    /// a "N lines" note), otherwise every line.
     pub fn visible_lines(&self) -> usize {
-        self.line_count
+        if self.collapsed { 0 } else { self.line_count }
     }
 
     /// World-space y of the middle of code line `line` (0-based), or `None`

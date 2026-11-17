@@ -9,6 +9,8 @@ pub struct Viewport {
     pub zoom: f32,
     pub target_zoom: f32,
     pub zoom_center: Option<Pos2>,
+    /// Offset a smooth jump glides to (LSP Smooth Transition).
+    pub pan_target: Option<Vec2>,
 }
 
 impl Default for Viewport {
@@ -18,6 +20,7 @@ impl Default for Viewport {
             zoom: 1.0,
             target_zoom: 1.0,
             zoom_center: None,
+            pan_target: None,
         }
     }
 }
@@ -115,7 +118,19 @@ impl Viewport {
         if settled {
             self.zoom_center = None;
         }
-        !settled
+
+        let mut panning = false;
+        if let Some(target) = self.pan_target {
+            let t = (12.0 * dt).min(1.0);
+            self.offset += (target - self.offset) * t;
+            if (target - self.offset).length() * self.zoom < 0.5 {
+                self.offset = target;
+                self.pan_target = None;
+            } else {
+                panning = true;
+            }
+        }
+        !settled || panning
     }
 
     pub fn fit_to_rect(&mut self, world_rect: Rect, screen_rect: Rect) {
@@ -167,6 +182,7 @@ mod tests {
             zoom,
             target_zoom: zoom,
             zoom_center: None,
+            pan_target: None,
         }
     }
 

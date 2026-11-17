@@ -42,7 +42,11 @@ checklist "04 · Arestas de dependência via LSP ($lang)" \
   "Painel LSP → clicar em um símbolo|lista referências como antes e aplica o mesmo foco por símbolo às dependências; clicar numa referência continua navegando até ela" \
   "Conferir as arestas|esperado: $expected" \
   "Um import cujo símbolo é usado no arquivo|mantém a aresta Imports para o módulo local; o LSP evita duplicar a referência de import quando há usos reais do símbolo" \
-  "Painel direito → Edges → desmarcar Only Selected|todas as arestas ganham ponta de seta, não só as da seleção" \
+  "Painel direito → Dependency Edges → desmarcar Only selected|todas as arestas ganham ponta de seta, não só as da seleção" \
+  "Dar zoom out com Scale Arrow Heads ligado; mudar Min Size para 10% e para 100%|as setas encolhem com o zoom até o mínimo; com Scale Arrow Heads desligado o Min Size fica cinza e as setas não mudam" \
+  "Gradient (switch na legenda) ligado por padrão; arrastar Min Dist até 40000 e até 0|arestas curtas (menos de ~200 px na tela com 40000) ficam sólidas; com 0 todas têm gradiente; desligar o switch deixa Gap % e Min Dist cinzas" \
+  "Barrel and Re-export: passar o mouse no ⓘ; ligar Show re-export edges e Highlight do barrel|tooltip explica barrel/re-export; re-export começa desligado; cada Highlight pinta só o seu tipo" \
+  "⋮ → Reset Dependency Edges settings|todos os controles voltam ao padrão (gradiente ligado, markers ligados, re-export desligado)" \
   "Abrir helpers/strings.rs e navegar até o final|o bloco inclui after_fifty_lines depois da linha 50, sem truncar o arquivo" \
   "Settings → UI → Dot Grid|a grade de pontos volta a aparecer no fundo" \
   "Trocar o estilo: Bezier, Step, Line, PCB|o traçado das arestas muda de forma" \

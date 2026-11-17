@@ -33,7 +33,7 @@ fn select_and_open_lsp(app: &mut App, fx: &Fixture, rel: &str) -> u64 {
 
     app.app_state_mut().right_panel = Some(RightPanel::Layout);
     app.run();
-    app.get_by_label("LSP").click();
+    app.get_by_label("LSP Symbols").click();
     settle(app);
     assert_eq!(app.app_state().right_panel, Some(RightPanel::LspSymbols));
     id
@@ -113,6 +113,8 @@ fn lsp_tab_lists_the_symbols_of_the_selected_file() {
 fn clicking_a_symbol_lists_references_across_files_and_a_reference_focuses_its_line() {
     let fx = fixture();
     let mut app = app_with_fake_lsp(&fx);
+    // This test opens main.rs by clicking a reference, not automatically.
+    app.app_state_mut().settings.lsp.auto_open_matches = false;
     let util = select_and_open_lsp(&mut app, &fx, "src/util.rs");
 
     app.get_by_label("fn hello  L1").click();
@@ -249,4 +251,137 @@ fn scrolled_lsp_rows_keep_correct_hover_and_pointer_click_bounds() {
         app.app_state().lsp.references.as_ref().unwrap().symbol,
         "symbol_34"
     );
+}
+
+#[test]
+fn auto_open_matches_opens_the_reference_files_up_to_max_files() {
+    let fx = fixture();
+    let mut app = app_with_fake_lsp(&fx);
+    select_and_open_lsp(&mut app, &fx, "src/util.rs");
+    app.get_by_label("fn hello  L1").click();
+    settle(&mut app);
+    app.settle_edges();
+    let names: Vec<String> = app
+        .app_state()
+        .node_store
+        .file_nodes
+        .values()
+        .map(|n| n.file_name().to_owned())
+        .collect();
+    assert!(names.contains(&"main.rs".to_owned()), "main.rs opened by Auto Open Matches: {names:?}");
+}
+
+#[test]
+fn symbol_graph_history_and_clear_symbols() {
+    let fx = fixture();
+    std::fs::write(fx.path("src/util.rs"), "pub fn hello() {}\npub fn bye() {}\n").unwrap();
+    let mut app = app_with_fake_lsp(&fx);
+    app.app_state_mut().settings.lsp.auto_open_matches = false;
+    select_and_open_lsp(&mut app, &fx, "src/util.rs");
+    app.get_by_label_contains("Click a symbol to show LSP graph results.");
+    assert!(app.get_by_label("Previous symbol").is_disabled());
+    assert!(app.get_by_label("Clear Symbols").is_disabled());
+
+    app.get_by_label("fn hello  L1").click();
+    settle(&mut app);
+    app.get_by_label("fn bye  L2").click();
+    settle(&mut app);
+    app.get_by_label("References to bye");
+
+    app.get_by_label("Previous symbol").click();
+    settle(&mut app);
+    app.get_by_label("References to hello");
+    app.get_by_label("Next symbol").click();
+    settle(&mut app);
+    app.get_by_label("References to bye");
+
+    app.get_by_label("Clear Symbols").click();
+    app.run();
+    assert!(app.app_state().lsp.references.is_none());
+    assert!(app.app_state().selection.symbols().is_empty());
+    assert!(!app.app_state().selection.selected.is_empty(), "the file stays selected");
+}
+
+#[test]
+fn advanced_settings_card_opens_from_the_gear_and_edits_lsp_settings() {
+    let fx = fixture();
+    let mut app = app_with_fake_lsp(&fx);
+    select_and_open_lsp(&mut app, &fx, "src/util.rs");
+    assert!(app.query_by_label("LSP Advanced Settings").is_none());
+    app.get_by_label("Show advanced settings").click();
+    app.run();
+    app.get_by_label("LSP Advanced Settings");
+    for label in ["Query On Hover", "Auto Open Matches", "Keep Zoom", "Smooth Transition", "Dim Dependency Edges", "Reveal Through Collapse", "Out of View"] {
+        app.get_by_label(label).click();
+        app.run();
+    }
+    let lsp = &app.app_state().settings.lsp;
+    assert!(lsp.query_on_hover && !lsp.auto_open_matches && lsp.keep_zoom && !lsp.smooth_transition);
+    assert!(!lsp.dim_edges && lsp.reveal_through_collapse && lsp.out_of_view);
+    app.get_by_label("Close LSP Advanced Settings").click();
+    app.run();
+    assert!(app.query_by_label("LSP Advanced Settings").is_none());
+}
+
+#[test]
+fn query_on_hover_asks_for_references_after_resting_on_a_symbol() {
+    let fx = fixture();
+    let mut app = app_with_fake_lsp(&fx);
+    app.app_state_mut().settings.lsp.query_on_hover = true;
+    app.app_state_mut().settings.lsp.auto_open_matches = false;
+    select_and_open_lsp(&mut app, &fx, "src/util.rs");
+    app.get_by_label("fn hello  L1").hover();
+    for _ in 0..4 {
+        app.step();
+    }
+    settle(&mut app);
+    app.get_by_label("References to hello");
+    assert!(app.app_state().selection.symbols().is_empty(), "hovering does not select");
+}
+
+#[test]
+fn language_servers_dialog_lists_servers_and_file_counts() {
+    let fx = fixture();
+    let mut app = app_with_fake_lsp(&fx);
+    select_and_open_lsp(&mut app, &fx, "src/util.rs");
+    app.get_by_label("LSP menu").click();
+    app.run();
+    app.get_by_label("Language servers").click();
+    app.run();
+    app.get_by_label("Repository files");
+    app.get_by_label("Rust");
+    app.get_by_label("TypeScript");
+    assert!(app.get_by_label("Load project environment").is_disabled());
+    app.get_by_label("Canvas").click();
+    app.run();
+    app.get_by_label("Canvas files");
+    app.get_by_label("1");
+}
+
+#[test]
+fn keep_zoom_and_out_of_view_markers() {
+    let fx = fixture();
+    let mut app = app_with_fake_lsp(&fx);
+    {
+        let lsp = &mut app.app_state_mut().settings.lsp;
+        lsp.keep_zoom = true;
+        lsp.out_of_view = true;
+    }
+    select_and_open_lsp(&mut app, &fx, "src/util.rs");
+    app.get_by_label("fn hello  L1").click();
+    settle(&mut app);
+    app.settle_edges();
+    {
+        let s = app.app_state_mut();
+        s.viewport.zoom = 0.3;
+        s.viewport.target_zoom = 0.3;
+    }
+    app.show_at(Pos2::new(-20_000.0, -20_000.0), CANVAS_SPOT);
+    let canvas = egui::Rect::from_min_max(Pos2::new(40.0, 30.0), Pos2::new(1060.0, 900.0));
+    let markers = spatialcoding::ui::lsp_panel::out_of_view_markers(app.app_state(), canvas);
+    assert_eq!(markers.len(), 2, "util.rs and main.rs are off screen: {markers:?}");
+
+    app.get_by_label("L4  util::hello();").click();
+    settle(&mut app);
+    assert_eq!(app.app_state().viewport.zoom, 0.3, "Keep Zoom");
 }
