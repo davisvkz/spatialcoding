@@ -17,8 +17,12 @@ const GRID_STEP: egui::Vec2 = egui::vec2(750.0, 400.0);
 
 /// Opens `path` as a file node, adds it to its folder and rebuilds the
 /// dependency edges. Unreadable or binary files become empty nodes.
-/// Returns the new node id.
+/// A file already on the canvas is never opened twice: its existing node id is
+/// returned instead. Returns the node id.
 pub fn open_file(state: &mut AppState, path: &Path) -> u64 {
+    if let Some(id) = find_file_node(state, path) {
+        return id;
+    }
     let content = read_file_content(path).unwrap_or_default();
     let id = add_file_node(state, path, content);
     state.layout_dirty = true;
@@ -612,6 +616,7 @@ mod tests {
 
         let mut state = state_in(dir.path());
         let first = open_file(&mut state, &main_rs);
+        assert_eq!(open_file(&mut state, &main_rs), first, "reopening reuses the node");
         let ids = open_files(
             &mut state,
             &[main_rs.clone(), util_rs.clone(), util_rs.clone(), bin],
