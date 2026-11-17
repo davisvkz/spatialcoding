@@ -1,0 +1,5 @@
+{
+  "extends": "./tsconfig.base.json",
+  "compilerOptions": { "baseUrl": ".", "paths": { "@models/*": ["src/models/*"] } },
+  "include": ["src"]
+}

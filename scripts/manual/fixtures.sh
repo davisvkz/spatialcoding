@@ -384,5 +384,60 @@ EOF
 EOF
 }
 
+# Showcase: a copy of examples/showcase (the "shop" in TS/TSX, Rust, Python and
+# Go) made into a Git repository, so every feature has something to show.
+#  - ignored folders (node_modules, server/target) and a latin-1 file
+#  - web/src/data/catalog.ts regenerated with 1200 lines ("Collapse long files")
+#  - one commit with the committed files, then working-tree changes: three files
+#    edited, web/src/lazy/report.ts deleted and web/src/services/Cache.ts added
+#    (Changes panel, "Open all changed files", the Git graph comparison)
+fixture_showcase() {
+  local d=$1 root
+  root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd)
+  cp -R -- "$root/examples/showcase/." "$d/"
+  put "$d" node_modules/leftpad/index.js <<'EOF2'
+module.exports = (s) => s; // never listed: node_modules is skipped
+EOF2
+  put "$d" server/target/debug/build.log <<'EOF2'
+never listed: target is skipped
+EOF2
+  printf 'Caf\xe9 au lait: arquivo em latin-1\n' >"$d/docs/latin1.txt"
+  {
+    printf "import { DigitalProduct, Money, Product } from '../models';\n\n"
+    printf "// Generated: more than 1000 lines, so File nodes > Collapse long files folds it.\n"
+    printf 'export const catalog: Product[] = [\n'
+    local i
+    for ((i = 1; i <= 1200; i++)); do
+      if ((i % 10 == 0)); then
+        printf "  new DigitalProduct('p-%d', 'item %d', new Money(%d), 'https://example.com/%d.pdf'),\n" "$i" "$i" $((i * 7)) "$i"
+      else
+        printf "  new Product('p-%d', 'item %d', new Money(%d)),\n" "$i" "$i" $((i * 7))
+      fi
+    done
+    printf '];\n'
+  } >"$d/web/src/data/catalog.ts"
+
+  git -C "$d" init -q
+  git -C "$d" add -A
+  git -C "$d" -c user.name=Showcase -c user.email=showcase@example.com commit -q -m "Initial shop"
+
+  # Working-tree changes on top of the commit.
+  printf '\nexport const isDigital = (p: Product): p is DigitalProduct => p instanceof DigitalProduct;\n' \
+    >>"$d/web/src/models/Product.ts"
+  printf '\npub fn without_tax(value: Cents, rate_percent: u64) -> Cents {\n    value * 100 / (100 + rate_percent)\n}\n' \
+    >>"$d/server/src/domain/price.rs"
+  printf '\n\ndef most_expensive(items: list[Base]) -> Base:\n    return max(items, key=lambda i: i.price())\n' \
+    >>"$d/tools/shop/pricing.py"
+  rm -- "$d/web/src/lazy/report.ts"
+  put "$d" web/src/services/Cache.ts <<'EOF2'
+import { Entity } from '../models';
+import { InMemoryRepository } from './Repository';
+
+export class Cache<T extends Entity> extends InMemoryRepository<T> {
+  hits = 0;
+}
+EOF2
+}
+
 # Names accepted by `fixture`.
-FIXTURE_NAMES=(rust ts python go mixed large nested)
+FIXTURE_NAMES=(rust ts python go mixed large nested showcase)

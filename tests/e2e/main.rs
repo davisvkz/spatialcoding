@@ -20,6 +20,7 @@ mod panel_chrome;
 mod performance_panel;
 mod settings;
 mod shortcuts;
+mod showcase;
 mod sidebar_right;
 mod startup;
 mod toolbar;

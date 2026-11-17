@@ -1,0 +1,7 @@
+{
+  "extends": "./base.json",
+  "properties": {
+    "price": { "$ref": "./defs.json" },
+    "fallback": { "$ref": "https://example.com/not-local.json" }
+  }
+}

@@ -23,6 +23,7 @@ scripts/manual/04-edges.sh python
 | `10-open-all-and-clear.sh` | Ctrl+Shift+O, Clear All/Selected, Shift+X | `mixed` | só a pasta (canvas vazio) |
 | `11-cst.sh` | Aba CST: árvore tree-sitter e destaque de linhas (TASK-11) | `mixed` | um arquivo por linguagem + README e JSON |
 | `12-lsp.sh` | Aba LSP: símbolos, referências entre arquivos, pular para a linha (TASK-12; precisa do rust-analyzer) | `rust` | `util.rs` e `main.rs` + layout |
+| `13-showcase.sh` | Workspace de exemplo com tudo: todas as relações, barrels, Git, arquivo longo (TASK-46; os arquivos estão em `examples/showcase`) | `showcase` | todos os arquivos + layout |
 
 ## Fixtures
 
@@ -36,6 +37,7 @@ Cada execução apaga e recria a fixture, então pode editar os arquivos à vont
 - `mixed`: as quatro acima, mais `.github/`, `node_modules/`, `target/`, um PNG e um arquivo latin-1.
 - `large`: ~150 arquivos Rust longos com uma árvore de dependências.
 - `nested`: pastas profundas e duas pastas `src/` diferentes.
+- `showcase`: cópia de `examples/showcase` (loja em TS/TSX, Rust, Python, Go, Markdown e JSON) como repositório Git com um commit e mudanças no working tree.
 
 As arestas vêm dos servidores de linguagem: só aparecem para linguagens com
 servidor instalado (veja `12-lsp.sh`). As da fixture `rust` que o `04-edges.sh`
