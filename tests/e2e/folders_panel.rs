@@ -23,11 +23,186 @@ fn folders_panel(fx: &Fixture) -> (App, [u64; 4]) {
 
 fn folder(app: &App, fx: &Fixture, rel: &str) -> u64 {
     let path = fx.path(rel);
-    app.app_state().node_store.folder_nodes.values().find(|f| f.path == path).unwrap().id
+    app.app_state()
+        .node_store
+        .folder_nodes
+        .values()
+        .find(|f| f.path == path)
+        .unwrap()
+        .id
 }
 
 fn beziers(app: &App) -> usize {
-    frame_shapes(app).iter().filter(|s| matches!(s, egui::Shape::CubicBezier(_))).count()
+    frame_shapes(app)
+        .iter()
+        .filter(|s| matches!(s, egui::Shape::CubicBezier(_)))
+        .count()
+}
+
+#[test]
+fn folder_click_selects_highlights_shift_toggles_and_escape_clears() {
+    let fx = fixture();
+    let (mut app, _) = folders_panel(&fx);
+    app.app_state_mut().settings.folders.hide_folders = false;
+    let src = folder(&app, &fx, "src");
+    let bounds = app.app_state().node_store.get_folder(src).unwrap().bounds;
+    // The visible name is above the expanded frame.
+    app.show_at(bounds.min + egui::vec2(20.0, -8.0), CANVAS_SPOT);
+    click_at(&mut app, CANVAS_SPOT, egui::Modifiers::NONE);
+    assert_eq!(app.selected(), [src]);
+    let selected_rect = app.app_state().viewport.world_to_screen_rect(bounds);
+    assert!(
+        frame_shapes(&app).iter().any(|s| matches!(
+            s, egui::Shape::Rect(r) if r.rect == selected_rect && r.stroke.width >= 2.0
+        )),
+        "selected folder has an emphasized outline"
+    );
+    click_at(&mut app, CANVAS_SPOT, egui::Modifiers::SHIFT);
+    assert!(app.selected().is_empty());
+    click_at(&mut app, CANVAS_SPOT, egui::Modifiers::NONE);
+    app.press_key(egui::Key::Escape);
+    app.run();
+    assert!(app.selected().is_empty());
+    spatialcoding::folder_actions::set_collapsed(app.app_state_mut(), src, true);
+    app.run();
+    let bounds = app.app_state().node_store.get_folder(src).unwrap().bounds;
+    app.show_at(bounds.center(), CANVAS_SPOT);
+    click_at(&mut app, CANVAS_SPOT, egui::Modifiers::NONE);
+    assert_eq!(app.selected(), [src]);
+    let selected_rect = app.app_state().viewport.world_to_screen_rect(bounds);
+    assert!(frame_shapes(&app).iter().any(|s| matches!(
+        s, egui::Shape::Rect(r) if r.rect == selected_rect && r.stroke.width >= 2.0
+    )));
+}
+
+#[test]
+fn dragging_a_folder_without_prior_selection_moves_its_subtree_at_each_zoom() {
+    for collapsed in [false, true] {
+        for zoom in [0.5, 1.0] {
+            let fx = fixture();
+            let mut app = display_app(&fx);
+            app.app_state_mut().settings.folders.hide_folders = false;
+            app.app_state_mut().settings.folders.merge_empty = false;
+            let parent = folder(&app, &fx, "nested");
+            let child = folder(&app, &fx, "nested/deep/inner");
+            if collapsed {
+                spatialcoding::folder_actions::set_collapsed(app.app_state_mut(), child, true);
+                spatialcoding::folder_actions::set_collapsed(app.app_state_mut(), parent, true);
+                app.run();
+            }
+            {
+                let s = app.app_state_mut();
+                s.viewport.zoom = zoom;
+                s.viewport.target_zoom = zoom;
+                s.layout_settings.auto_layout = false;
+            }
+            let before = app
+                .app_state()
+                .node_store
+                .get_folder(parent)
+                .unwrap()
+                .bounds;
+            let at = if collapsed {
+                before.center()
+            } else {
+                before.min + egui::vec2(10.0, 10.0)
+            };
+            app.show_at(at, CANVAS_SPOT);
+            let files: Vec<_> = app
+                .app_state()
+                .node_store
+                .file_nodes
+                .values()
+                .map(|n| (n.id, n.path.starts_with(fx.path("nested")), n.position))
+                .collect();
+            let child_origin = app
+                .app_state()
+                .node_store
+                .get_folder(child)
+                .unwrap()
+                .collapsed_origin;
+            // An unrelated selection must not become the drag target.
+            let unrelated = files.iter().find(|f| !f.1).unwrap().0;
+            app.app_state_mut().selection.select(unrelated);
+            let camera = app.app_state().viewport.offset;
+            drag(&mut app, CANVAS_SPOT, CANVAS_SPOT + egui::vec2(80.0, 40.0));
+            assert_eq!(app.selected(), [parent]);
+            let after = app
+                .app_state()
+                .node_store
+                .get_folder(parent)
+                .unwrap()
+                .bounds;
+            let moved = after.min - before.min;
+            assert!(moved.x > 60.0 / zoom && moved.x <= 80.1 / zoom, "{moved:?}");
+            assert!(moved.y > 30.0 / zoom && moved.y <= 40.1 / zoom, "{moved:?}");
+            for (id, descendant, pos) in files {
+                assert_close(
+                    app.node_position(id),
+                    pos + if descendant { moved } else { egui::Vec2::ZERO },
+                );
+            }
+            if let Some(origin) = child_origin {
+                assert_close(
+                    app.app_state()
+                        .node_store
+                        .get_folder(child)
+                        .unwrap()
+                        .collapsed_origin
+                        .unwrap(),
+                    origin + moved,
+                );
+            }
+            assert_eq!(app.app_state().viewport.offset, camera);
+            for (button, space) in [
+                (egui::PointerButton::Secondary, false),
+                (egui::PointerButton::Primary, true),
+            ] {
+                app.show_at(after.center(), CANVAS_SPOT);
+                hold_key(&mut app, egui::Key::Space, space);
+                drag_with(
+                    &mut app,
+                    button,
+                    CANVAS_SPOT,
+                    CANVAS_SPOT + egui::vec2(30.0, 20.0),
+                );
+                hold_key(&mut app, egui::Key::Space, false);
+                assert_eq!(
+                    app.app_state()
+                        .node_store
+                        .get_folder(parent)
+                        .unwrap()
+                        .bounds,
+                    after
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn dragging_file_contents_picks_the_file_and_empty_canvas_never_moves_an_old_selection() {
+    let fx = fixture();
+    let (mut app, [main, util, ..]) = folders_panel(&fx);
+    app.app_state_mut().settings.folders.hide_folders = false;
+    let at = app.node_position(main) + egui::vec2(30.0, 10.0);
+    app.show_at(at, CANVAS_SPOT);
+    app.app_state_mut().selection.select(util);
+    let before = app.node_position(main);
+    let other = app.node_position(util);
+    drag(&mut app, CANVAS_SPOT, CANVAS_SPOT + egui::vec2(50.0, 20.0));
+    assert_eq!(
+        app.selected(),
+        [main],
+        "visible files win over enclosing folders"
+    );
+    assert_ne!(app.node_position(main), before);
+    assert_eq!(app.node_position(util), other);
+    let before = app.node_position(main);
+    app.show_at(egui::pos2(-50_000.0, -50_000.0), CANVAS_SPOT);
+    drag(&mut app, CANVAS_SPOT, CANVAS_SPOT + egui::vec2(50.0, 20.0));
+    assert_eq!(app.node_position(main), before);
+    assert!(app.selected().is_empty());
 }
 
 #[test]
@@ -57,16 +232,40 @@ fn double_clicking_a_folder_label_band_collapses_it_and_its_box_expands_it() {
         app.step();
     }
     let src = folder(&app, &fx, "src");
-    let top_left = app.app_state().node_store.get_folder(src).unwrap().bounds.min;
+    let top_left = app
+        .app_state()
+        .node_store
+        .get_folder(src)
+        .unwrap()
+        .bounds
+        .min;
     app.show_at(top_left + egui::vec2(40.0, 10.0), CANVAS_SPOT);
     double_click_at(&mut app, CANVAS_SPOT);
-    assert!(app.app_state().node_store.get_folder(src).unwrap().collapsed);
+    assert!(
+        app.app_state()
+            .node_store
+            .get_folder(src)
+            .unwrap()
+            .collapsed
+    );
     assert!(app.app_state().node_store.is_file_hidden(main));
 
-    let center = app.app_state().node_store.get_folder(src).unwrap().bounds.center();
+    let center = app
+        .app_state()
+        .node_store
+        .get_folder(src)
+        .unwrap()
+        .bounds
+        .center();
     app.show_at(center, CANVAS_SPOT);
     double_click_at(&mut app, CANVAS_SPOT);
-    assert!(!app.app_state().node_store.get_folder(src).unwrap().collapsed);
+    assert!(
+        !app.app_state()
+            .node_store
+            .get_folder(src)
+            .unwrap()
+            .collapsed
+    );
 }
 
 #[test]
@@ -103,7 +302,12 @@ fn edges_into_a_collapsed_folder_end_on_its_box_and_merge_by_default() {
     app.run();
     let merged = beziers(&app);
     assert_eq!(merged, 1, "both links end on the shared box, drawn once");
-    let box_rect = app.app_state().node_store.get_folder(shared).unwrap().bounds;
+    let box_rect = app
+        .app_state()
+        .node_store
+        .get_folder(shared)
+        .unwrap()
+        .bounds;
     let s = app.app_state();
     let screen_box = s.viewport.world_to_screen_rect(box_rect);
     let end = frame_shapes(&app)
@@ -158,7 +362,10 @@ fn hide_folders_is_on_by_default_and_folder_names_follow_the_display_switches() 
     let fx = fixture();
     let mut app = display_app(&fx);
     assert!(app.app_state().settings.folders.hide_folders, "v2 default");
-    assert!(!painted_texts(&app).iter().any(|t| t == "src"), "hidden folders draw no name");
+    assert!(
+        !painted_texts(&app).iter().any(|t| t == "src"),
+        "hidden folders draw no name"
+    );
 
     app.get_by_label("Hide Folders").click();
     app.run();
@@ -170,9 +377,13 @@ fn hide_folders_is_on_by_default_and_folder_names_follow_the_display_switches() 
     app.get_by_label("Merge Empty Folders").click();
     app.run();
     let texts = painted_texts(&app);
-    assert!(texts.iter().any(|t| t == "inner") || texts.iter().any(|t| t.contains(" / inner")), "{texts:?}");
+    assert!(
+        texts.iter().any(|t| t == "inner") || texts.iter().any(|t| t.contains(" / inner")),
+        "{texts:?}"
+    );
 
-    app.get_by_role_and_label(egui::accesskit::Role::CheckBox, "Folder Names").click();
+    app.get_by_role_and_label(egui::accesskit::Role::CheckBox, "Folder Names")
+        .click();
     app.run();
     assert!(!painted_texts(&app).iter().any(|t| t == "src"));
 }
@@ -197,25 +408,50 @@ fn a_revealed_selection_is_laid_out_under_its_collapsed_folders_card() {
     spatialcoding::folder_actions::set_collapsed(app.app_state_mut(), src, true);
     app.run();
     let s = app.app_state();
-    assert!(!s.node_store.is_file_hidden(main), "the selection stays visible");
-    let card = s.node_store.get_folder(src).unwrap().collapsed_rect().unwrap();
-    let node = s.node_store.get_file(main).unwrap().world_rect(s.settings.node_width, s.settings.font_size);
-    assert!(node.top() >= card.bottom() && (node.left() - card.left()).abs() < 1e-3, "{node:?} under {card:?}");
+    assert!(
+        !s.node_store.is_file_hidden(main),
+        "the selection stays visible"
+    );
+    let card = s
+        .node_store
+        .get_folder(src)
+        .unwrap()
+        .collapsed_rect()
+        .unwrap();
+    let node = s
+        .node_store
+        .get_file(main)
+        .unwrap()
+        .world_rect(s.settings.node_width, s.settings.font_size);
+    assert!(
+        node.top() >= card.bottom() && (node.left() - card.left()).abs() < 1e-3,
+        "{node:?} under {card:?}"
+    );
 }
 
 #[test]
 fn advanced_section_folds_and_its_switches_set_the_folder_options() {
     let fx = fixture();
     let mut app = display_app(&fx);
-    assert!(app.query_by_label("Zoom Fog").is_none(), "Advanced starts folded");
+    assert!(
+        app.query_by_label("Zoom Fog").is_none(),
+        "Advanced starts folded"
+    );
     app.get_by_label("Expand Advanced").click();
     app.run();
-    for label in ["Collapse: Edges Only", "Auto-Collapse on Zoom", "Zoom Fog", "Merge Collapsed Edges"] {
+    for label in [
+        "Collapse: Edges Only",
+        "Auto-Collapse on Zoom",
+        "Zoom Fog",
+        "Merge Collapsed Edges",
+    ] {
         app.get_by_label(label).click();
         app.run();
     }
     let f = &app.app_state().settings.folders;
-    assert!(f.collapse_edges_only && f.auto_collapse_on_zoom && f.zoom_fog && !f.merge_collapsed_edges);
+    assert!(
+        f.collapse_edges_only && f.auto_collapse_on_zoom && f.zoom_fog && !f.merge_collapsed_edges
+    );
     app.get_by_label("Reveal Through Collapse info");
 }
 
@@ -223,8 +459,13 @@ fn advanced_section_folds_and_its_switches_set_the_folder_options() {
 fn auto_collapse_on_zoom_turns_small_folders_into_blocks_without_moving_files() {
     let fx = fixture();
     let mut app = display_app(&fx);
-    let positions: Vec<egui::Pos2> =
-        app.app_state().node_store.file_nodes.values().map(|n| n.position).collect();
+    let positions: Vec<egui::Pos2> = app
+        .app_state()
+        .node_store
+        .file_nodes
+        .values()
+        .map(|n| n.position)
+        .collect();
     {
         let s = app.app_state_mut();
         s.settings.folders.auto_collapse_on_zoom = true;
@@ -234,8 +475,17 @@ fn auto_collapse_on_zoom_turns_small_folders_into_blocks_without_moving_files() 
     app.run();
     let s = app.app_state();
     assert!(!s.node_store.view.zoom_collapsed.is_empty());
-    assert!(s.node_store.file_nodes.values().all(|n| s.node_store.is_file_hidden(n.id)));
-    let after: Vec<egui::Pos2> = s.node_store.file_nodes.values().map(|n| n.position).collect();
+    assert!(s
+        .node_store
+        .file_nodes
+        .values()
+        .all(|n| s.node_store.is_file_hidden(n.id)));
+    let after: Vec<egui::Pos2> = s
+        .node_store
+        .file_nodes
+        .values()
+        .map(|n| n.position)
+        .collect();
     assert_eq!(positions, after, "zoom collapse never re-lays out");
     {
         let s = app.app_state_mut();

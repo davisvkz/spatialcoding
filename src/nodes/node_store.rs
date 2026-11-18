@@ -91,6 +91,50 @@ impl NodeStore {
         self.folder_nodes.get_mut(&id)
     }
 
+    /// Translate a file or a whole folder subtree, including hidden files and
+    /// collapsed card origins, so expanding later preserves the relative layout.
+    pub fn translate_node(&mut self, id: u64, delta: egui::Vec2) {
+        if let Some(file) = self.file_nodes.get_mut(&id) {
+            file.position += delta;
+            return;
+        }
+        let Some(path) = self.folder_nodes.get(&id).map(|f| f.path.clone()) else { return };
+        for file in self.file_nodes.values_mut().filter(|f| f.path.starts_with(&path)) {
+            file.position += delta;
+        }
+        for folder in self.folder_nodes.values_mut().filter(|f| f.path.starts_with(&path)) {
+            if folder.bounds.is_positive() {
+                folder.bounds = folder.bounds.translate(delta);
+            }
+            if let Some(origin) = &mut folder.collapsed_origin {
+                *origin += delta;
+            }
+        }
+    }
+
+    /// Pick the deepest visible block, including the name above an expanded
+    /// frame. Callers pick visible files first so folder contents stay usable.
+    pub fn folder_block_at_position(&self, world: egui::Pos2) -> Option<u64> {
+        let hidden = self.hidden_folders();
+        self.folder_nodes.values()
+            .filter(|f| !hidden.contains(&f.id) && f.bounds.is_positive())
+            .filter(|f| {
+                let bounds = if self.layout_collapsed(f.id) {
+                    f.collapsed_rect().unwrap_or(f.bounds)
+                } else if self.view.zoom_collapsed.contains(&f.id) {
+                    f.bounds
+                } else {
+                    egui::Rect::from_min_max(
+                        f.bounds.min - egui::vec2(0.0, super::folder_node::FOLDER_HEADER_HEIGHT),
+                        f.bounds.max,
+                    )
+                };
+                bounds.contains(world)
+            })
+            .max_by_key(|f| (f.path.components().count(), std::cmp::Reverse(f.id)))
+            .map(|f| f.id)
+    }
+
     pub fn all_file_ids(&self) -> Vec<u64> {
         self.file_nodes.keys().copied().collect()
     }

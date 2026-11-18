@@ -309,6 +309,12 @@ impl SpatialCodingApp {
                     } else {
                         self.state.selection.select(id);
                     }
+                } else if let Some(id) = self.folder_block_at(world_pos) {
+                    if ui.input(|i| i.modifiers.shift) {
+                        self.state.selection.toggle(id);
+                    } else {
+                        self.state.selection.select(id);
+                    }
                 } else {
                     self.state.selection.clear();
                 }
@@ -319,14 +325,33 @@ impl SpatialCodingApp {
         let dragging_node = response.dragged_by(egui::PointerButton::Primary)
             && !self.state.space_held
             && self.state.active_tool == Tool::Select;
+        if dragging_node && response.drag_started_by(egui::PointerButton::Primary) {
+            let picked = ui.input(|i| i.pointer.press_origin()).and_then(|pos| {
+                let world = self.state.viewport.screen_to_world(pos);
+                self.state.node_store.node_at_position(
+                    world, self.state.settings.node_width, self.state.settings.font_size,
+                ).or_else(|| self.folder_block_at(world))
+            });
+            match picked {
+                Some(id) => self.state.selection.select(id),
+                None => self.state.selection.clear(),
+            }
+        }
         if dragging_node {
             if let Some(id) = self.state.selection.primary {
                 let delta = response.drag_delta() / self.state.viewport.zoom;
-                if let Some(node) = self.state.node_store.get_file_mut(id) {
-                    node.position += delta;
-                }
+                self.state.node_store.translate_node(id, delta);
             }
         }
+    }
+
+    fn folder_block_at(&self, world: egui::Pos2) -> Option<u64> {
+        let store = &self.state.node_store;
+        let id = store.folder_block_at_position(world)?;
+        let settings = &self.state.settings.folders;
+        (store.view_collapsed(id)
+            || (!settings.hide_folders && !(settings.merge_empty && is_pass_through(store, id))))
+            .then_some(id)
     }
 
     /// Pick only the exact name returned by LSP, measured with the same token
@@ -436,12 +461,13 @@ impl SpatialCodingApp {
                 continue;
             }
             // v2 folders: unfilled square outline, dim name just above it.
-            let border = if changed { diff_color } else { theme.folder_border };
+            let selected = self.state.selection.is_selected(id);
+            let border = if selected { theme.selected_border } else if changed { diff_color } else { theme.folder_border };
             painter.rect_filled(screen_rect, 0.0, theme.folder_bg);
             painter.rect_stroke(
                 screen_rect,
                 0.0,
-                egui::Stroke::new(1.0_f32, border.gamma_multiply(fog)),
+                egui::Stroke::new(if selected { 2.0_f32 } else { 1.0 }, border.gamma_multiply(if selected { 1.0 } else { fog })),
                 egui::StrokeKind::Outside,
             );
             if !settings.show_folder_names {
@@ -507,12 +533,13 @@ impl SpatialCodingApp {
             return;
         }
         let rounding = (6.0 * zoom).clamp(1.0, 6.0);
-        let border = if changed { diff_color } else { theme.folder_border.gamma_multiply(1.6) };
+        let selected = self.state.selection.is_selected(folder.id);
+        let border = if selected { theme.selected_border } else if changed { diff_color } else { theme.folder_border.gamma_multiply(1.6) };
         painter.rect_filled(screen_rect, rounding, theme.node_bg.gamma_multiply(fog.max(0.5)));
         painter.rect_stroke(
             screen_rect,
             rounding,
-            egui::Stroke::new(1.0_f32, border.gamma_multiply(fog)),
+            egui::Stroke::new(if selected { 2.0_f32 } else { 1.0 }, border.gamma_multiply(if selected { 1.0 } else { fog })),
             egui::StrokeKind::Outside,
         );
         let inside = self

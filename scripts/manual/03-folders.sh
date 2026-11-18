@@ -10,6 +10,10 @@ checklist "03 · Pastas no canvas" \
   "Diminuir o zoom até os nomes se sobreporem; alternar Merge Overlapping Labels e Min Size|nomes sobrepostos viram 'pai / filho'; Min Size alto esconde nomes pequenos" \
   "Comparar frontend/src e backend/src|são dois quadros distintos, cada um só com os arquivos da própria pasta" \
   "Selecionar um nó e arrastá-lo para longe|o quadro da pasta cresce para continuar envolvendo o nó" \
+  "Clicar no nome, margem vazia ou cartão de uma pasta; Shift+clique; Esc|a pasta fica com contorno destacado; Shift alterna a seleção e Esc limpa" \
+  "Sem selecionar antes, clicar e segurar uma pasta e arrastar (expandida e recolhida, em diferentes zooms)|a pasta e todo seu conteúdo se movem juntos; arquivos de outras pastas ficam parados; ao expandir, a posição relativa do conteúdo é preservada" \
+  "Arrastar um arquivo dentro de uma pasta, depois arrastar uma área vazia fora dos quadros|só o arquivo sob o cursor se move; arrastar o fundo não move a seleção antiga" \
+  "Arrastar sobre uma pasta com botão direito ou Space+botão esquerdo|a câmera se move sem deslocar a pasta nem seu conteúdo" \
   "Layout (painel direito) → mudar Folder Padding|a margem entre os nós e o quadro da pasta muda" \
   "Clicar num nó e usar Clear Selected na toolbar|o nó some e o contador da pasta diminui; pasta que fica vazia desaparece" \
   "Dar duplo clique na faixa do nome de uma pasta|a pasta vira um cartão compacto 'nome · N files · collapsed'; as arestas dos arquivos escondidos chegam na lateral do cartão; duplo clique no cartão expande" \
