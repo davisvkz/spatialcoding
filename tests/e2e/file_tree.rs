@@ -2,6 +2,84 @@ use egui_kittest::kittest::Queryable;
 
 use crate::common::*;
 
+fn folder_menu(app: &mut App, label: &str) {
+    let bounds = app.get_by_label(label).raw_bounds().unwrap();
+    let pos = egui::pos2(
+        ((bounds.x0 + bounds.x1) / 2.0) as f32,
+        ((bounds.y0 + bounds.y1) / 2.0) as f32,
+    );
+    app.input_mut().events.push(egui::Event::PointerMoved(pos));
+    for pressed in [true, false] {
+        app.input_mut().events.push(egui::Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Secondary,
+            pressed,
+            modifiers: egui::Modifiers::NONE,
+        });
+        app.step();
+    }
+    app.run();
+    app.get_by_label("Open on canvas");
+    app.get_by_label("Remove from canvas");
+}
+
+#[test]
+fn folder_context_menu_opens_recursively_and_removes_only_its_subtree() {
+    let fx = fixture();
+    std::fs::create_dir_all(fx.path("src/nested")).unwrap();
+    std::fs::write(fx.path("src/nested/deep.rs"), "fn deep() {}\n").unwrap();
+    let mut app = app_with(&fx);
+    app.open(&fx.path("web/a.ts"));
+    folder_menu(&mut app, "src (3)");
+    assert!(
+        app.query_by_label("main.rs").is_none(),
+        "right click does not expand"
+    );
+    app.get_by_label("Open on canvas").click();
+    app.settle_edges();
+    assert!(
+        app.query_by_label("Open on canvas").is_none(),
+        "action closes menu"
+    );
+    assert_eq!(app.app_state().node_store.file_nodes.len(), 4);
+    folder_menu(&mut app, "src (3)");
+    app.get_by_label("Open on canvas").click();
+    app.settle_edges();
+    assert_eq!(
+        app.app_state().node_store.file_nodes.len(),
+        4,
+        "no duplicates"
+    );
+
+    let id = app
+        .app_state()
+        .node_store
+        .file_nodes
+        .values()
+        .find(|n| n.path == fx.path("src/main.rs"))
+        .unwrap()
+        .id;
+    app.app_state_mut().selection.select(id);
+    folder_menu(&mut app, "src (3)");
+    app.get_by_label("Remove from canvas").click();
+    app.settle_edges();
+    let state = app.app_state();
+    assert_eq!(state.node_store.file_nodes.len(), 1);
+    assert_eq!(
+        state.node_store.file_nodes.values().next().unwrap().path,
+        fx.path("web/a.ts")
+    );
+    assert!(state
+        .node_store
+        .folder_nodes
+        .values()
+        .all(|n| !n.path.starts_with(fx.path("src"))));
+    assert_eq!(state.selection.count(), 0);
+    assert_eq!(state.edge_store.all_edges().count(), 0);
+    assert!(fx.path("src/main.rs").is_file());
+    assert!(fx.path("src/nested/deep.rs").is_file());
+}
+
 /// Expands `src/` by clicking its name. v2 lists the folder's children
 /// directly, so the workspace root has no row of its own.
 fn expand_root_and_src(app: &mut App, _fx: &Fixture) {
@@ -14,7 +92,10 @@ fn clicking_folder_names_expands_them() {
     let fx = fixture();
     let mut app = app_with(&fx);
     app.get_by_label("src (2)");
-    assert!(app.query_by_label_contains("main.rs").is_none(), "src starts collapsed");
+    assert!(
+        app.query_by_label_contains("main.rs").is_none(),
+        "src starts collapsed"
+    );
 
     expand_root_and_src(&mut app, &fx);
 

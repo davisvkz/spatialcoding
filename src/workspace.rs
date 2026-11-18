@@ -96,6 +96,25 @@ pub fn open_all_files(state: &mut AppState) -> Vec<u64> {
     open_files_in_bulk(state, &paths)
 }
 
+/// Opens the text files in a Workspace folder and all of its descendants.
+pub fn open_folder_on_canvas(state: &mut AppState, dir: &Path) -> Vec<u64> {
+    let paths: Vec<PathBuf> = folder_text_files(state)
+        .iter()
+        .filter(|path| path.starts_with(dir))
+        .cloned()
+        .collect();
+    open_files_in_bulk(state, &paths)
+}
+
+/// Closes a folder subtree on the canvas only; nothing is deleted from disk.
+pub fn remove_folder_from_canvas(state: &mut AppState, dir: &Path) {
+    let ids: Vec<u64> = state.node_store.file_nodes.values()
+        .filter(|node| node.path.starts_with(dir))
+        .map(|node| node.id)
+        .collect();
+    remove_nodes(state, &ids);
+}
+
 fn collect_files(node: &TreeNode, out: &mut Vec<PathBuf>) {
     match node {
         TreeNode::File { path, .. } => out.push(path.clone()),

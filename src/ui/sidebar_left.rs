@@ -18,11 +18,7 @@ const PANELS: &[(&str, &str, LeftPanel)] = &[
     (icons::PLUG, "Local Server", LeftPanel::LocalServer),
 ];
 
-pub fn draw_sidebar_left(
-    ctx: &egui::Context,
-    state: &mut AppState,
-    tree: &mut Option<TreeNode>,
-) {
+pub fn draw_sidebar_left(ctx: &egui::Context, state: &mut AppState, tree: &mut Option<TreeNode>) {
     // 1. The always-visible icon rail, icons centered.
     egui::SidePanel::left("sidebar_left_rail")
         .exact_width(RAIL_WIDTH)
@@ -91,7 +87,9 @@ pub fn draw_sidebar_left(
                         LeftPanel::Workspace => draw_workspace(ui, state, tree),
                         LeftPanel::Changes => changes_panel::draw_changes_panel(ui, state),
                         LeftPanel::Search => search_panel::draw_search_panel(ui, state),
-                        LeftPanel::LocalServer => local_server_panel::draw_local_server_panel(ui, state),
+                        LeftPanel::LocalServer => {
+                            local_server_panel::draw_local_server_panel(ui, state)
+                        }
                     });
             });
         });
@@ -135,7 +133,7 @@ fn draw_tree_node(ui: &mut egui::Ui, node: &mut TreeNode, state: &mut AppState, 
     match node {
         TreeNode::Dir {
             name,
-            path: _,
+            path,
             children,
             expanded,
             ..
@@ -150,9 +148,20 @@ fn draw_tree_node(ui: &mut egui::Ui, node: &mut TreeNode, state: &mut AppState, 
                 count: Some(file_count),
                 label: &label,
             };
-            if tree_row(ui, &state.theme, row).clicked() {
+            let response = tree_row(ui, &state.theme, row);
+            if response.clicked() {
                 *expanded = !*expanded;
             }
+            response.context_menu(|ui| {
+                if ui.button("Open on canvas").clicked() {
+                    crate::workspace::open_folder_on_canvas(state, path);
+                    ui.close_menu();
+                }
+                if ui.button("Remove from canvas").clicked() {
+                    crate::workspace::remove_folder_from_canvas(state, path);
+                    ui.close_menu();
+                }
+            });
             if *expanded {
                 for child in children.iter_mut() {
                     draw_tree_node(ui, child, state, depth + 1);
@@ -225,7 +234,11 @@ struct TreeRow<'a> {
 
 /// One 22px row of the Workspace tree: chevron or file badge, 12px name and
 /// a muted count on the right.
-fn tree_row(ui: &mut egui::Ui, theme: &crate::ui::theme::Theme, row: TreeRow<'_>) -> egui::Response {
+fn tree_row(
+    ui: &mut egui::Ui,
+    theme: &crate::ui::theme::Theme,
+    row: TreeRow<'_>,
+) -> egui::Response {
     use egui::{Align2, FontId};
     let (rect, response) = ui.allocate_exact_size(
         egui::vec2(ui.available_width(), ROW_HEIGHT),
@@ -245,7 +258,11 @@ fn tree_row(ui: &mut egui::Ui, theme: &crate::ui::theme::Theme, row: TreeRow<'_>
     let mid = rect.center().y;
     let mut x = rect.left() + 8.0 + row.depth as f32 * INDENT;
     if let Some(open) = row.chevron {
-        let ch = if open { icons::CHEVRON_DOWN } else { icons::CHEVRON_RIGHT };
+        let ch = if open {
+            icons::CHEVRON_DOWN
+        } else {
+            icons::CHEVRON_RIGHT
+        };
         painter.text(
             egui::pos2(x + 6.0, mid),
             Align2::CENTER_CENTER,
@@ -313,7 +330,10 @@ mod tests {
         let mut canvas = egui::Rect::NOTHING;
         for _ in 0..3 {
             let input = egui::RawInput {
-                screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1280.0, 800.0))),
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(1280.0, 800.0),
+                )),
                 ..Default::default()
             };
             let _ = ctx.run(input, |ctx| {
