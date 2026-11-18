@@ -1,5 +1,5 @@
-use std::collections::{HashMap, HashSet};
 use egui::{Color32, Pos2, Rect, Stroke, Vec2};
+use std::collections::{HashMap, HashSet};
 
 use crate::analysis::dependencies::LineSpan;
 use crate::canvas::viewport::Viewport;
@@ -65,6 +65,18 @@ pub fn draw_edges(
     collapse: &CollapseRouting,
 ) {
     let clip = painter.clip_rect();
+    let file_rects: Vec<_> = nodes
+        .file_nodes
+        .values()
+        .filter(|node| !nodes.is_file_hidden(node.id))
+        .map(|node| {
+            (
+                node.id,
+                viewport.world_to_screen_rect(node.world_rect(node_width, font_size)),
+            )
+        })
+        .filter(|(_, rect)| clip.intersects(*rect))
+        .collect();
     // Stroke scales softly with zoom so edges stay sub-pixel thin in overview.
     let stroke_px = 1.0 * viewport.zoom.clamp(0.6, 1.4);
     let min_len_px = config.hide_short_pct * MIN_VISIBLE_LEN_PX;
@@ -100,7 +112,10 @@ pub fn draw_edges(
                 let key = |node: u64, proxy: Option<(u64, Rect)>| {
                     proxy.map_or(EndKey::File(node), |(folder, _)| EndKey::Folder(folder))
                 };
-                let ends = (key(edge.source_node, src_proxy), key(edge.target_node, tgt_proxy));
+                let ends = (
+                    key(edge.source_node, src_proxy),
+                    key(edge.target_node, tgt_proxy),
+                );
                 // Both ends inside one collapsed folder: nothing to draw.
                 if ends.0 == ends.1 {
                     continue;
@@ -114,11 +129,23 @@ pub fn draw_edges(
             let tgt_rect = tgt_proxy.map_or_else(|| tgt.world_rect(node_width, font_size), |p| p.1);
             let (src_point, src_dir) = match src_proxy {
                 Some(_) => box_anchor(src_rect, tgt_rect.center().x),
-                None => anchor(src, src_rect, edge.source_span, tgt_rect.center().x, font_size),
+                None => anchor(
+                    src,
+                    src_rect,
+                    edge.source_span,
+                    tgt_rect.center().x,
+                    font_size,
+                ),
             };
             let (tgt_point, tgt_dir) = match tgt_proxy {
                 Some(_) => box_anchor(tgt_rect, src_rect.center().x),
-                None => anchor(tgt, tgt_rect, edge.target_span, src_rect.center().x, font_size),
+                None => anchor(
+                    tgt,
+                    tgt_rect,
+                    edge.target_span,
+                    src_rect.center().x,
+                    font_size,
+                ),
             };
             let src_glyphs = glyph_ends && src_proxy.is_none();
             let tgt_glyphs = glyph_ends && tgt_proxy.is_none();
@@ -205,88 +232,143 @@ pub fn draw_edges(
             };
             let stroke = Stroke::new(width, color);
 
-            // Direction the edge arrives from, for the arrow head.
-            let mut arrives_from = src_screen;
-            let use_gradient = config.use_gradient
-                && edge.label.is_some()
-                && override_color.is_none()
-                && !selected_edge;
-            let (start_col, end_col) =
-                folder_colors.unwrap_or_else(|| gradient_endpoints(config, edge));
-            let span_len = (tgt_screen - src_screen).length();
-            let fade_frac = gradient_fade_fraction(config, span_len);
-            match config.style {
-                EdgeStyle::Bezier => {
-                    let [_, _, cp2, _] = bezier_points(src_screen, src_dir, tgt_screen, tgt_dir);
-                    arrives_from = cp2;
-                    if use_gradient {
-                        draw_bezier_gradient(
-                            painter, src_screen, src_dir, tgt_screen, tgt_dir, width, alpha,
-                            start_col, end_col, fade_frac,
-                        );
-                    } else {
-                        draw_bezier(painter, src_screen, src_dir, tgt_screen, tgt_dir, stroke);
+            // Keep glyph endpoints above their own files, but never paint
+            // strokes, markers or arrow heads over an unrelated file.
+            let bounds = bezier_points(src_screen, src_dir, tgt_screen, tgt_dir)
+                .into_iter()
+                .fold(edge_rect, |rect, point| {
+                    rect.union(Rect::from_min_max(point, point))
+                })
+                .expand(arrow_head_size(config, viewport.zoom).max(width * 1.6) + 2.0)
+                .intersect(clip);
+            let regions = uncovered_regions(
+                bounds,
+                file_rects
+                    .iter()
+                    .filter(|(id, _)| *id != edge.source_node && *id != edge.target_node)
+                    .map(|(_, rect)| *rect),
+            );
+            let paint = |painter: &egui::Painter| {
+                // Direction the edge arrives from, for the arrow head.
+                let mut arrives_from = src_screen;
+                let use_gradient = config.use_gradient
+                    && edge.label.is_some()
+                    && override_color.is_none()
+                    && !selected_edge;
+                let (start_col, end_col) =
+                    folder_colors.unwrap_or_else(|| gradient_endpoints(config, edge));
+                let span_len = (tgt_screen - src_screen).length();
+                let fade_frac = gradient_fade_fraction(config, span_len);
+                match config.style {
+                    EdgeStyle::Bezier => {
+                        let [_, _, cp2, _] =
+                            bezier_points(src_screen, src_dir, tgt_screen, tgt_dir);
+                        arrives_from = cp2;
+                        if use_gradient {
+                            draw_bezier_gradient(
+                                painter, src_screen, src_dir, tgt_screen, tgt_dir, width, alpha,
+                                start_col, end_col, fade_frac,
+                            );
+                        } else {
+                            draw_bezier(painter, src_screen, src_dir, tgt_screen, tgt_dir, stroke);
+                        }
+                    }
+                    EdgeStyle::Step => {
+                        if use_gradient {
+                            draw_polyline_gradient(
+                                painter,
+                                &step_points(src_screen, tgt_screen),
+                                width,
+                                alpha,
+                                start_col,
+                                end_col,
+                                fade_frac,
+                            );
+                        } else {
+                            draw_step(painter, src_screen, tgt_screen, stroke);
+                        }
+                    }
+                    EdgeStyle::Line => {
+                        if use_gradient {
+                            draw_polyline_gradient(
+                                painter,
+                                &[src_screen, tgt_screen],
+                                width,
+                                alpha,
+                                start_col,
+                                end_col,
+                                fade_frac,
+                            );
+                        } else {
+                            painter.line_segment([src_screen, tgt_screen], stroke);
+                        }
+                    }
+                    EdgeStyle::Pcb => {
+                        if use_gradient {
+                            draw_polyline_gradient(
+                                painter,
+                                &pcb_points(src_screen, tgt_screen),
+                                width,
+                                alpha,
+                                start_col,
+                                end_col,
+                                fade_frac,
+                            );
+                        } else {
+                            draw_pcb(painter, src_screen, tgt_screen, stroke);
+                        }
                     }
                 }
-                EdgeStyle::Step => {
-                    if use_gradient {
-                        draw_polyline_gradient(
-                            painter,
-                            &step_points(src_screen, tgt_screen),
-                            width,
-                            alpha,
-                            start_col,
-                            end_col,
-                            fade_frac,
-                        );
-                    } else {
-                        draw_step(painter, src_screen, tgt_screen, stroke);
-                    }
-                }
-                EdgeStyle::Line => {
-                    if use_gradient {
-                        draw_polyline_gradient(
-                            painter,
-                            &[src_screen, tgt_screen],
-                            width,
-                            alpha,
-                            start_col,
-                            end_col,
-                            fade_frac,
-                        );
-                    } else {
-                        painter.line_segment([src_screen, tgt_screen], stroke);
-                    }
-                }
-                EdgeStyle::Pcb => {
-                    if use_gradient {
-                        draw_polyline_gradient(
-                            painter,
-                            &pcb_points(src_screen, tgt_screen),
-                            width,
-                            alpha,
-                            start_col,
-                            end_col,
-                            fade_frac,
-                        );
-                    } else {
-                        draw_pcb(painter, src_screen, tgt_screen, stroke);
-                    }
-                }
-            }
 
-            if config.show_connection_markers {
-                let r = width * 1.6;
-                painter.circle_filled(src_screen, r, color);
-                painter.circle_filled(tgt_screen, r, color);
-            }
+                if config.show_connection_markers {
+                    let r = width * 1.6;
+                    painter.circle_filled(src_screen, r, color);
+                    painter.circle_filled(tgt_screen, r, color);
+                }
 
-            if arrow_head_visible(config, is_connected, nothing_selected) {
-                let arrow_size = arrow_head_size(config, viewport.zoom);
-                draw_arrow_head(painter, arrives_from, tgt_screen, color, arrow_size);
+                if arrow_head_visible(config, is_connected, nothing_selected) {
+                    let arrow_size = arrow_head_size(config, viewport.zoom);
+                    draw_arrow_head(painter, arrives_from, tgt_screen, color, arrow_size);
+                }
+            };
+            for region in regions {
+                paint(&painter.with_clip_rect(region));
             }
         }
     }
+}
+
+/// Disjoint clip rectangles covering the edge bounds outside file blocks.
+/// Rectangular clipping applies equally to curves, gradients and decorations.
+fn uncovered_regions(bounds: Rect, blockers: impl Iterator<Item = Rect>) -> Vec<Rect> {
+    let mut regions = vec![bounds];
+    for blocker in blockers {
+        regions = regions
+            .into_iter()
+            .flat_map(|region| {
+                let cut = region.intersect(blocker);
+                if !cut.is_positive() {
+                    return vec![region];
+                }
+                [
+                    Rect::from_min_max(region.min, Pos2::new(region.max.x, cut.min.y)),
+                    Rect::from_min_max(Pos2::new(region.min.x, cut.max.y), region.max),
+                    Rect::from_min_max(
+                        Pos2::new(region.min.x, cut.min.y),
+                        Pos2::new(cut.min.x, cut.max.y),
+                    ),
+                    Rect::from_min_max(
+                        Pos2::new(cut.max.x, cut.min.y),
+                        Pos2::new(region.max.x, cut.max.y),
+                    ),
+                ]
+                .into_iter()
+                .filter(Rect::is_positive)
+                .collect()
+            })
+            .collect();
+    }
+    regions
 }
 
 /// Touch the side of the actual name facing the other endpoint, not the file
@@ -630,6 +712,107 @@ mod tests {
     }
 
     #[test]
+    fn unrelated_file_occludes_every_edge_style_but_not_its_endpoints() {
+        let mut nodes = NodeStore::default();
+        let source = nodes.add_file("a.rs".into(), "a".into(), Pos2::ZERO);
+        let target = nodes.add_file("b.rs".into(), "b".into(), Pos2::new(400.0, 0.0));
+        nodes.add_file("hidden/c.rs".into(), "c".into(), Pos2::new(200.0, 0.0));
+        let folder = nodes.add_folder("hidden".into(), 1);
+        let mut edges = EdgeStore::default();
+        let name = NameSpan {
+            line: 0,
+            start_byte: 0,
+            end_byte: 1,
+        };
+        edges.add_full(
+            source,
+            target,
+            Some("fn".into()),
+            None,
+            None,
+            None,
+            Some(name),
+            Some(name),
+            EdgeKind::Direct,
+        );
+        let clip = Rect::from_min_size(Pos2::ZERO, Vec2::splat(600.0));
+        let blocked = Pos2::new(250.0, HEADER_HEIGHT * 0.5);
+        for style in [
+            EdgeStyle::Bezier,
+            EdgeStyle::Step,
+            EdgeStyle::Line,
+            EdgeStyle::Pcb,
+        ] {
+            for use_gradient in [false, true] {
+                for hidden in [false, true] {
+                    nodes.folder_nodes.get_mut(&folder).unwrap().collapsed = hidden;
+                    let mut selection = Selection::default();
+                    if !use_gradient {
+                        selection.select(source);
+                    }
+                    let ctx = egui::Context::default();
+                    let output = ctx.run(egui::RawInput::default(), |ctx| {
+                        let painter = ctx
+                            .layer_painter(egui::LayerId::background())
+                            .with_clip_rect(clip);
+                        draw_edges(
+                            &painter,
+                            &edges,
+                            &nodes,
+                            &Viewport::default(),
+                            &EdgeStyleConfig {
+                                style,
+                                use_gradient,
+                                show_ports: false,
+                                ..Default::default()
+                            },
+                            &selection,
+                            100.0,
+                            10.0,
+                            &mut |node, _| {
+                                Some(Rect::from_min_size(
+                                    node.position + Vec2::new(30.0, 10.0),
+                                    Vec2::new(10.0, 8.0),
+                                ))
+                            },
+                            None,
+                            &CollapseRouting::default(),
+                        );
+                    });
+                    assert!(!output.shapes.is_empty());
+                    assert_eq!(
+                        output.shapes.iter().any(|s| s.clip_rect.contains(blocked)),
+                        hidden,
+                        "{style:?}, gradient={use_gradient}, hidden={hidden}",
+                    );
+                    for endpoint in [Pos2::new(40.0, 14.0), Pos2::new(430.0, 14.0)] {
+                        assert!(output.shapes.iter().any(|s| s.clip_rect.contains(endpoint)));
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn overlapping_blockers_leave_disjoint_regions_and_preserve_uncovered_area() {
+        let bounds = Rect::from_min_size(Pos2::ZERO, Vec2::splat(100.0));
+        let blockers = [
+            Rect::from_min_max(Pos2::new(20.0, 20.0), Pos2::new(60.0, 60.0)),
+            Rect::from_min_max(Pos2::new(40.0, 40.0), Pos2::new(80.0, 80.0)),
+        ];
+        let regions = uncovered_regions(bounds, blockers.into_iter());
+        assert_eq!(regions.iter().map(Rect::area).sum::<f32>(), 7200.0);
+        for (index, region) in regions.iter().enumerate() {
+            assert!(bounds.contains_rect(*region));
+            assert!(blockers.iter().all(|b| !b.intersect(*region).is_positive()));
+            assert!(regions[index + 1..]
+                .iter()
+                .all(|other| !other.intersect(*region).is_positive()));
+        }
+        assert!(uncovered_regions(bounds, [bounds].into_iter()).is_empty());
+    }
+
+    #[test]
     fn anchor_sits_on_the_side_facing_the_other_node_at_the_span_line() {
         let node = file("a\nb\nc\n", 0.0);
         let rect = node.world_rect(100.0, 10.0);
@@ -729,7 +912,11 @@ mod tests {
         cfg.gradient_gap_pct = 0.6;
         cfg.gradient_min_dist_sq = 100.0 * 100.0;
         assert!((gradient_fade_fraction(&cfg, 200.0) - 0.6).abs() < 1e-5);
-        assert_eq!(gradient_fade_fraction(&cfg, 99.0), 0.0, "shorter than Min Dist: solid");
+        assert_eq!(
+            gradient_fade_fraction(&cfg, 99.0),
+            0.0,
+            "shorter than Min Dist: solid"
+        );
     }
 
     #[test]
@@ -750,7 +937,11 @@ mod tests {
 
     #[test]
     fn scaled_arrow_heads_shrink_with_zoom_down_to_min_size() {
-        let mut cfg = EdgeStyleConfig { scale_arrow_heads: true, min_size_pct: 0.5, ..Default::default() };
+        let mut cfg = EdgeStyleConfig {
+            scale_arrow_heads: true,
+            min_size_pct: 0.5,
+            ..Default::default()
+        };
         assert_eq!(arrow_head_size(&cfg, 1.0), 8.0);
         assert_eq!(arrow_head_size(&cfg, 0.1), 4.0, "clamped at Min Size");
         cfg.min_size_pct = 0.25;
@@ -774,7 +965,10 @@ mod tests {
 
     #[test]
     fn gradient_fade_disabled_when_use_gradient_off() {
-        let cfg = EdgeStyleConfig { use_gradient: false, ..Default::default() };
+        let cfg = EdgeStyleConfig {
+            use_gradient: false,
+            ..Default::default()
+        };
         assert_eq!(gradient_fade_fraction(&cfg, 200.0), 1.0);
     }
 

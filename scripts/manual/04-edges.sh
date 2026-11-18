@@ -50,6 +50,8 @@ checklist "04 · Arestas de dependência via LSP ($lang)" \
   "Abrir helpers/strings.rs e navegar até o final|o bloco inclui after_fifty_lines depois da linha 50, sem truncar o arquivo" \
   "Settings → UI → Dot Grid|a grade de pontos volta a aparecer no fundo" \
   "Trocar o estilo: Bezier, Step, Line, PCB|o traçado das arestas muda de forma" \
+  "Arrastar um terceiro arquivo sobre uma conexão entre outros dois; repetir nos quatro estilos, com seleção e Gradient ligado/desligado|a linha passa por baixo do terceiro bloco, sem cobrir seu código; reaparece ao sair dele; sem Ports as pontas continuam visíveis nos nomes da origem e destino" \
+  "Recolher a pasta do terceiro arquivo que cobria a conexão|o retângulo antigo do arquivo oculto deixa de encobrir a linha; expandir a pasta restaura a oclusão" \
   "Desmarcar Arrow Heads|as setas somem" \
   "Arrastar um nó selecionado|as arestas acompanham o nó"
 launch "$dir" --open-all --layout
