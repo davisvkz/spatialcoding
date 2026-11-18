@@ -258,10 +258,14 @@ impl SpatialCodingApp {
         self.update_folder_bounds();
         let zoom_collapsed = crate::folder_actions::zoom_collapsed(&self.state, self.state.viewport.zoom);
         self.state.node_store.view.zoom_collapsed = zoom_collapsed;
+        self.update_canvas_symbol_hover(ui, &response, &painter);
         self.draw_folder_nodes(&painter);
         let ports = self.collect_ports();
-        self.draw_file_nodes(&painter, canvas_rect, &ports);
+        let graph_names = self.draw_file_nodes(&painter, canvas_rect, &ports);
         self.draw_edges(&painter);
+        if let Some(graph) = &self.state.lsp.canvas_graph.graph {
+            ui::symbol_graph::paint_connections(&painter, graph, &graph_names);
+        }
         self.draw_ports(&painter, canvas_rect, &ports);
         self.draw_out_of_view_references(&painter, canvas_rect);
 
@@ -357,6 +361,29 @@ impl SpatialCodingApp {
             });
         }
         None
+    }
+
+    fn update_canvas_symbol_hover(&mut self, ui: &egui::Ui, response: &egui::Response, painter: &egui::Painter) {
+        let picked = if self.state.settings.lsp.query_on_hover
+            && response.hovered() && !ui.input(|i| i.pointer.any_down())
+            && !self.state.space_held
+        {
+            ui.input(|i| i.pointer.hover_pos()).and_then(|screen| {
+                let world = self.state.viewport.screen_to_world(screen);
+                let id = self.state.node_store.node_at_position(
+                    world, self.state.settings.node_width, self.state.settings.font_size,
+                )?;
+                let selected = self.symbol_at(painter, id, screen)?;
+                let node = self.state.node_store.get_file(selected.node_id)?;
+                let name = selected.name_span;
+                let symbol = self.state.deps.symbol_occurrences(&node.path, name.line)
+                    .into_iter().find(|s| s.definition_path == node.path
+                        && s.definition_name_span == (name.line, name.start_byte, name.end_byte))?
+                    .symbol.clone();
+                Some((selected.node_id, symbol))
+            })
+        } else { None };
+        ui::symbol_graph::update(ui.ctx(), &mut self.state, picked);
     }
 
     fn draw_folder_nodes(&self, painter: &egui::Painter) {
@@ -599,7 +626,8 @@ impl SpatialCodingApp {
         painter: &egui::Painter,
         canvas_rect: egui::Rect,
         ports: &HashMap<u64, Vec<Port>>,
-    ) {
+    ) -> Vec<(usize, egui::Rect)> {
+        let mut graph_names = Vec::new();
         let zoom = self.state.viewport.zoom;
         let lod = LodLevel::from_zoom(zoom);
         let theme = &self.state.theme;
@@ -829,6 +857,35 @@ impl SpatialCodingApp {
                 }
             }
 
+            if let Some(graph) = &self.state.lsp.canvas_graph.graph {
+                let mut painted_blocks = Vec::new();
+                for (index, site) in graph.sites.iter().enumerate().filter(|(_, s)| s.node_id == node.id) {
+                    if !painted_blocks.contains(&site.span)
+                        && let Some(rect) = ui::symbol_graph::block_rect(
+                            site, code_origin, screen_rect.right() - code_origin.x,
+                            line_h, node.visible_lines(),
+                        )
+                    {
+                        ui::symbol_graph::paint_block(&code_clip, rect, index);
+                        painted_blocks.push(site.span);
+                    }
+                    let name = site.name;
+                    if let Some(spans) = lines.get(name.line)
+                        && let Some((x0, x1)) = name_x_range(
+                            &code_clip, lod, spans, name.start_byte, name.end_byte, font_size * zoom,
+                        )
+                    {
+                        let rect = egui::Rect::from_min_max(
+                            code_origin + egui::vec2(x0, name.line as f32 * line_h),
+                            code_origin + egui::vec2(x1, (name.line + 1) as f32 * line_h),
+                        );
+                        let color = if index == 0 { ui::symbol_graph::DEFINITION_COLOR } else { ui::symbol_graph::NAME_COLOR };
+                        code_clip.rect_filled(rect, 0.0, color.gamma_multiply(0.30));
+                        graph_names.push((index, rect));
+                    }
+                }
+            }
+
             match lod {
                 LodLevel::Full => {
                     draw_line_numbers(
@@ -847,13 +904,15 @@ impl SpatialCodingApp {
                 LodLevel::TitleOnly => unreachable!(),
             }
         }
+        graph_names
     }
 
     fn draw_edges(&mut self, painter: &egui::Painter) {
         // LSP "Dim Dependency Edges": while a symbol is active.
         let lsp = &self.state.settings.lsp;
         let symbol_active =
-            !self.state.selection.symbols().is_empty() || self.state.lsp.references.is_some();
+            !self.state.selection.symbols().is_empty() || self.state.lsp.references.is_some()
+                || self.state.lsp.canvas_graph.graph.is_some();
         let symbol_dim = (lsp.dim_edges && symbol_active).then_some(lsp.dim_pct);
         let viewport = &self.state.viewport;
         let zoom = viewport.zoom;

@@ -20,3 +20,4 @@ pub mod files_panel;
 pub mod agent_panel;
 pub mod performance_panel;
 pub mod local_server_panel;
+pub mod symbol_graph;

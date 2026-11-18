@@ -71,6 +71,8 @@ pub struct References {
 #[derive(Default)]
 pub struct LspPanelState {
     pub manager: LspManager,
+    /// Independent transient canvas requests; never replace clicked references.
+    pub canvas_graph: crate::ui::symbol_graph::CanvasGraphState,
     symbols: Option<SymbolsEntry>,
     pub references: Option<References>,
     /// The symbol or reference row under the pointer; reset every frame the
@@ -212,6 +214,7 @@ impl LspPanelState {
 
     /// Clear Symbols: forgets the references and the jump target.
     pub fn clear_symbols(&mut self) {
+        self.canvas_graph.clear();
         self.references = None;
         self.target = None;
         self.hovered = None;
@@ -221,6 +224,9 @@ impl LspPanelState {
     /// waits for; any other answer (stale, or another requester's) is handed
     /// back.
     pub fn receive(&mut self, id: RequestId, response: LspResponse) -> Option<LspResponse> {
+        if self.canvas_graph.receive(id, &response) {
+            return None;
+        }
         match response {
             LspResponse::Symbols(result) => match &mut self.symbols {
                 Some(entry) if entry.fetch == Fetch::Pending(id) => {
@@ -240,7 +246,8 @@ impl LspPanelState {
 
     /// True while an answer is on its way.
     pub fn is_waiting(&self) -> bool {
-        self.symbols.as_ref().is_some_and(|s| s.fetch.is_pending())
+        self.canvas_graph.is_waiting()
+            || self.symbols.as_ref().is_some_and(|s| s.fetch.is_pending())
             || self
                 .references
                 .as_ref()
@@ -671,7 +678,7 @@ pub fn draw_advanced_card(ctx: &egui::Context, state: &mut AppState) {
                 let lsp = &mut state.settings.lsp;
                 section(ui, "Query", |ui| {
                     switch(ui, &mut lsp.query_on_hover, "Query On Hover")
-                        .on_hover_text("Rest the pointer on a symbol to list its references.");
+                        .on_hover_text("Rest on a symbol for 0.4 s: canvas code shows a transient reference graph; panel rows list references.");
                     switch(ui, &mut lsp.auto_open_matches, "Auto Open Matches")
                         .on_hover_text("Open the files holding the references when they arrive.");
                     ui.label("Max");

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# LSP tab: document symbols, references across files, jump to a reference (TASK-12, v2 controls TASK-44.8).
+# LSP tab and canvas hover graphs (TASK-12, TASK-44.8, TASK-51).
 # Needs rust-analyzer (`rustup component add rust-analyzer`), or another
 # server command in SPATIALCODING_LSP_RUST.
 source "$(dirname -- "${BASH_SOURCE[0]}")/lib.sh"
@@ -22,6 +22,11 @@ checklist "12 · Aba LSP: símbolos e referências" \
   "Com Auto Open Matches ligado (padrão), clicar num símbolo usado em arquivos fechados|os arquivos das referências abrem sozinhos no canvas (até Max files)" \
   "Clicar em dois símbolos seguidos; usar ‹ e ›|volta e avança entre as consultas; Clear Symbols limpa referências e símbolos, mas mantém o arquivo selecionado" \
   "Engrenagem do Symbol Graph → LSP Advanced Settings; ligar Query On Hover e parar o mouse num símbolo|as referências aparecem sem selecionar o símbolo" \
+  "Com Query On Hover ligado, aguardar a indexação e parar 0,4 s sobre o nome Config no código de config.rs (não na lista)|definição em magenta, blocos impl/usos em verde, nomes marcados e curvas com setas, inclusive dentro do mesmo arquivo; seleção e câmera não mudam" \
+  "Passar sobre um uso de Config no código ou sobre uma chamada de parse_port|resolve a mesma definição pelos ranges LSP, sem depender de clique ou de a aba LSP estar aberta" \
+  "Mover o mouse para espaços, arrastar o canvas ou desligar Query On Hover|a camada temporária some imediatamente; respostas atrasadas não fazem os blocos reaparecer" \
+  "Editar ou fechar um arquivo enquanto o grafo temporário está visível|a camada é invalidada; referências em arquivos fechados não são desenhadas nem abrem arquivos automaticamente" \
+  "Dar zoom com um grafo local ativo|marcas seguem os nomes e blocos do código; arquivos recolhidos ou em zoom de título não recebem setas flutuantes" \
   "Keep Zoom ligado e Smooth Transition ligado/desligado; clicar numa referência com zoom baixo|o zoom não muda; com Smooth Transition a vista desliza, sem ela pula" \
   "Dim Dependency Edges e Dim %|com um símbolo ativo, as arestas que não são dele ficam mais fracas conforme o Dim %" \
   "Out of View ligado; afastar a vista dos arquivos das referências|bolinhas com a contagem aparecem na borda do canvas apontando para eles" \

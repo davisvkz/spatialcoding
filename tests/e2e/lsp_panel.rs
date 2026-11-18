@@ -13,6 +13,175 @@ use spatialcoding::ui::lsp_panel::LineHighlight;
 use crate::common::*;
 use crate::fake_lsp;
 
+fn canvas_product(app: &mut App, fx: &Fixture) -> (u64, Pos2) {
+    std::fs::write(fx.path("src/product.rs"), concat!(
+        "pub struct Product {\n    pub id: u64,\n}\n",
+        "impl Product {\n    pub fn new() -> Product {\n        Product { id: 1 }\n    }\n}\n",
+        "impl Default for Product {\n    fn default() -> Self {\n        Product::new()\n    }\n}\n",
+    )).unwrap();
+    let id = app.open(&fx.path("src/product.rs"));
+    app.app_state_mut().left_panel = None;
+    app.app_state_mut().right_panel = None;
+    app.app_state_mut().selection.clear();
+    let font = app.app_state().settings.font_size;
+    let node = app.app_state().node_store.get_file(id).unwrap();
+    let origin = node.position + egui::vec2(0.0, HEADER_HEIGHT + CODE_PADDING);
+    app.show_at(origin, Pos2::new(350.0, 180.0));
+    // Find the actual glyph bounds, not an estimated column width.
+    let at = frame_shapes(app)
+        .iter()
+        .find_map(|s| {
+            let egui::Shape::Text(text) = s else {
+                return None;
+            };
+            let offset = text.galley.job.text.find("Product")?;
+            let chars = text.galley.job.text[..offset].chars().count();
+            let left = text
+                .galley
+                .pos_from_ccursor(egui::text::CCursor::new(chars));
+            let right = text
+                .galley
+                .pos_from_ccursor(egui::text::CCursor::new(chars + 7));
+            let p = text.pos + egui::vec2((left.min.x + right.min.x) * 0.5, left.center().y);
+            (p.y < 180.0 + line_height(font)).then_some(p)
+        })
+        .expect("the definition name is painted");
+    (id, at)
+}
+
+#[test]
+fn canvas_query_on_hover_draws_local_symbol_graph_without_selecting_or_moving() {
+    let fx = fixture();
+    let mut app = app_with_fake_lsp(&fx);
+    let (id, at) = canvas_product(&mut app, &fx);
+    app.input_mut().events.push(egui::Event::PointerMoved(at));
+    app.run();
+    assert!(
+        app.app_state().lsp.canvas_graph.graph.is_none(),
+        "off by default"
+    );
+    let offset = app.app_state().viewport.offset;
+    let zoom = app.app_state().viewport.zoom;
+    app.app_state_mut().settings.lsp.query_on_hover = true;
+    for _ in 0..4 {
+        app.step();
+    }
+    settle(&mut app);
+    let graph = app
+        .app_state()
+        .lsp
+        .canvas_graph
+        .graph
+        .as_ref()
+        .expect("hover graph");
+    assert_eq!(graph.sites[0].node_id, id);
+    assert_eq!((graph.sites[0].span.start, graph.sites[0].span.end), (0, 2));
+    assert!(graph.sites.len() >= 5, "same-file references are included");
+    assert!(
+        graph
+            .sites
+            .iter()
+            .any(|s| s.span.start == 3 && s.span.end == 7),
+        "full impl block"
+    );
+    assert!(app.selected().is_empty());
+    assert!(app.app_state().selection.symbols().is_empty());
+    assert_eq!(app.app_state().viewport.offset, offset);
+    assert_eq!(app.app_state().viewport.zoom, zoom);
+    let shapes = frame_shapes(&app);
+    assert!(shapes.iter().any(|s| matches!(s, egui::Shape::Rect(r)
+        if r.fill == spatialcoding::ui::symbol_graph::DEFINITION_COLOR.gamma_multiply(0.10)
+            && r.rect.height() > line_height(app.app_state().settings.font_size) * 2.5)));
+    assert!(
+        shapes
+            .iter()
+            .any(|s| matches!(s, egui::Shape::CubicBezier(_))),
+        "local curved connections"
+    );
+
+    // A reference hit resolves back to the same definition, without clicking.
+    let usage = graph.sites.iter().find(|s| s.name.line == 3).unwrap().name;
+    let s = app.app_state();
+    let node = s.node_store.get_file(id).unwrap();
+    let usage_point = s.viewport.world_to_screen(
+        node.position
+            + egui::vec2(
+                spatialcoding::nodes::file_node::CODE_PAD_X + 45.0,
+                HEADER_HEIGHT
+                    + CODE_PADDING
+                    + (usage.line as f32 + 0.5) * line_height(s.settings.font_size),
+            ),
+    );
+    app.input_mut()
+        .events
+        .push(egui::Event::PointerMoved(usage_point));
+    for _ in 0..4 {
+        app.step();
+    }
+    settle(&mut app);
+    assert_eq!(
+        app.app_state()
+            .lsp
+            .canvas_graph
+            .graph
+            .as_ref()
+            .unwrap()
+            .sites[0]
+            .name
+            .line,
+        0
+    );
+    assert!(app.selected().is_empty());
+
+    app.app_state_mut().settings.lsp.query_on_hover = false;
+    app.run();
+    assert!(app.app_state().lsp.canvas_graph.graph.is_none());
+}
+
+#[test]
+fn canvas_hover_graph_clears_on_whitespace_and_closed_definition() {
+    let fx = fixture();
+    let mut app = app_with_fake_lsp(&fx);
+    let (id, at) = canvas_product(&mut app, &fx);
+    app.app_state_mut().settings.lsp.query_on_hover = true;
+    app.input_mut().events.push(egui::Event::PointerMoved(at));
+    for _ in 0..4 {
+        app.step();
+    }
+    settle(&mut app);
+    assert!(app.app_state().lsp.canvas_graph.graph.is_some());
+    app.input_mut()
+        .events
+        .push(egui::Event::PointerMoved(Pos2::new(900.0, 700.0)));
+    app.run();
+    assert!(app.app_state().lsp.canvas_graph.graph.is_none());
+    app.input_mut().events.push(egui::Event::PointerMoved(at));
+    for _ in 0..4 {
+        app.step();
+    }
+    settle(&mut app);
+    assert!(app.app_state().lsp.canvas_graph.graph.is_some());
+    app.app_state_mut()
+        .node_store
+        .get_file_mut(id)
+        .unwrap()
+        .content
+        .push_str("\n// changed source\n");
+    app.step();
+    assert!(
+        app.app_state().lsp.canvas_graph.graph.is_none(),
+        "content changes invalidate the snapshot immediately"
+    );
+    for _ in 0..4 {
+        app.step();
+    }
+    settle(&mut app);
+    assert!(app.app_state().lsp.canvas_graph.graph.is_some());
+    app.app_state_mut().node_store.file_nodes.remove(&id);
+    app.run();
+    assert!(app.app_state().lsp.canvas_graph.graph.is_none());
+}
+
 /// The app with `fx` loaded and the fake language server plugged in.
 fn app_with_fake_lsp(fx: &Fixture) -> App {
     let mut app = app_with(fx);
@@ -268,13 +437,20 @@ fn auto_open_matches_opens_the_reference_files_up_to_max_files() {
         .values()
         .map(|n| n.file_name().to_owned())
         .collect();
-    assert!(names.contains(&"main.rs".to_owned()), "main.rs opened by Auto Open Matches: {names:?}");
+    assert!(
+        names.contains(&"main.rs".to_owned()),
+        "main.rs opened by Auto Open Matches: {names:?}"
+    );
 }
 
 #[test]
 fn symbol_graph_history_and_clear_symbols() {
     let fx = fixture();
-    std::fs::write(fx.path("src/util.rs"), "pub fn hello() {}\npub fn bye() {}\n").unwrap();
+    std::fs::write(
+        fx.path("src/util.rs"),
+        "pub fn hello() {}\npub fn bye() {}\n",
+    )
+    .unwrap();
     let mut app = app_with_fake_lsp(&fx);
     app.app_state_mut().settings.lsp.auto_open_matches = false;
     select_and_open_lsp(&mut app, &fx, "src/util.rs");
@@ -299,7 +475,10 @@ fn symbol_graph_history_and_clear_symbols() {
     app.run();
     assert!(app.app_state().lsp.references.is_none());
     assert!(app.app_state().selection.symbols().is_empty());
-    assert!(!app.app_state().selection.selected.is_empty(), "the file stays selected");
+    assert!(
+        !app.app_state().selection.selected.is_empty(),
+        "the file stays selected"
+    );
 }
 
 #[test]
@@ -311,12 +490,22 @@ fn advanced_settings_card_opens_from_the_gear_and_edits_lsp_settings() {
     app.get_by_label("Show advanced settings").click();
     app.run();
     app.get_by_label("LSP Advanced Settings");
-    for label in ["Query On Hover", "Auto Open Matches", "Keep Zoom", "Smooth Transition", "Dim Dependency Edges", "Reveal Through Collapse", "Out of View"] {
+    for label in [
+        "Query On Hover",
+        "Auto Open Matches",
+        "Keep Zoom",
+        "Smooth Transition",
+        "Dim Dependency Edges",
+        "Reveal Through Collapse",
+        "Out of View",
+    ] {
         app.get_by_label(label).click();
         app.run();
     }
     let lsp = &app.app_state().settings.lsp;
-    assert!(lsp.query_on_hover && !lsp.auto_open_matches && lsp.keep_zoom && !lsp.smooth_transition);
+    assert!(
+        lsp.query_on_hover && !lsp.auto_open_matches && lsp.keep_zoom && !lsp.smooth_transition
+    );
     assert!(!lsp.dim_edges && lsp.reveal_through_collapse && lsp.out_of_view);
     app.get_by_label("Close LSP Advanced Settings").click();
     app.run();
@@ -336,7 +525,10 @@ fn query_on_hover_asks_for_references_after_resting_on_a_symbol() {
     }
     settle(&mut app);
     app.get_by_label("References to hello");
-    assert!(app.app_state().selection.symbols().is_empty(), "hovering does not select");
+    assert!(
+        app.app_state().selection.symbols().is_empty(),
+        "hovering does not select"
+    );
 }
 
 #[test]
@@ -379,7 +571,11 @@ fn keep_zoom_and_out_of_view_markers() {
     app.show_at(Pos2::new(-20_000.0, -20_000.0), CANVAS_SPOT);
     let canvas = egui::Rect::from_min_max(Pos2::new(40.0, 30.0), Pos2::new(1060.0, 900.0));
     let markers = spatialcoding::ui::lsp_panel::out_of_view_markers(app.app_state(), canvas);
-    assert_eq!(markers.len(), 2, "util.rs and main.rs are off screen: {markers:?}");
+    assert_eq!(
+        markers.len(),
+        2,
+        "util.rs and main.rs are off screen: {markers:?}"
+    );
 
     app.get_by_label("L4  util::hello();").click();
     settle(&mut app);
