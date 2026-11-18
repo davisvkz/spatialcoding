@@ -4,7 +4,7 @@
 //! the syntax nodes at the ends of the selection's edges are outlined
 //! (painted by the app shell through [`highlight_rect`]).
 
-use std::collections::hash_map::DefaultHasher;
+use std::collections::{hash_map::DefaultHasher, BTreeMap};
 use std::hash::{Hash, Hasher};
 
 use crate::analysis::cst::{parse_cst, CstNode, CstTree};
@@ -24,6 +24,14 @@ pub struct CstHover {
     pub end_line: usize,
 }
 
+/// One grammar type, ordered by kind, with occurrences across open canvas files.
+#[derive(Debug, Clone)]
+pub struct MappingRow {
+    pub kind: String,
+    pub selected: usize,
+    pub nodes: Vec<CstHover>,
+}
+
 #[derive(Default)]
 pub struct CstPanelState {
     cached: Option<CachedCst>,
@@ -38,6 +46,9 @@ pub struct CstPanelState {
     pub edge_nodes: std::collections::HashMap<u64, Vec<(usize, usize)>>,
     /// The settings group under the gear is open.
     pub show_settings: bool,
+    pub mapping: Vec<MappingRow>,
+    pub mapping_hover: Vec<(CstHover, egui::Color32)>,
+    mapping_hash: Option<u64>,
     /// How many times a file was parsed (cache misses).
     parses: usize,
 }
@@ -87,11 +98,21 @@ impl CstPanelState {
     fn tree_of(&mut self, node_store: &NodeStore, node_id: u64) -> Option<&CstTree> {
         let node = node_store.get_file(node_id)?;
         let hash = source_hash(node);
-        let fresh = self.edge_trees.get(&node_id).is_some_and(|c| c.source_hash == hash);
+        let fresh = self
+            .edge_trees
+            .get(&node_id)
+            .is_some_and(|c| c.source_hash == hash);
         if !fresh {
             self.parses += 1;
             let tree = parse_cst(&node.path, &node.content);
-            self.edge_trees.insert(node_id, CachedCst { node_id, source_hash: hash, tree });
+            self.edge_trees.insert(
+                node_id,
+                CachedCst {
+                    node_id,
+                    source_hash: hash,
+                    tree,
+                },
+            );
         }
         self.edge_trees.get(&node_id)?.tree.as_ref()
     }
@@ -101,6 +122,248 @@ impl CstPanelState {
         self.hovered = None;
         self.hover_ancestors.clear();
         self.edge_nodes.clear();
+        self.mapping_hover.clear();
+    }
+
+    fn sync_mapping(
+        &mut self,
+        store: &NodeStore,
+        selected: &std::collections::HashSet<u64>,
+        settings: &CstSettings,
+    ) {
+        self.edge_trees
+            .retain(|id, _| store.get_file(*id).is_some());
+        let mut ids: Vec<_> = store.file_nodes.keys().copied().collect();
+        ids.sort_unstable();
+        let mut hasher = DefaultHasher::new();
+        (
+            settings.limit_depth,
+            settings.max_depth,
+            settings.show_hidden_types,
+            settings.semantic_only,
+        )
+            .hash(&mut hasher);
+        for &id in &ids {
+            id.hash(&mut hasher);
+            source_hash(store.get_file(id).unwrap()).hash(&mut hasher);
+            selected.contains(&id).hash(&mut hasher);
+        }
+        let hash = hasher.finish();
+        if self.mapping_hash == Some(hash) {
+            return;
+        }
+        let mut rows = BTreeMap::new();
+        for id in ids {
+            if let Some(tree) = self.tree_of(store, id) {
+                collect_mapping(
+                    &tree.root,
+                    id,
+                    selected.contains(&id),
+                    settings,
+                    0,
+                    &mut rows,
+                );
+            }
+        }
+        self.mapping = rows.into_values().collect();
+        self.mapping_hash = Some(hash);
+    }
+}
+
+/// Colors match the reference's semantic families; unknown grammar kinds stay muted.
+pub fn mapping_color(kind: &str, settings: &CstSettings) -> egui::Color32 {
+    if let Some(&[r, g, b]) = settings.type_colors.get(kind) {
+        return egui::Color32::from_rgb(r, g, b);
+    }
+    let rgb = if kind.contains("import") || matches!(kind, "use_declaration" | "package_clause") {
+        [251, 146, 60]
+    } else if kind.contains("export") {
+        [163, 230, 53]
+    } else if kind.starts_with("jsx_") {
+        [34, 211, 238]
+    } else if kind.contains("function") || kind.contains("method") {
+        [59, 130, 246]
+    } else if [
+        "class",
+        "interface",
+        "struct",
+        "trait",
+        "type_",
+        "enum",
+        "impl_",
+        "mod_",
+        "decorated_",
+    ]
+    .iter()
+    .any(|prefix| kind.starts_with(prefix) || kind.starts_with(&format!("abstract_{prefix}")))
+    {
+        [168, 85, 247]
+    } else if kind.contains("declaration")
+        || kind.contains("assignment")
+        || matches!(
+            kind,
+            "const_item" | "property_signature" | "public_field_definition"
+        )
+    {
+        [34, 197, 94]
+    } else if kind == "return_statement" {
+        [6, 182, 212]
+    } else if matches!(
+        kind,
+        "for_statement" | "while_statement" | "if_statement" | "if_expression" | "match_expression"
+    ) {
+        [236, 72, 153]
+    } else {
+        [113, 113, 122]
+    };
+    egui::Color32::from_rgb(rgb[0], rgb[1], rgb[2])
+}
+
+fn is_mapped_semantic(kind: &str) -> bool {
+    kind.ends_with("_declaration")
+        || kind.ends_with("_definition")
+        || kind.ends_with("_signature")
+        || kind.ends_with("_item")
+        || kind.ends_with("_statement")
+        || kind.starts_with("jsx_")
+        || matches!(
+            kind,
+            "assignment"
+                | "arrow_function"
+                | "function_expression"
+                | "interface_type"
+                | "struct_type"
+                | "type_spec"
+                | "package_clause"
+                | "if_expression"
+                | "match_expression"
+        )
+}
+
+fn collect_mapping(
+    node: &CstNode,
+    node_id: u64,
+    selected: bool,
+    settings: &CstSettings,
+    depth: usize,
+    rows: &mut BTreeMap<String, MappingRow>,
+) {
+    if !settings.semantic_only || !node.named || is_mapped_semantic(&node.kind) || node.is_error {
+        let row = rows.entry(node.kind.clone()).or_insert_with(|| MappingRow {
+            kind: node.kind.clone(),
+            selected: 0,
+            nodes: Vec::new(),
+        });
+        row.selected += usize::from(selected);
+        row.nodes.push(CstHover {
+            node_id,
+            start_line: node.start_line,
+            end_line: node.end_line,
+        });
+    }
+    if settings.limit_depth && depth >= settings.max_depth {
+        return;
+    }
+    for child in listed_children(node, settings) {
+        collect_mapping(child, node_id, selected, settings, depth + 1, rows);
+    }
+}
+
+fn draw_mapping(ui: &mut egui::Ui, state: &mut AppState) {
+    let mut hovered = None;
+    egui::Frame::NONE
+        .stroke(egui::Stroke::new(
+            1.0_f32,
+            ui.visuals().widgets.noninteractive.bg_stroke.color,
+        ))
+        .corner_radius(3.0)
+        .inner_margin(4.0)
+        .show(ui, |ui| {
+            ui.set_min_width(ui.available_width());
+            egui::ScrollArea::vertical()
+                .id_salt("cst_mapping")
+                .max_height(ui.ctx().screen_rect().height() * 0.75)
+                .show(ui, |ui| {
+                    for row in &state.cst.mapping {
+                        ui.push_id(&row.kind, |ui| {
+                            let name = row.kind.replace('_', " ");
+                            let mut rgb = mapping_color(&row.kind, &state.settings.cst).to_array()
+                                [..3]
+                                .try_into()
+                                .unwrap();
+                            let response = ui
+                                .horizontal(|ui| {
+                                    let edit = ui.color_edit_button_srgb(&mut rgb);
+                                    let label = format!("Edit {name}");
+                                    edit.widget_info(|| {
+                                        egui::WidgetInfo::labeled(
+                                            egui::WidgetType::ColorButton,
+                                            true,
+                                            &label,
+                                        )
+                                    });
+                                    edit.on_hover_text(label);
+                                    let counts = format!("{}/{}", row.selected, row.nodes.len());
+                                    let count_width = ui
+                                        .painter()
+                                        .layout_no_wrap(
+                                            counts.clone(),
+                                            egui::FontId::proportional(10.0),
+                                            ui.visuals().weak_text_color(),
+                                        )
+                                        .size()
+                                        .x
+                                        + 8.0;
+                                    ui.add_sized(
+                                        egui::vec2(
+                                            (ui.available_width() - count_width - 8.0).max(0.0),
+                                            20.0,
+                                        ),
+                                        egui::Label::new(egui::RichText::new(&name).size(11.0))
+                                            .truncate(),
+                                    );
+                                    ui.with_layout(
+                                        egui::Layout::right_to_left(egui::Align::Center),
+                                        |ui| {
+                                            ui.label(egui::RichText::new(counts).size(10.0).weak());
+                                        },
+                                    );
+                                })
+                                .response;
+                            if rgb != mapping_color(&row.kind, &state.settings.cst).to_array()[..3]
+                            {
+                                state.settings.cst.type_colors.insert(row.kind.clone(), rgb);
+                            }
+                            if response.contains_pointer() {
+                                hovered = Some(row.kind.clone());
+                                ui.painter().rect_filled(
+                                    response.rect,
+                                    2.0,
+                                    egui::Color32::from_white_alpha(8),
+                                );
+                            }
+                        });
+                    }
+                    if state.cst.mapping.is_empty() {
+                        ui.weak("No CST types match the current filters.");
+                    }
+                });
+        });
+    if let Some(row) = hovered.and_then(|kind| state.cst.mapping.iter().find(|r| r.kind == kind)) {
+        let color = mapping_color(&row.kind, &state.settings.cst);
+        if state.settings.cst.single_hover {
+            let node = row
+                .nodes
+                .iter()
+                .find(|n| state.selection.selected.contains(&n.node_id))
+                .unwrap_or(&row.nodes[0]);
+            state.cst.mapping_hover.push((*node, color));
+        } else {
+            state
+                .cst
+                .mapping_hover
+                .extend(row.nodes.iter().map(|n| (*n, color)));
+        }
     }
 }
 
@@ -177,7 +440,8 @@ pub fn draw_depth_controls(ui: &mut egui::Ui, settings: &mut CstSettings) {
         ui.horizontal(|ui| {
             ui.label("Max depth");
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                let response = ui.add(egui::DragValue::new(&mut settings.max_depth).range(1..=64usize));
+                let response =
+                    ui.add(egui::DragValue::new(&mut settings.max_depth).range(1..=64usize));
                 response.widget_info(|| {
                     egui::WidgetInfo::labeled(egui::WidgetType::DragValue, true, "Max CST depth")
                 });
@@ -194,13 +458,18 @@ pub fn draw_cst_panel(ui: &mut egui::Ui, state: &mut AppState) {
         collect_edge_nodes(state);
     }
 
-    let primary = state.selection.primary.filter(|id| state.node_store.get_file(*id).is_some());
-    let count = primary.and_then(|id| {
+    let primary = state
+        .selection
+        .primary
+        .filter(|id| state.node_store.get_file(*id).is_some());
+    state
+        .cst
+        .sync_mapping(&state.node_store, &state.selection.selected, &settings);
+    if let Some(id) = primary {
         state.cst.sync(&state.node_store, id);
-        state.cst.tree().map(|t| count_rows(&t.root, &settings, 0))
-    });
+    }
     ui.horizontal(|ui| {
-        ui.weak(format!("({})", count.unwrap_or(0)));
+        ui.weak(format!("({})", state.cst.mapping.len()));
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             let gear = icons::tool_icon_button(ui, icons::SETTINGS, "Toggle settings");
             if gear.clicked() {
@@ -208,8 +477,18 @@ pub fn draw_cst_panel(ui: &mut egui::Ui, state: &mut AppState) {
             }
         });
     });
-    switch(ui, &mut state.settings.cst.selected_edge_nodes, "Selected Edge CST Nodes")
-        .on_hover_text("Outline the syntax node at each end of the selection's edges.");
+    switch(
+        ui,
+        &mut state.settings.cst.selected_edge_nodes,
+        "Selected Edge CST Nodes",
+    )
+    .on_hover_text("Outline the syntax node at each end of the selection's edges.");
+    ui.label(
+        egui::RichText::new(format!("{}  Symbol Mapping", icons::INFO))
+            .size(9.0)
+            .weak(),
+    )
+    .widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Label, true, "Symbol Mapping"));
     if state.cst.show_settings {
         Section::new("Settings").show(ui, |ui| {
             let cst = &mut state.settings.cst;
@@ -222,7 +501,9 @@ pub fn draw_cst_panel(ui: &mut egui::Ui, state: &mut AppState) {
                 .on_hover_text("Hovering a row highlights only its node, not the nodes around it.");
         });
     }
+    draw_mapping(ui, state);
     ui.separator();
+    ui.weak("Syntax tree");
 
     let Some(node_id) = primary else {
         if state.node_store.file_nodes.is_empty() {
@@ -235,13 +516,24 @@ pub fn draw_cst_panel(ui: &mut egui::Ui, state: &mut AppState) {
     let node = state.node_store.get_file(node_id).unwrap();
     ui.label(egui::RichText::new(node.file_name()).strong());
     let Some(tree) = state.cst.tree() else {
-        ui.label(format!("No syntax tree: {} is not supported.", node.language));
+        ui.label(format!(
+            "No syntax tree: {} is not supported.",
+            node.language
+        ));
         return;
     };
-    ui.label(format!("{} \u{b7} {} nodes", tree.language.name(), tree.node_count));
+    ui.label(format!(
+        "{} \u{b7} {} nodes",
+        tree.language.name(),
+        tree.node_count
+    ));
     if tree.truncated {
         ui.colored_label(ERROR_COLOR, "Large file: only the first nodes are shown.");
     }
+    ui.weak(format!(
+        "{} tree rows",
+        count_rows(&tree.root, &settings, 0)
+    ));
 
     let settings = state.settings.cst.clone();
     let mut hovered: Option<Vec<(usize, usize)>> = None;
@@ -252,7 +544,11 @@ pub fn draw_cst_panel(ui: &mut egui::Ui, state: &mut AppState) {
     }
     if let Some(mut chain) = hovered {
         let (start_line, end_line) = chain.pop().expect("the hovered row itself");
-        state.cst.hovered = Some(CstHover { node_id, start_line, end_line });
+        state.cst.hovered = Some(CstHover {
+            node_id,
+            start_line,
+            end_line,
+        });
         if !settings.single_hover {
             state.cst.hover_ancestors = chain;
         }
@@ -263,7 +559,9 @@ pub fn draw_cst_panel(ui: &mut egui::Ui, state: &mut AppState) {
 fn collect_edge_nodes(state: &mut AppState) {
     let mut ends: Vec<(u64, usize)> = Vec::new();
     for edge in state.edge_store.all_edges() {
-        if !edge.is_selected(&state.selection) || !edge.is_visible_for(&state.edge_style, &state.selection) {
+        if !edge.is_selected(&state.selection)
+            || !edge.is_visible_for(&state.edge_style, &state.selection)
+        {
             continue;
         }
         if let Some(span) = edge.source_span {
@@ -277,7 +575,9 @@ fn collect_edge_nodes(state: &mut AppState) {
     ends.dedup();
     // Bounded: a hub file can carry hundreds of edges.
     for (node_id, line) in ends.into_iter().take(200) {
-        let Some(tree) = state.cst.tree_of(&state.node_store, node_id) else { continue };
+        let Some(tree) = state.cst.tree_of(&state.node_store, node_id) else {
+            continue;
+        };
         if let Some(range) = innermost_at(&tree.root, line) {
             let ranges = state.cst.edge_nodes.entry(node_id).or_default();
             if !ranges.contains(&range) {
@@ -304,13 +604,18 @@ fn draw_node(
     }
 
     let at_limit = settings.limit_depth && depth >= settings.max_depth;
-    let children = if at_limit { Vec::new() } else { listed_children(node, settings) };
+    let children = if at_limit {
+        Vec::new()
+    } else {
+        listed_children(node, settings)
+    };
     path.push((node.start_line, node.end_line));
 
     let response = if children.is_empty() {
         let hidden_below = at_limit && !listed_children(node, settings).is_empty();
         if hidden_below {
-            ui.label(text.clone()).on_hover_text("Deeper nodes are past Max depth.")
+            ui.label(text.clone())
+                .on_hover_text("Deeper nodes are past Max depth.")
         } else {
             ui.label(text)
         }
@@ -345,7 +650,11 @@ pub fn row_label(node: &CstNode) -> String {
     if node.start_line == node.end_line {
         label.push_str(&format!("  L{}", node.start_line + 1));
     } else {
-        label.push_str(&format!("  L{}\u{2013}{}", node.start_line + 1, node.end_line + 1));
+        label.push_str(&format!(
+            "  L{}\u{2013}{}",
+            node.start_line + 1,
+            node.end_line + 1
+        ));
     }
     label
 }
@@ -386,6 +695,93 @@ mod tests {
         parse_cst(std::path::Path::new("/p/a.rs"), src).unwrap()
     }
 
+    #[test]
+    fn mapping_cache_tracks_content_filters_selection_and_closed_files() {
+        let (mut store, a) = store_with("a.rs", "fn a() { let x = 1; }\n");
+        let b = store.add_file(
+            PathBuf::from("b.rs"),
+            "fn b() {}\n".into(),
+            egui::Pos2::ZERO,
+        );
+        let mut cst = CstPanelState::default();
+        let mut settings = CstSettings::default();
+        let mut selected = std::collections::HashSet::from([a]);
+        cst.sync_mapping(&store, &selected, &settings);
+        let row = cst
+            .mapping
+            .iter()
+            .find(|r| r.kind == "function_item")
+            .unwrap();
+        assert_eq!((row.selected, row.nodes.len()), (1, 2));
+        assert!(cst.mapping.windows(2).all(|w| w[0].kind < w[1].kind));
+        assert!(!cst.mapping.iter().any(|r| r.kind == "identifier"));
+        cst.sync_mapping(&store, &selected, &settings);
+        assert_eq!(cst.parses, 2);
+        selected.insert(b);
+        cst.sync_mapping(&store, &selected, &settings);
+        assert_eq!(cst.parses, 2, "selection changes don't reparse");
+        assert_eq!(
+            cst.mapping
+                .iter()
+                .find(|r| r.kind == "function_item")
+                .unwrap()
+                .selected,
+            2
+        );
+        store.get_file_mut(b).unwrap().content = "struct B;\n".into();
+        cst.sync_mapping(&store, &selected, &settings);
+        assert_eq!(cst.parses, 3);
+        assert_eq!(
+            cst.mapping
+                .iter()
+                .find(|r| r.kind == "function_item")
+                .unwrap()
+                .nodes
+                .len(),
+            1
+        );
+        settings.max_depth = 0;
+        cst.sync_mapping(&store, &selected, &settings);
+        assert!(cst.mapping.is_empty(), "the root is not a semantic symbol");
+        settings.limit_depth = false;
+        settings.semantic_only = false;
+        cst.sync_mapping(&store, &selected, &settings);
+        assert!(cst.mapping.iter().any(|r| r.kind == "identifier"));
+        assert!(!cst.mapping.iter().any(|r| r.kind == "fn"));
+        settings.show_hidden_types = true;
+        cst.sync_mapping(&store, &selected, &settings);
+        assert!(cst.mapping.iter().any(|r| r.kind == "fn"));
+        store.file_nodes.remove(&a);
+        cst.sync_mapping(&store, &selected, &settings);
+        assert!(!cst.mapping.iter().any(|r| r.kind == "function_item"));
+        assert!(!cst.edge_trees.contains_key(&a));
+    }
+
+    #[test]
+    fn mapping_colors_persist_and_old_settings_keep_defaults() {
+        let mut settings = CstSettings::default();
+        assert_eq!(
+            mapping_color("function_item", &settings),
+            egui::Color32::from_rgb(59, 130, 246)
+        );
+        assert_eq!(
+            mapping_color("abstract_class_declaration", &settings),
+            egui::Color32::from_rgb(168, 85, 247)
+        );
+        settings
+            .type_colors
+            .insert("function_item".into(), [1, 2, 3]);
+        let persisted = serde_json::to_string(&settings).unwrap();
+        let restored = serde_json::from_str(&persisted).unwrap();
+        assert_eq!(
+            mapping_color("function_item", &restored),
+            egui::Color32::from_rgb(1, 2, 3)
+        );
+        let legacy: CstSettings = serde_json::from_str(r#"{"max_depth":3}"#).unwrap();
+        assert_eq!(legacy.max_depth, 3);
+        assert!(legacy.type_colors.is_empty());
+    }
+
     fn kinds(nodes: &[&CstNode]) -> Vec<String> {
         nodes.iter().map(|n| n.kind.clone()).collect()
     }
@@ -394,13 +790,25 @@ mod tests {
     fn semantic_nodes_only_lists_a_wrappers_children_in_its_place() {
         let tree = rust_tree("fn f(a: u8) {\n    let x = a;\n}\n");
         let function = &tree.root.children[0];
-        let mut settings = CstSettings { semantic_only: false, ..Default::default() };
+        let mut settings = CstSettings {
+            semantic_only: false,
+            ..Default::default()
+        };
         let plain = kinds(&listed_children(function, &settings));
-        assert!(plain.contains(&"parameters".to_owned()) && plain.contains(&"block".to_owned()), "{plain:?}");
+        assert!(
+            plain.contains(&"parameters".to_owned()) && plain.contains(&"block".to_owned()),
+            "{plain:?}"
+        );
         settings.semantic_only = true;
         let semantic = kinds(&listed_children(function, &settings));
-        assert!(!semantic.contains(&"block".to_owned()) && !semantic.contains(&"parameters".to_owned()));
-        assert!(semantic.contains(&"parameter".to_owned()) && semantic.contains(&"let_declaration".to_owned()), "{semantic:?}");
+        assert!(
+            !semantic.contains(&"block".to_owned()) && !semantic.contains(&"parameters".to_owned())
+        );
+        assert!(
+            semantic.contains(&"parameter".to_owned())
+                && semantic.contains(&"let_declaration".to_owned()),
+            "{semantic:?}"
+        );
         settings.show_hidden_types = true;
         assert!(kinds(&listed_children(function, &settings)).contains(&"fn".to_owned()));
     }
@@ -408,16 +816,31 @@ mod tests {
     #[test]
     fn max_depth_bounds_the_listed_rows() {
         let tree = rust_tree("mod m {\n    fn f() {\n        let x = 1;\n    }\n}\n");
-        let deep = CstSettings { limit_depth: false, ..Default::default() };
-        let one = CstSettings { limit_depth: true, max_depth: 1, ..Default::default() };
-        assert_eq!(count_rows(&tree.root, &one, 0), 2, "source_file and mod_item");
+        let deep = CstSettings {
+            limit_depth: false,
+            ..Default::default()
+        };
+        let one = CstSettings {
+            limit_depth: true,
+            max_depth: 1,
+            ..Default::default()
+        };
+        assert_eq!(
+            count_rows(&tree.root, &one, 0),
+            2,
+            "source_file and mod_item"
+        );
         assert!(count_rows(&tree.root, &deep, 0) > count_rows(&tree.root, &one, 0));
     }
 
     #[test]
     fn innermost_named_node_covers_the_line() {
         let tree = rust_tree("fn f() {\n    let x = 1;\n}\n");
-        assert_eq!(innermost_at(&tree.root, 1), Some((1, 1)), "the let statement");
+        assert_eq!(
+            innermost_at(&tree.root, 1),
+            Some((1, 1)),
+            "the let statement"
+        );
         assert_eq!(innermost_at(&tree.root, 0), Some((0, 0)));
         assert_eq!(innermost_at(&tree.root, 99), None);
     }
@@ -442,7 +865,11 @@ mod tests {
     #[test]
     fn sync_switches_nodes_and_handles_unsupported_and_missing_ones() {
         let (mut store, rs) = store_with("a.rs", "fn a() {}\n");
-        let md = store.add_file(PathBuf::from("README.md"), "# hi\n".into(), egui::Pos2::ZERO);
+        let md = store.add_file(
+            PathBuf::from("README.md"),
+            "# hi\n".into(),
+            egui::Pos2::ZERO,
+        );
         let mut cst = CstPanelState::default();
 
         cst.sync(&store, rs);

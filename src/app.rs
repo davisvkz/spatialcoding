@@ -778,6 +778,17 @@ impl SpatialCodingApp {
             // and a hovered row's ancestors (Single Hover Symbol off).
             let show_cst = self.state.settings.cst.show_canvas;
             if show_cst {
+                for &(hover, color) in &self.state.cst.mapping_hover {
+                    if hover.node_id != node.id {
+                        continue;
+                    }
+                    if let Some(rect) = cst_panel::highlight_rect(
+                        hl_origin, screen_rect.width(), line_h,
+                        hover.start_line, hover.end_line, node.visible_lines(),
+                    ) {
+                        code_clip.rect_filled(rect, 0.0, color.gamma_multiply(0.25));
+                    }
+                }
                 for &(start, end) in self.state.cst.edge_nodes.get(&node.id).map(Vec::as_slice).unwrap_or(&[]) {
                     if let Some(rect) = cst_panel::highlight_rect(
                         hl_origin, screen_rect.width(), line_h,

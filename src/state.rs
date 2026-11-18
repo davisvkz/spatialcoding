@@ -185,6 +185,8 @@ pub struct CstSettings {
     pub single_hover: bool,
     /// Outline the CST node at each end of the selection's edges.
     pub selected_edge_nodes: bool,
+    /// RGB overrides by grammar kind for the Symbol Mapping swatches/highlights.
+    pub type_colors: std::collections::BTreeMap<String, [u8; 3]>,
 }
 
 impl Default for CstSettings {
@@ -197,6 +199,7 @@ impl Default for CstSettings {
             semantic_only: true,
             single_hover: true,
             selected_edge_nodes: true,
+            type_colors: Default::default(),
         }
     }
 }
