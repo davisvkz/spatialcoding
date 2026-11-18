@@ -29,6 +29,7 @@ Planos: repo público sem login; repo privado e pastas locais exigem login + **P
 - [arquitetura.md](arquitetura.md): stack, pipeline, workers, servidor local
 - [ui-e-paineis.md](ui-e-paineis.md): tela e cada painel com seus controles
 - [funcionalidades.md](funcionalidades.md): como cada recurso funciona
+- [renderizacao-canvas.md](renderizacao-canvas.md): como edges, LSP e CST são desenhados (zoom/LOD, cores, geometria)
 - [atalhos-e-comandos.md](atalhos-e-comandos.md): atalhos e IDs de comandos internos
 - [mcp-e-servidor-local.md](mcp-e-servidor-local.md): MCP, Agent Notes, servidor local
 - `img/`: screenshots (home, repo redux aberto, atalhos, paleta, painéis)
