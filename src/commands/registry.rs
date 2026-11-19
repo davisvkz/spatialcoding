@@ -660,6 +660,14 @@ fn build() -> Vec<Command> {
             v.push(cmd($id, $title, |s, _| { toggle_right(s, $panel); ok() }).anchor($anchor));
         )*};
     }
+    v.push(
+        cmd("lsp:openLanguageServers", "Language servers\u{2026}", |s, _| {
+            s.lsp.show_servers = true;
+            ok()
+        })
+        .anchor("lsp"),
+    );
+
     panel_toggles!(left:
         ("ui:toggleWorkspacePanel", "Toggle Workspace panel", LeftPanel::Workspace, "workspace"),
         ("ui:toggleChangesPanel", "Toggle Changes panel", LeftPanel::Changes, "changes"),

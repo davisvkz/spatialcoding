@@ -40,7 +40,11 @@ checklist "12 · Aba LSP: símbolos e referências" \
   "Primeira consulta a um servidor frio (ex.: clicar num símbolo TypeScript logo após abrir a pasta)|a linha de atividade no rodapé do canvas diz \"TypeScript language server loading…\" (ou \"indexing…\") até ele ficar pronto; Settings → Activity Indicator desliga a linha" \
   "File nodes → Open files that import the selection com util.rs selecionado|abre os arquivos que referenciam os símbolos de topo (pedindo ao servidor) além dos que importam por link local; o botão fica desabilitado, com dica, quando nada abriria (ex.: um .md sem links)" \
   "File nodes → Open imported files|desabilitado quando o arquivo não importa nada fora do canvas" \
-  "⋮ → Language servers|diálogo com contagem por linguagem (Repository/Canvas), comando e status de cada servidor; Load project environment desabilitado com explicação" \
+  "⋮ → Language servers|diálogo com contagem por linguagem (Repository/Canvas), comando, status e estado de instalação de cada servidor (Installed (PATH), Not installed + Install, …); Load project environment desabilitado com explicação" \
+  "Ctrl+K → Language servers…|abre o mesmo diálogo (comando lsp:openLanguageServers)" \
+  "Com SPATIALCODING_LSP_DIR=\$(mktemp -d) e um servidor fora do PATH (ex.: pyright), clicar em Install na linha dele|a linha mostra Downloading N% / Extracting…, termina em \"Installed (SpatialCoding)\" com Remove, um toast diz \"Python language server installed\" e um arquivo .py selecionado passa a listar símbolos sem reiniciar o app" \
+  "Remove na linha instalada|a pasta do servidor some de SPATIALCODING_LSP_DIR e a linha volta a Not installed + Install" \
+  "Sem rede (ou Node.js/go fora do PATH)|Install falha com toast e \"Failed\" + Retry (a dica traz o erro); sem Node.js o botão de TypeScript/Python fica desabilitado com o motivo" \
   "Clicar em Cargo.toml na árvore de arquivos e selecionar o nó|\"No language server for TOML.\"" \
   "Fechar o app e rodar SPATIALCODING_LSP_RUST=nao-existe scripts/manual/12-lsp.sh; selecionar util.rs na aba LSP|em vermelho: \"Could not start \`nao-existe\`: … Set SPATIALCODING_LSP_RUST to the server command.\""
 launch "$dir" --layout --open src/util.rs --open src/main.rs

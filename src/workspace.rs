@@ -388,6 +388,20 @@ pub fn rebuild_edges(state: &mut AppState) {
 /// indexer, and updates the edges when the indexer learned something. Called
 /// every frame.
 pub fn poll_lsp(state: &mut AppState) {
+    for (server, result) in state.lsp.installer.take_finished() {
+        match result {
+            Ok(()) => {
+                // Servers that failed to start for lack of a command start now.
+                state.lsp.manager.restart_servers();
+                state.lsp.retry_failed_symbols();
+                crate::ui::toast::push(state, format!("{} language server installed", server.name()));
+            }
+            Err(e) => crate::ui::toast::push(
+                state,
+                format!("Could not install the {} language server: {e}", server.name()),
+            ),
+        }
+    }
     for (id, response) in state.lsp.manager.poll() {
         if let Some(response) = state.lsp.receive(id, response) {
             state.deps.receive(&mut state.lsp.manager, id, response);
