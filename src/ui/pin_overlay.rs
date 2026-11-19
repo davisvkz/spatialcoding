@@ -7,6 +7,7 @@ use std::path::Path;
 use egui::{Color32, Pos2, Rect};
 
 use crate::analysis::lsp::graph::Role;
+use crate::app::clamp_or_mid;
 use crate::ui::symbol_pins::Pin;
 
 /// Most overlays of one role drawn per frame, and most edges.
@@ -239,7 +240,10 @@ pub fn out_of_view(state: &crate::state::AppState, canvas: Rect) -> Vec<OutOfVie
         out.push(OutOfView {
             node_id: node.id,
             name: node.file_name().to_string(),
-            at: Pos2::new(center.x.clamp(inner.left(), inner.right()), center.y.clamp(inner.top(), inner.bottom())),
+            at: Pos2::new(
+                clamp_or_mid(center.x, inner.left(), inner.right()),
+                clamp_or_mid(center.y, inner.top(), inner.bottom()),
+            ),
             world_center: rect.center(),
         });
     }
