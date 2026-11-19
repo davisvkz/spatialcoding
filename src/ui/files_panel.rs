@@ -108,10 +108,15 @@ fn draw_actions(ui: &mut egui::Ui, state: &mut AppState) {
         });
         action_group(ui, |ui| {
             const NEED: &str = "Select a file node first.";
-            if icon_action(ui, has_selection, icons::ARROW_LEFT_TO_LINE, "Open files that import the selection", NEED) {
-                workspace::open_import_neighbours(state, ImportDirection::Importers);
+            const NOTHING: &str = "No file imports the selection, and no language server can look for more.";
+            let importers = crate::importers::can_open_importers(state);
+            let reason = if has_selection { NOTHING } else { NEED };
+            if icon_action(ui, importers, icons::ARROW_LEFT_TO_LINE, "Open files that import the selection", reason) {
+                crate::importers::open_importers(Some(ui.ctx()), state);
             }
-            if icon_action(ui, has_selection, icons::ARROW_RIGHT_TO_LINE, "Open imported files", NEED) {
+            let imports = crate::importers::can_open_imports(state);
+            let reason = if has_selection { "The selection imports no file that is not open." } else { NEED };
+            if icon_action(ui, imports, icons::ARROW_RIGHT_TO_LINE, "Open imported files", reason) {
                 workspace::open_import_neighbours(state, ImportDirection::Imported);
             }
         });

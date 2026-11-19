@@ -18,7 +18,9 @@ fn wait_for(app: &mut App, done: impl Fn(&App) -> bool) {
         std::thread::sleep(std::time::Duration::from_millis(10));
         app.step();
     }
-    app.run();
+    // A debounced search keeps asking for repaints while it is pending.
+    app.step();
+    app.step();
 }
 
 /// Switches to Files & folders and refocuses the field.

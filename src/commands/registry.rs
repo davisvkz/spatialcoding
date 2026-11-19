@@ -351,16 +351,17 @@ fn build() -> Vec<Command> {
     v.push(cmd("canvas:closeUnchangedFolders", "Close folders without changes", |s, _| run_folder(s, FolderAction::CloseUnchanged)).when(changes_known));
     v.push(
         cmd("canvas:openSelectedImporters", "Open files that import the selection", |s, _| {
-            Ok(json!({ "opened": workspace::open_import_neighbours(s, ImportDirection::Importers).len() }))
+            // Asks the language server; the files open when it has answered.
+            Ok(json!({ "asked": crate::importers::open_importers(None, s) }))
         })
-        .when(has_selection)
+        .when(crate::importers::can_open_importers)
         .anchor("file-nodes"),
     );
     v.push(
         cmd("canvas:openSelectedImports", "Open imported files", |s, _| {
             Ok(json!({ "opened": workspace::open_import_neighbours(s, ImportDirection::Imported).len() }))
         })
-        .when(has_selection)
+        .when(crate::importers::can_open_imports)
         .anchor("file-nodes"),
     );
     v.push(

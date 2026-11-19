@@ -16,6 +16,7 @@ pub mod git;
 pub mod highlight;
 pub mod input;
 pub mod layout;
+pub mod importers;
 pub mod namespaces;
 pub mod nodes;
 pub mod search;

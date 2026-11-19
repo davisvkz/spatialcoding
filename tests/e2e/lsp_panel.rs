@@ -49,137 +49,54 @@ fn canvas_product(app: &mut App, fx: &Fixture) -> (u64, Pos2) {
     (id, at)
 }
 
-#[test]
-fn canvas_query_on_hover_draws_local_symbol_graph_without_selecting_or_moving() {
-    let fx = fixture();
-    let mut app = app_with_fake_lsp(&fx);
-    let (id, at) = canvas_product(&mut app, &fx);
-    app.input_mut().events.push(egui::Event::PointerMoved(at));
-    app.run();
-    assert!(
-        app.app_state().lsp.canvas_graph.graph.is_none(),
-        "off by default"
-    );
-    let offset = app.app_state().viewport.offset;
-    let zoom = app.app_state().viewport.zoom;
-    app.app_state_mut().settings.lsp.query_on_hover = true;
-    for _ in 0..4 {
+/// Steps frames until `done`, while the fake server answers.
+fn wait_until(app: &mut App, what: &str, done: impl Fn(&App) -> bool) {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !done(app) {
+        assert!(Instant::now() < deadline, "timed out waiting for {what}");
+        std::thread::sleep(Duration::from_millis(10));
         app.step();
     }
-    settle(&mut app);
-    let graph = app
-        .app_state()
-        .lsp
-        .canvas_graph
-        .graph
-        .as_ref()
-        .expect("hover graph");
-    assert_eq!(graph.sites[0].node_id, id);
-    assert_eq!((graph.sites[0].span.start, graph.sites[0].span.end), (0, 2));
-    assert!(graph.sites.len() >= 5, "same-file references are included");
-    assert!(
-        graph
-            .sites
-            .iter()
-            .any(|s| s.span.start == 3 && s.span.end == 7),
-        "full impl block"
-    );
-    assert!(app.selected().is_empty());
-    assert!(app.app_state().selection.symbols().is_empty());
-    assert_eq!(app.app_state().viewport.offset, offset);
-    assert_eq!(app.app_state().viewport.zoom, zoom);
-    let shapes = frame_shapes(&app);
-    assert!(shapes.iter().any(|s| matches!(s, egui::Shape::Rect(r)
-        if r.fill == spatialcoding::ui::symbol_graph::DEFINITION_COLOR.gamma_multiply(0.10)
-            && r.rect.height() > line_height(app.app_state().settings.font_size) * 2.5)));
-    assert!(
-        shapes
-            .iter()
-            .any(|s| matches!(s, egui::Shape::CubicBezier(_))),
-        "local curved connections"
-    );
-
-    // A reference hit resolves back to the same definition, without clicking.
-    let usage = graph.sites.iter().find(|s| s.name.line == 3).unwrap().name;
-    let s = app.app_state();
-    let node = s.node_store.get_file(id).unwrap();
-    let usage_point = s.viewport.world_to_screen(
-        node.position
-            + egui::vec2(
-                spatialcoding::nodes::file_node::CODE_PAD_X + 45.0,
-                HEADER_HEIGHT
-                    + CODE_PADDING
-                    + (usage.line as f32 + 0.5) * line_height(s.settings.font_size),
-            ),
-    );
-    app.input_mut()
-        .events
-        .push(egui::Event::PointerMoved(usage_point));
-    for _ in 0..4 {
-        app.step();
-    }
-    settle(&mut app);
-    assert_eq!(
-        app.app_state()
-            .lsp
-            .canvas_graph
-            .graph
-            .as_ref()
-            .unwrap()
-            .sites[0]
-            .name
-            .line,
-        0
-    );
-    assert!(app.selected().is_empty());
-
-    app.app_state_mut().settings.lsp.query_on_hover = false;
-    app.run();
-    assert!(app.app_state().lsp.canvas_graph.graph.is_none());
 }
 
 #[test]
-fn canvas_hover_graph_clears_on_whitespace_and_closed_definition() {
+fn canvas_query_on_hover_pins_a_preview_that_leaving_drops_and_a_click_keeps() {
     let fx = fixture();
     let mut app = app_with_fake_lsp(&fx);
     let (id, at) = canvas_product(&mut app, &fx);
+    app.input_mut().events.push(egui::Event::PointerMoved(at));
+    for _ in 0..8 {
+        app.step();
+    }
+    assert!(app.app_state().lsp.pins.pins().is_empty(), "off by default");
+    let (offset, zoom) = (app.app_state().viewport.offset, app.app_state().viewport.zoom);
+
     app.app_state_mut().settings.lsp.query_on_hover = true;
+    wait_until(&mut app, "the hover preview", |a| a.app_state().lsp.pins.pins().first().is_some_and(|p| p.graph().is_some()));
+    let pins = app.app_state().lsp.pins.pins();
+    assert_eq!((pins.len(), pins[0].preview, pins[0].name.as_str(), pins[0].node_id), (1, true, "Product", id));
+    assert_eq!(app.app_state().lsp.pins.len(), 0, "a preview is not counted as pinned");
+    assert!(app.selected().is_empty() && app.app_state().selection.symbols().is_empty());
+    assert_eq!((app.app_state().viewport.offset, app.app_state().viewport.zoom), (offset, zoom));
+    assert_eq!(app.app_state().node_store.file_nodes.len(), 1, "a preview opens no files");
+
+    // Moving away drops it.
+    app.input_mut().events.push(egui::Event::PointerMoved(Pos2::new(900.0, 700.0)));
+    for _ in 0..3 {
+        app.step();
+    }
+    assert!(app.app_state().lsp.pins.pins().is_empty(), "the preview goes with the pointer");
+
+    // Resting again and clicking keeps it as a real pin.
     app.input_mut().events.push(egui::Event::PointerMoved(at));
-    for _ in 0..4 {
+    wait_until(&mut app, "the preview again", |a| a.app_state().lsp.pins.pins().first().is_some_and(|p| p.graph().is_some()));
+    click_at(&mut app, at, Modifiers::NONE);
+    for _ in 0..3 {
         app.step();
     }
-    settle(&mut app);
-    assert!(app.app_state().lsp.canvas_graph.graph.is_some());
-    app.input_mut()
-        .events
-        .push(egui::Event::PointerMoved(Pos2::new(900.0, 700.0)));
-    app.run();
-    assert!(app.app_state().lsp.canvas_graph.graph.is_none());
-    app.input_mut().events.push(egui::Event::PointerMoved(at));
-    for _ in 0..4 {
-        app.step();
-    }
-    settle(&mut app);
-    assert!(app.app_state().lsp.canvas_graph.graph.is_some());
-    app.app_state_mut()
-        .node_store
-        .get_file_mut(id)
-        .unwrap()
-        .content
-        .push_str("\n// changed source\n");
-    app.step();
-    assert!(
-        app.app_state().lsp.canvas_graph.graph.is_none(),
-        "content changes invalidate the snapshot immediately"
-    );
-    for _ in 0..4 {
-        app.step();
-    }
-    settle(&mut app);
-    assert!(app.app_state().lsp.canvas_graph.graph.is_some());
-    app.app_state_mut().node_store.file_nodes.remove(&id);
-    app.run();
-    assert!(app.app_state().lsp.canvas_graph.graph.is_none());
+    let pins = app.app_state().lsp.pins.pins();
+    assert!(pins.len() == 1 && !pins[0].preview, "the click keeps the pin: {pins:?}");
+    assert_eq!(app.app_state().lsp.pins.len(), 1);
 }
 
 /// The app with `fx` loaded and the fake language server plugged in.
@@ -257,7 +174,7 @@ fn lsp_tab_lists_the_symbols_of_the_selected_file() {
     let id = select_and_open_lsp(&mut app, &fx, "src/main.rs");
 
     app.get_by_label("fn main  L3");
-    app.get_by_label("Click a symbol to find its references.");
+    app.get_by_label("Click a symbol to pin its graph.");
 
     app.get_by_label("fn main  L3").hover();
     app.run();
@@ -279,81 +196,53 @@ fn lsp_tab_lists_the_symbols_of_the_selected_file() {
 }
 
 #[test]
-fn clicking_a_symbol_lists_references_across_files_and_a_reference_focuses_its_line() {
+fn clicking_a_symbol_row_pins_it_and_a_result_focuses_its_line() {
     let fx = fixture();
     let mut app = app_with_fake_lsp(&fx);
-    // This test opens main.rs by clicking a reference, not automatically.
+    // This test opens main.rs by clicking a result, not automatically.
     app.app_state_mut().settings.lsp.auto_open_matches = false;
     let util = select_and_open_lsp(&mut app, &fx, "src/util.rs");
 
     app.get_by_label("fn hello  L1").click();
     settle(&mut app);
-    assert_eq!(
-        app.app_state().selection.symbols().len(),
-        1,
-        "LSP rows share canvas symbol focus"
-    );
-    app.get_by_label("References to hello");
-    app.get_by_label("2 references in 2 files");
-    app.get_by_label("src/main.rs");
-    app.get_by_label("src/util.rs");
-    app.get_by_label("L1  pub fn hello() {}");
+    assert_eq!(app.app_state().selection.symbols().len(), 1, "LSP rows share canvas symbol focus");
+    let pins = app.app_state().lsp.pins.pins();
+    assert_eq!((pins.len(), pins[0].name.as_str(), pins[0].preview), (1, "hello", false));
+    app.get_by_label("Pinned Symbols (1)");
+    app.get_by_label("Files (2)");
+    app.get_by_label_contains("Results (");
+    app.get_by_label("ref  main.rs:4");
 
     // main.rs is not on the canvas yet, and the view looks elsewhere.
     assert_eq!(app.app_state().node_store.file_nodes.len(), 1);
     app.show_at(Pos2::new(-5000.0, -5000.0), CANVAS_SPOT);
 
-    app.get_by_label("L4  util::hello();").click();
+    app.get_by_label("ref  main.rs:4").click();
     settle(&mut app);
 
     let s = app.app_state();
     assert_eq!(s.node_store.file_nodes.len(), 2, "main.rs was opened");
     let main = s.selection.primary.unwrap();
     assert_ne!(main, util);
-    assert!(s
-        .node_store
-        .get_file(main)
-        .unwrap()
-        .path
-        .ends_with("src/main.rs"));
-    assert_eq!(
-        s.lsp.target,
-        Some(LineHighlight {
-            node_id: main,
-            start_line: 3,
-            end_line: 3
-        })
-    );
+    assert!(s.node_store.get_file(main).unwrap().path.ends_with("src/main.rs"));
+    assert_eq!(s.lsp.target, Some(LineHighlight { node_id: main, start_line: 3, end_line: 3 }));
     assert!(s.pending_focus.is_none(), "the canvas applied the focus");
 
     // Line 4 of main.rs is now in the middle of the canvas.
     let node = s.node_store.get_file(main).unwrap();
     let rect = node.world_rect(s.settings.node_width, s.settings.font_size);
-    let line_y =
-        rect.top() + HEADER_HEIGHT + CODE_PADDING + 3.5 * line_height(s.settings.font_size);
-    let on_screen = s
-        .viewport
-        .world_to_screen(Pos2::new(rect.center().x, line_y));
+    let line_y = rect.top() + HEADER_HEIGHT + CODE_PADDING + 3.5 * line_height(s.settings.font_size);
+    let on_screen = s.viewport.world_to_screen(Pos2::new(rect.center().x, line_y));
     assert!(
         (300.0..1100.0).contains(&on_screen.x) && (300.0..600.0).contains(&on_screen.y),
         "line shown near the canvas center: {on_screen:?}"
     );
 
-    // The references stay listed, the target line is painted on the node.
-    app.get_by_label("References to hello");
+    // The pin stays listed, the target line is painted on the node.
+    app.get_by_label("Pinned Symbols (1)");
     let color = s.theme.selection.gamma_multiply(0.4);
-    let painted = app
-        .output()
-        .shapes
-        .iter()
-        .any(|c| matches!(&c.shape, egui::Shape::Rect(r) if r.fill == color));
+    let painted = app.output().shapes.iter().any(|c| matches!(&c.shape, egui::Shape::Rect(r) if r.fill == color));
     assert!(painted, "target line highlighted");
-
-    // Jumping back reuses the open util.rs node.
-    app.get_by_label("L1  pub fn hello() {}").click();
-    settle(&mut app);
-    assert_eq!(app.app_state().selection.primary, Some(util));
-    assert_eq!(app.app_state().node_store.file_nodes.len(), 2);
 }
 
 #[test]
@@ -414,12 +303,9 @@ fn scrolled_lsp_rows_keep_correct_hover_and_pointer_click_bounds() {
         ((bounds.x0 + bounds.x1) * 0.5) as f32,
         ((bounds.y0 + bounds.y1) * 0.5) as f32,
     );
-    click_at(&mut app, center, Modifiers::NONE);
+    click_at_stepping(&mut app, center, Modifiers::NONE);
     settle(&mut app);
-    assert_eq!(
-        app.app_state().lsp.references.as_ref().unwrap().symbol,
-        "symbol_34"
-    );
+    assert_eq!(app.app_state().lsp.pins.pins().first().map(|p| p.name.as_str()), Some("symbol_34"));
 }
 
 #[test]
@@ -457,23 +343,24 @@ fn symbol_graph_history_and_clear_symbols() {
     app.get_by_label_contains("Click a symbol to show LSP graph results.");
     assert!(app.get_by_label("Previous symbol").is_disabled());
     assert!(app.get_by_label("Clear Symbols").is_disabled());
+    let pinned = |app: &App| app.app_state().lsp.pins.pins().iter().map(|p| p.name.clone()).collect::<Vec<_>>();
 
     app.get_by_label("fn hello  L1").click();
     settle(&mut app);
     app.get_by_label("fn bye  L2").click();
     settle(&mut app);
-    app.get_by_label("References to bye");
+    assert_eq!(pinned(&app), ["bye"], "a plain click replaces the pin");
 
     app.get_by_label("Previous symbol").click();
     settle(&mut app);
-    app.get_by_label("References to hello");
+    assert_eq!(pinned(&app), ["hello"]);
     app.get_by_label("Next symbol").click();
     settle(&mut app);
-    app.get_by_label("References to bye");
+    assert_eq!(pinned(&app), ["bye"]);
 
-    app.get_by_label("Clear Symbols").click();
+    app.get_by_label("Clear 1 Symbol").click();
     app.run();
-    assert!(app.app_state().lsp.references.is_none());
+    assert!(app.app_state().lsp.pins.is_empty());
     assert!(app.app_state().selection.symbols().is_empty());
     assert!(
         !app.app_state().selection.selected.is_empty(),
@@ -513,22 +400,20 @@ fn advanced_settings_card_opens_from_the_gear_and_edits_lsp_settings() {
 }
 
 #[test]
-fn query_on_hover_asks_for_references_after_resting_on_a_symbol() {
+fn query_on_hover_over_a_list_row_pins_a_preview_without_selecting() {
     let fx = fixture();
     let mut app = app_with_fake_lsp(&fx);
     app.app_state_mut().settings.lsp.query_on_hover = true;
     app.app_state_mut().settings.lsp.auto_open_matches = false;
     select_and_open_lsp(&mut app, &fx, "src/util.rs");
     app.get_by_label("fn hello  L1").hover();
-    for _ in 0..4 {
+    for _ in 0..3 {
         app.step();
     }
-    settle(&mut app);
-    app.get_by_label("References to hello");
-    assert!(
-        app.app_state().selection.symbols().is_empty(),
-        "hovering does not select"
-    );
+    wait_until(&mut app, "the row preview", |a| a.app_state().lsp.pins.pins().first().is_some_and(|p| p.graph().is_some()));
+    let pin = &app.app_state().lsp.pins.pins()[0];
+    assert!(pin.preview && pin.name == "hello");
+    assert!(app.app_state().selection.symbols().is_empty(), "hovering does not select");
 }
 
 #[test]
@@ -551,7 +436,7 @@ fn language_servers_dialog_lists_servers_and_file_counts() {
 }
 
 #[test]
-fn keep_zoom_and_out_of_view_markers() {
+fn keep_zoom_and_out_of_view_tags() {
     let fx = fixture();
     let mut app = app_with_fake_lsp(&fx);
     {
@@ -570,14 +455,86 @@ fn keep_zoom_and_out_of_view_markers() {
     }
     app.show_at(Pos2::new(-20_000.0, -20_000.0), CANVAS_SPOT);
     let canvas = egui::Rect::from_min_max(Pos2::new(40.0, 30.0), Pos2::new(1060.0, 900.0));
-    let markers = spatialcoding::ui::lsp_panel::out_of_view_markers(app.app_state(), canvas);
-    assert_eq!(
-        markers.len(),
-        2,
-        "util.rs and main.rs are off screen: {markers:?}"
-    );
+    let tags = spatialcoding::ui::pin_overlay::out_of_view(app.app_state(), canvas);
+    assert_eq!(tags.len(), 2, "util.rs and main.rs are off screen: {tags:?}");
 
-    app.get_by_label("L4  util::hello();").click();
+    app.get_by_label("ref  main.rs:4").click();
     settle(&mut app);
     assert_eq!(app.app_state().viewport.zoom, 0.3, "Keep Zoom");
+}
+
+#[test]
+fn auto_open_matches_also_serves_pins_from_the_canvas_but_not_previews() {
+    let fx = fixture();
+    let mut app = app_with_fake_lsp(&fx);
+    let util = app.open(&fx.path("src/util.rs"));
+    app.app_state_mut().right_panel = None;
+
+    // Off: the pin's results stay unopened.
+    app.app_state_mut().settings.lsp.auto_open_matches = false;
+    spatialcoding::ui::symbol_pins::pin(None, app.app_state_mut(), util, 0, 7, false);
+    wait_until(&mut app, "the pin graph", |a| a.app_state().lsp.pins.pins().first().is_some_and(|p| p.graph().is_some()));
+    app.step();
+    assert_eq!(app.app_state().node_store.file_nodes.len(), 1, "Auto Open Matches off");
+
+    // On, from a preview: nothing opens until a click keeps it.
+    app.app_state_mut().lsp.pins.clear();
+    app.app_state_mut().settings.lsp.auto_open_matches = true;
+    spatialcoding::ui::symbol_pins::pin_token(None, app.app_state_mut(), util, 0, 7, spatialcoding::ui::symbol_pins::PinMode::Preview);
+    wait_until(&mut app, "the preview graph", |a| a.app_state().lsp.pins.pins().first().is_some_and(|p| p.graph().is_some()));
+    app.step();
+    assert_eq!(app.app_state().node_store.file_nodes.len(), 1, "a preview opens nothing");
+    spatialcoding::ui::symbol_pins::pin(None, app.app_state_mut(), util, 0, 7, false);
+    wait_until(&mut app, "main.rs to open", |a| a.app_state().node_store.file_nodes.len() == 2);
+    assert!(app.app_state().node_store.file_nodes.values().any(|n| n.path.ends_with("src/main.rs")));
+    assert!(!app.app_state().lsp.pins.pins()[0].preview);
+}
+
+#[test]
+fn reveal_through_collapse_keeps_the_files_of_pinned_symbols_visible() {
+    let fx = fixture();
+    let mut app = app_with_fake_lsp(&fx);
+    let util = app.open(&fx.path("src/util.rs"));
+    let main = app.open(&fx.path("src/main.rs"));
+    app.app_state_mut().settings.lsp.auto_open_matches = false;
+    spatialcoding::ui::symbol_pins::pin(None, app.app_state_mut(), util, 0, 7, false);
+    wait_until(&mut app, "the pin graph", |a| a.app_state().lsp.pins.pins().first().is_some_and(|p| p.graph().is_some()));
+    app.app_state_mut().settings.lsp.reveal_through_collapse = false;
+    assert!(!spatialcoding::folder_actions::folder_view(app.app_state()).revealed_files.contains(&main));
+    app.app_state_mut().settings.lsp.reveal_through_collapse = true;
+    let view = spatialcoding::folder_actions::folder_view(app.app_state());
+    assert!(view.revealed_files.contains(&main) && view.revealed_files.contains(&util), "the pin's results and its token");
+}
+
+#[test]
+fn the_activity_line_names_the_language_server_while_it_loads() {
+    let fx = fixture();
+    // A launcher that never finishes starting keeps the server in Starting.
+    let gate = std::sync::Arc::new((std::sync::Mutex::new(false), std::sync::Condvar::new()));
+    let held = gate.clone();
+    let mut app = app_with(&fx);
+    app.app_state_mut().lsp.manager.set_launcher(Arc::new(move |_, _| {
+        let (lock, cv) = &*held;
+        let mut open = lock.lock().unwrap();
+        while !*open {
+            open = cv.wait(open).unwrap();
+        }
+        Err("released".into())
+    }));
+    // Not `app.open`: it waits for the (held) servers.
+    let util = spatialcoding::workspace::open_file(app.app_state_mut(), &fx.path("src/util.rs"));
+    app.app_state_mut().settings.show_activity_indicator = true;
+    spatialcoding::ui::symbol_pins::pin(None, app.app_state_mut(), util, 0, 7, false);
+    app.step();
+    app.step();
+    let root = app.app_state().loaded_dir.clone().unwrap();
+    assert_eq!(
+        app.app_state().lsp.manager.loading_message(&root).as_deref(),
+        Some("Rust language server loading\u{2026}")
+    );
+    let painted = frame_shapes(&app).iter().any(|s| matches!(s, egui::Shape::Text(t) if t.galley.job.text == "Rust language server loading\u{2026}"));
+    assert!(painted, "the activity line is on the canvas");
+    // Release the launcher so the worker thread ends.
+    *gate.0.lock().unwrap() = true;
+    gate.1.notify_all();
 }

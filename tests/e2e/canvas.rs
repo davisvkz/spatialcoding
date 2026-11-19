@@ -504,7 +504,7 @@ fn ports_mark_connected_lines_on_the_border_and_edges_end_there() {
 
 #[test]
 fn file_nodes_show_and_navigate_to_code_after_line_fifty() {
-    use spatialcoding::nodes::file_node::{line_height, CODE_PADDING, CODE_PAD_X, HEADER_HEIGHT};
+    use spatialcoding::nodes::file_node::{line_height, CODE_PADDING, HEADER_HEIGHT};
     let fx = fixture();
     let content = "// filler\n".repeat(119) + "pub fn last_line() {}\n";
     std::fs::write(fx.path("src/util.rs"), content).unwrap();
@@ -694,6 +694,9 @@ pub fn symbol_canvas() -> (App, Fixture, u64, u64) {
         s.viewport.zoom = 1.0;
         s.viewport.target_zoom = 1.0;
         s.left_panel = None;
+        // Pinning a symbol would open the files of its results (Auto Open
+        // Matches); these tests are about what a click selects and draws.
+        s.settings.lsp.auto_open_matches = false;
     }
     app.show_at(Pos2::new(350.0, 40.0), CANVAS_SPOT);
     (app, fx, uses, defs)

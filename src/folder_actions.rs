@@ -373,12 +373,11 @@ pub fn folder_view(state: &AppState) -> FolderView {
     }
     if state.settings.lsp.reveal_through_collapse {
         revealed_files.extend(state.selection.symbols().iter().map(|s| s.node_id));
-        for path in crate::ui::lsp_panel::reference_files(state) {
+        // The files of every pinned symbol's results, and the pinned tokens' own.
+        for (path, _) in state.lsp.pins.files() {
             revealed_files.extend(store.file_nodes.values().filter(|n| n.path == path).map(|n| n.id));
         }
-        if let Some(refs) = &state.lsp.references {
-            revealed_files.insert(refs.node_id);
-        }
+        revealed_files.extend(state.lsp.pins.pins().iter().map(|p| p.node_id));
     }
     let revealed_folders = if folders.reveal_diff_folders && state.changes.is_known() {
         store

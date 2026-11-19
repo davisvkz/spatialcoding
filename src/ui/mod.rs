@@ -27,4 +27,3 @@ pub mod pin_overlay;
 pub mod markdown;
 pub mod zoom_levels;
 pub mod docs_dialog;
-pub mod symbol_graph;
