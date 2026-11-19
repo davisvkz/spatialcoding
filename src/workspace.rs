@@ -139,6 +139,7 @@ fn add_file_node(state: &mut AppState, path: &Path, content: String) -> u64 {
         && node.line_count > files.long_max_lines
     {
         node.collapsed = true;
+        node.shown_lines = files.long_max_lines;
     }
 
     if let Some(parent_dir) = path.parent() {
@@ -566,8 +567,13 @@ mod tests {
         let ids = open_files(&mut state, &[long, short]);
         let collapsed: Vec<bool> = ids.iter().map(|id| state.node_store.get_file(*id).unwrap().collapsed).collect();
         assert_eq!(collapsed, vec![true, false]);
-        assert_eq!(state.node_store.get_file(ids[0]).unwrap().visible_lines(), 0);
+        let node = state.node_store.get_file(ids[0]).unwrap();
+        assert_eq!((node.code_lines(), node.visible_lines()), (10, 11), "the first 10 lines and the marker row");
         assert_eq!(collapsed_files(&state), 1);
+        // Clicking the marker expands that one file.
+        expand_file(&mut state, ids[0]);
+        assert_eq!(collapsed_files(&state), 0);
+        state.node_store.get_file_mut(ids[0]).unwrap().collapsed = true;
         expand_all_files(&mut state);
         assert_eq!(collapsed_files(&state), 0);
         assert_eq!(state.node_store.get_file(ids[0]).unwrap().visible_lines(), 30);
@@ -1092,6 +1098,16 @@ pub fn top_level_symbol_count(state: &AppState) -> usize {
         .filter_map(|id| state.node_store.get_file(id))
         .map(|n| crate::analysis::symbol_mapping::top_level_tokens(&n.path, &n.content, state.settings.files.skip_imports).len())
         .sum()
+}
+
+/// Expands one collapsed long file (a click on its "Long file" row).
+pub fn expand_file(state: &mut AppState, id: u64) {
+    if let Some(node) = state.node_store.get_file_mut(id)
+        && node.collapsed
+    {
+        node.collapsed = false;
+        state.layout_dirty = true;
+    }
 }
 
 /// File nodes collapsed by "Collapse long files" (or by hand).

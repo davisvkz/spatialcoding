@@ -398,8 +398,11 @@ impl SpatialCodingApp {
         self.update_canvas_symbol_hover(ui, &response, &painter);
         self.draw_folder_nodes(&painter);
         let ports = self.collect_ports();
+        // The web of dependencies lies below the nodes; the selection's edges
+        // and highlighted backwards edges are drawn over them.
+        self.draw_edges(&painter, edge_renderer::EdgeLayer::Below);
         let graph_names = self.draw_file_nodes(&painter, canvas_rect, &ports);
-        self.draw_edges(&painter);
+        self.draw_edges(&painter, edge_renderer::EdgeLayer::Above);
         if let Some(graph) = &self.state.lsp.canvas_graph.graph {
             ui::symbol_graph::paint_connections(&painter, graph, &graph_names);
         }
@@ -447,7 +450,11 @@ impl SpatialCodingApp {
                     self.state.settings.font_size,
                 ) {
                     let additive = ui.input(|i| i.modifiers.shift);
-                    if let Some(symbol) = self.symbol_at(&painter, id, pos) {
+                    if self.marker_hit(id, world_pos) {
+                        // The "Long file" row: show the rest of the file.
+                        workspace::expand_file(&mut self.state, id);
+                        self.state.selection.select(id);
+                    } else if let Some(symbol) = self.symbol_at(&painter, id, pos) {
                         let name = symbol.name_span;
                         self.state.selection.select_symbol(id, symbol, additive);
                         // The click also pins the symbol: the language server
@@ -510,6 +517,16 @@ impl SpatialCodingApp {
             .then_some(id)
     }
 
+    /// Whether `world` is on the "Long file" row of the collapsed long file
+    /// `node_id`.
+    fn marker_hit(&self, node_id: u64, world: egui::Pos2) -> bool {
+        let Some(node) = self.state.node_store.get_file(node_id) else { return false };
+        let Some(row) = node.marker_row() else { return false };
+        let line_h = line_height(self.state.settings.font_size);
+        let top = node.position.y + HEADER_HEIGHT + CODE_PADDING + row as f32 * line_h;
+        (top..top + line_h).contains(&world.y)
+    }
+
     /// Symbol Mapping for a click at `world` inside file node `node_id`: the
     /// `(line, byte column)` of the token the region maps to, if the click is
     /// in the code area.
@@ -517,10 +534,13 @@ impl SpatialCodingApp {
         let node = self.state.node_store.get_file(node_id)?;
         let font_size = self.state.settings.font_size;
         let code_top = node.position.y + HEADER_HEIGHT + CODE_PADDING;
-        if node.collapsed || world.y < code_top {
+        if world.y < code_top {
             return None;
         }
         let line = ((world.y - code_top) / line_height(font_size)) as usize;
+        if line >= node.code_lines() {
+            return None;
+        }
         let text = node.content.lines().nth(line)?;
         let columns = ((world.x - node.position.x - CODE_PAD_X) / code_char_width(font_size)).max(0.0) as usize;
         let byte = text.char_indices().nth(columns).map_or(text.len(), |(i, _)| i);
@@ -534,7 +554,7 @@ impl SpatialCodingApp {
         let node = self.state.node_store.get_file(node_id)?;
         let zoom = self.state.viewport.zoom;
         let lod = LodLevel::from_zoom(zoom);
-        if node.collapsed || !lod.draws_code() {
+        if !lod.draws_code() {
             return None;
         }
         let font_size = self.state.settings.font_size;
@@ -805,6 +825,10 @@ impl SpatialCodingApp {
             if !world_rect.intersects(visible_world) {
                 continue;
             }
+            // The edge's connection marker takes the circle's place.
+            if self.state.edge_style.show_connection_markers {
+                continue;
+            }
             for port in node_ports {
                 let Some(y) = node.line_anchor_y(port.line, font_size) else { continue };
                 let x = match port.side {
@@ -873,6 +897,27 @@ impl SpatialCodingApp {
                 );
             }
 
+            // Sticky label: once the top of a node scrolls off, its name stays
+            // on the canvas top as a pill while the node is still in view.
+            if names.show_names
+                && label_alpha > 0.0
+                && screen_rect.top() < canvas_rect.top() + 4.0
+                && screen_rect.bottom() > canvas_rect.top() + 36.0
+            {
+                let x = screen_rect.center().x.clamp(canvas_rect.left() + 60.0, canvas_rect.right() - 60.0);
+                let x = x.clamp(screen_rect.left() + 30.0, screen_rect.right() - 30.0);
+                let galley = painter.layout_no_wrap(
+                    node.file_name().to_string(),
+                    egui::FontId::proportional(12.0),
+                    theme.text_primary.gamma_multiply(label_alpha),
+                );
+                let size = galley.size() + egui::vec2(16.0, 6.0);
+                let pill = egui::Rect::from_center_size(egui::pos2(x, canvas_rect.top() + 6.0 + size.y * 0.5), size);
+                painter.rect_filled(pill, size.y * 0.5, theme.control_bg.gamma_multiply(label_alpha));
+                painter.rect_stroke(pill, size.y * 0.5, egui::Stroke::new(1.0_f32, theme.node_border), egui::StrokeKind::Inside);
+                painter.galley(pill.min + egui::vec2(8.0, 3.0), galley, theme.text_primary);
+            }
+
             if !lod.draws_code() {
                 // Far away: solid block only — the floating label above is the
                 // name. L5 fills the whole node with the semantic color:
@@ -896,7 +941,6 @@ impl SpatialCodingApp {
                 // The CST tint is the node's embedded minimap from L3 on.
                 if self.state.settings.cst.show_canvas
                     && lod.cst_base_alpha() > 0.0
-                    && !node.collapsed
                     && !node.content.is_empty()
                 {
                     let origin = egui::pos2(
@@ -926,28 +970,12 @@ impl SpatialCodingApp {
                 egui::vec2(screen_rect.width(), HEADER_HEIGHT * zoom),
             );
 
-            if node.collapsed {
-                // File nodes › "Collapse long files": frame only, with a note.
-                let note = format!("{} lines · collapsed", node.line_count);
-                draw_fitted_label(
-                    painter,
-                    &note,
-                    screen_rect.center(),
-                    egui::Align2::CENTER_CENTER,
-                    screen_rect.width(),
-                    (font_size * zoom).clamp(6.0, 13.0),
-                    5.0,
-                    theme.text_muted,
-                );
-                continue;
-            }
-
             if node.content.is_empty() {
                 continue;
             }
 
             let highlighted = self.highlighter.highlight_file(&node.path, &node.content);
-            let lines = &highlighted[..highlighted.len().min(node.visible_lines())];
+            let lines = &highlighted[..highlighted.len().min(node.code_lines())];
             let code_origin = egui::pos2(
                 screen_rect.left() + CODE_PAD_X * zoom,
                 header_rect.bottom() + CODE_PADDING * zoom,
@@ -980,15 +1008,7 @@ impl SpatialCodingApp {
                     hl_origin, screen_rect.width(), line_h,
                     port.line, port.line, node.visible_lines(),
                 ) {
-                    let color = port_color(&self.state.edge_style, port);
-                    let (fill, edge) = if port.emphasized { (0.16, 0.40) } else { (0.08, 0.22) };
-                    code_clip.rect_filled(rect, 0.0, color.gamma_multiply(fill));
-                    code_clip.rect_stroke(
-                        rect.shrink2(egui::vec2(0.0, 0.5)),
-                        0.0,
-                        egui::Stroke::new(1.0_f32, color.gamma_multiply(edge)),
-                        egui::StrokeKind::Inside,
-                    );
+                    paint_endpoint_rect(&code_clip, rect, port.side, port.emphasized);
                 }
             }
 
@@ -1063,18 +1083,23 @@ impl SpatialCodingApp {
                         code_clip.rect_stroke(
                             rect.shrink(1.0),
                             2.0,
-                            egui::Stroke::new(1.0_f32, CST_EDGE_NODE_COLOR),
+                            egui::Stroke::new(1.5_f32, CST_EDGE_NODE_COLOR.gamma_multiply(0.9)),
                             egui::StrokeKind::Inside,
                         );
                     }
                 }
                 if self.state.cst.hovered.is_some_and(|h| h.node_id == node.id) {
-                    for &(start, end) in &self.state.cst.hover_ancestors {
+                    // The hovered row is level 0; its ancestors fade by nesting:
+                    // [1, .5, .25, .12] of the hover tint.
+                    let chain = &self.state.cst.hover_ancestors;
+                    for (index, &(start, end)) in chain.iter().enumerate() {
+                        let level = chain.len() - index;
+                        let opacity = crate::analysis::cst_style::hover_nesting_opacity(level);
                         if let Some(rect) = cst_panel::highlight_rect(
                             hl_origin, screen_rect.width(), line_h,
                             start, end, node.visible_lines(),
                         ) {
-                            code_clip.rect_filled(rect, 0.0, theme.selection.gamma_multiply(0.08));
+                            code_clip.rect_filled(rect, 0.0, theme.selection.gamma_multiply(0.25 * opacity));
                         }
                     }
                 }
@@ -1131,11 +1156,27 @@ impl SpatialCodingApp {
                     right: screen_rect.right(),
                     line_h,
                     char_w: code_char_width(font_size * zoom),
-                    visible_lines: node.visible_lines(),
+                    visible_lines: node.code_lines(),
                 };
                 ui::pin_overlay::paint_node(
                     &code_clip, self.state.lsp.pins.pins(), &node.path, &node.content, area, &mut pin_marks,
                 );
+            }
+
+            // The line under the pointer gets a band across the gutter and code.
+            if lod.render_mode() == RenderMode::Text
+                && let Some(pointer) = self.state.hover_screen
+                && screen_rect.contains(pointer)
+                && pointer.y >= code_origin.y
+            {
+                let row = ((pointer.y - code_origin.y) / line_h) as usize;
+                if row < node.visible_lines() {
+                    let band = egui::Rect::from_min_size(
+                        egui::pos2(screen_rect.left(), code_origin.y + row as f32 * line_h),
+                        egui::vec2(screen_rect.width(), line_h),
+                    );
+                    code_clip.rect_filled(band, 0.0, egui::Color32::from_white_alpha(10));
+                }
             }
 
             match lod.render_mode() {
@@ -1155,12 +1196,38 @@ impl SpatialCodingApp {
                 }
                 RenderMode::None => unreachable!(),
             }
+
+            // A long file ends with a clickable row; the cut-off lines'
+            // edges and symbols attach to it.
+            if let Some(row) = node.marker_row() {
+                let rect = egui::Rect::from_min_size(
+                    egui::pos2(screen_rect.left(), code_origin.y + row as f32 * line_h),
+                    egui::vec2(screen_rect.width(), line_h),
+                );
+                code_clip.rect_filled(rect, 0.0, theme.accent.gamma_multiply(0.14));
+                code_clip.line_segment(
+                    [rect.left_top(), rect.right_top()],
+                    egui::Stroke::new(1.0_f32, theme.accent.gamma_multiply(0.6)),
+                );
+                let hidden = node.line_count - node.code_lines();
+                let label = format!("Long file · {hidden} more lines · click to expand");
+                draw_fitted_label(
+                    &code_clip,
+                    &label,
+                    rect.center(),
+                    egui::Align2::CENTER_CENTER,
+                    rect.width(),
+                    (font_size * zoom).clamp(6.0, 13.0),
+                    5.0,
+                    theme.text_primary,
+                );
+            }
         }
         self.pin_marks = pin_marks;
         graph_names
     }
 
-    fn draw_edges(&mut self, painter: &egui::Painter) {
+    fn draw_edges(&mut self, painter: &egui::Painter, layer: edge_renderer::EdgeLayer) {
         // LSP "Dim Dependency Edges": while a symbol is active.
         let symbol_active =
             !self.state.selection.symbols().is_empty() || self.state.lsp.references.is_some()
@@ -1183,7 +1250,7 @@ impl SpatialCodingApp {
         let node_width = self.state.settings.node_width;
         let highlighter = &mut self.highlighter;
         let mut symbol_rect = |node: &crate::nodes::file_node::FileNode, name: crate::edges::edge_store::NameSpan| {
-            if node.collapsed || !lod.draws_code() || name.line >= node.visible_lines() {
+            if !lod.draws_code() || name.line >= node.code_lines() {
                 return None;
             }
             let spans = highlighter.highlight_file(&node.path, &node.content).get(name.line)?;
@@ -1221,6 +1288,7 @@ impl SpatialCodingApp {
                 merge: self.state.settings.folders.merge_collapsed_edges,
                 symbol_dim,
             },
+            layer,
         );
     }
 
@@ -1819,6 +1887,33 @@ fn x_at_byte(spans: &HighlightedLine, at: usize, width: &dyn Fn(&str) -> f32) ->
 
 /// Fill of a port and its row band: the import or symbol color, brighter
 /// when the port carries the selection.
+/// The endpoint rectangle of a connected line: alpha .05 at the border the
+/// edge leaves from or enters through, fading to 0 across 75% of the node,
+/// with a .25 stroke on that border (right for an import, left for an export).
+fn paint_endpoint_rect(painter: &egui::Painter, row: egui::Rect, side: PortSide, emphasized: bool) {
+    let boost = if emphasized { 2.0 } else { 1.0 };
+    let base = crate::edges::style::MARKER_COLOR;
+    let with = |a: f32| base.gamma_multiply((a * boost).min(1.0));
+    let span = row.width() * crate::edges::geometry::ENDPOINT_RECT_SPAN;
+    let (near_x, far_x) = match side {
+        PortSide::Right => (row.right(), row.right() - span),
+        PortSide::Left => (row.left(), row.left() + span),
+    };
+    let (near, far) = (with(0.05), with(0.0));
+    let mut mesh = egui::Mesh::default();
+    for (x, color) in [(near_x, near), (far_x, far)] {
+        for y in [row.top(), row.bottom()] {
+            mesh.vertices.push(egui::epaint::Vertex { pos: egui::pos2(x, y), uv: egui::epaint::WHITE_UV, color });
+        }
+    }
+    mesh.indices.extend([0, 1, 3, 0, 3, 2]);
+    painter.add(egui::Shape::mesh(mesh));
+    painter.line_segment(
+        [egui::pos2(near_x, row.top()), egui::pos2(near_x, row.bottom())],
+        egui::Stroke::new(1.0_f32, with(0.25)),
+    );
+}
+
 fn port_color(style: &crate::edges::style::EdgeStyleConfig, port: &Port) -> egui::Color32 {
     let rgb = match port.kind {
         PortKind::Import => style.import_port_color,

@@ -198,6 +198,58 @@ pub fn depth_opacity(mode: OpacityMode, distance: usize) -> f32 {
     }
 }
 
+/// Radius of a connection marker in screen px: `max(0.5, (lineHeight - 2) /
+/// 2)` in world px for a code line, 8 for a collapsed folder.
+pub fn marker_radius(line_height_world: f32, folder: bool, zoom: f32) -> f32 {
+    let world = if folder { 8.0 } else { ((line_height_world - 2.0) / 2.0).max(0.5) };
+    world * zoom
+}
+
+/// Share of the line width the endpoint rectangle's gradient spans.
+pub const ENDPOINT_RECT_SPAN: f32 = 0.75;
+
+/// With All off, whether an edge between files `distance` folders apart
+/// stays: inside one folder or within `local_depth`, or external and within
+/// the nesting band (20 means no limit).
+pub fn stays_with_all_off(distance: usize, local_depth: usize, show_external: bool, nesting_max: usize) -> bool {
+    distance == 0 || distance <= local_depth || (show_external && (nesting_max >= 20 || distance <= nesting_max))
+}
+
+/// Side of a collision cell for arrow heads, in screen px.
+pub const ARROW_CELL: f32 = 16.0;
+
+/// Priority of an arrow when two share a cell: dependency < backwards <
+/// selected < selected backwards < symbol.
+pub fn arrow_priority(selected: bool, backwards: bool, symbol: bool) -> u8 {
+    if symbol {
+        4
+    } else {
+        match (selected, backwards) {
+            (true, true) => 3,
+            (true, false) => 2,
+            (false, true) => 1,
+            (false, false) => 0,
+        }
+    }
+}
+
+/// Which of the arrows `(tip, priority)` are drawn: one per 16 px cell, the
+/// highest priority first and the earliest among equals.
+pub fn arrows_to_draw(arrows: &[(Pos2, u8)]) -> Vec<usize> {
+    let mut order: Vec<usize> = (0..arrows.len()).collect();
+    order.sort_by_key(|&i| std::cmp::Reverse(arrows[i].1));
+    let mut taken = std::collections::HashSet::new();
+    let mut drawn: Vec<usize> = order
+        .into_iter()
+        .filter(|&i| {
+            let tip = arrows[i].0;
+            taken.insert(((tip.x / ARROW_CELL).floor() as i32, (tip.y / ARROW_CELL).floor() as i32))
+        })
+        .collect();
+    drawn.sort_unstable();
+    drawn
+}
+
 /// An edge from `source` to `target` runs backwards when the importer ends
 /// to the right of where the exported file starts:
 /// `source.x + source.width > target.x`.
@@ -328,6 +380,33 @@ mod tests {
         let depth = |d| depth_opacity(OpacityMode::Depth, d);
         assert_eq!([depth(0), depth(1), depth(2), depth(3), depth(4), depth(5)], [1.0, 0.5, 0.5, 0.25, 0.25, 0.125]);
         assert_eq!(depth_opacity(OpacityMode::Full, 9), 1.0);
+    }
+
+    #[test]
+    fn marker_radius_follows_the_line_height_and_the_zoom() {
+        assert_eq!(marker_radius(18.0, false, 1.0), 8.0);
+        assert_eq!(marker_radius(18.0, false, 0.5), 4.0);
+        assert_eq!(marker_radius(2.0, false, 1.0), 0.5, "never below half a pixel");
+        assert_eq!(marker_radius(18.0, true, 0.25), 2.0, "a folder marker has radius 8");
+    }
+
+    #[test]
+    fn all_off_keeps_internal_edges_and_external_ones_within_the_nesting_band() {
+        assert!(stays_with_all_off(0, 1, false, 20), "inside one folder");
+        assert!(stays_with_all_off(1, 1, false, 20), "within the local depth");
+        assert!(!stays_with_all_off(3, 1, false, 20), "external is off");
+        assert!(stays_with_all_off(3, 1, true, 20), "20 is no limit");
+        assert!(stays_with_all_off(3, 1, true, 4) && !stays_with_all_off(5, 1, true, 4));
+    }
+
+    #[test]
+    fn arrows_share_a_cell_by_priority_then_order() {
+        let tip = |x: f32, y: f32| Pos2::new(x, y);
+        // Two in one cell (the later one outranks), one apart, one tied with the first.
+        let arrows = [(tip(2.0, 2.0), 0), (tip(5.0, 5.0), 2), (tip(100.0, 2.0), 0), (tip(3.0, 3.0), 2)];
+        assert_eq!(arrows_to_draw(&arrows), vec![1, 2], "the selected one wins its cell; the tie keeps the first");
+        assert_eq!(arrows_to_draw(&[]), Vec::<usize>::new());
+        assert_eq!([arrow_priority(false, false, false), arrow_priority(false, true, false), arrow_priority(true, false, false), arrow_priority(true, true, false), arrow_priority(true, false, true)], [0, 1, 2, 3, 4]);
     }
 
     #[test]

@@ -28,7 +28,7 @@ checklist "04 · Arestas de dependência via LSP ($lang)" \
   "Após remover/adicionar imports, reabrir os arquivos e atualizar a comparação; ativar Changes/Diff Colors/Deleted|Changes realça as mudanças; adicionadas verdes/removidas vermelhas; Deleted oculta as removidas, que usam headers sem marcar linhas antigas no código atual" \
   "Editar baseline ou abrir/fechar arquivos durante a comparação|resultado antigo não reaparece; controles aguardam nova comparação; vínculos somente do LSP são explicitamente não comparados" \
   "Clicar num arquivo|borda branca no nó; as arestas dele (entrando e saindo) ficam azul-claras, opacas e por cima das outras, com ponta de seta no destino; as demais continuam visíveis, mais apagadas" \
-  "Com zoom médio/próximo, olhar as bordas dos arquivos|cada linha ligada por aresta tem um círculo (port) na borda voltada para o outro arquivo e uma faixa na linha; as arestas terminam no círculo; não existem badges de símbolo com borda azul" \
+  "Com zoom médio/próximo, olhar as bordas dos arquivos|cada aresta sai da borda DIREITA do importador e chega à borda ESQUERDA do exportado, mesmo se o exportado estiver à esquerda (aresta para trás, em laço); há um círculo #9ABAF2 translúcido em cada ponta e um retângulo que esmaece da borda para dentro; setas pequenas, uma por célula de 16 px" \
   "Comparar uma linha de import (ex.: mod/use em main.rs, reexport em util.rs) com um uso ou definição de símbolo|ports de import teal, de símbolo cinza; várias arestas da mesma linha compartilham um único círculo; ports da seleção ficam mais claros" \
   "Edges → Connections → trocar as cores Import/Symbol e depois desmarcar Ports|cores mudam nos círculos e faixas; sem Ports, círculos e faixas somem e as arestas voltam a encostar no nome no código" \
   "Com Ports desmarcado, aproximar (Ctrl+roda) um arquivo selecionado|a aresta sai do identificador USADO e chega ao nome na DEFINIÇÃO, não à borda do arquivo nem à primeira linha de comentários do statement; alinhamento acompanha o zoom" \
@@ -50,7 +50,7 @@ checklist "04 · Arestas de dependência via LSP ($lang)" \
   "Abrir helpers/strings.rs e navegar até o final|o bloco inclui after_fifty_lines depois da linha 50, sem truncar o arquivo" \
   "Settings → UI → Dot Grid|a grade de pontos volta a aparecer no fundo" \
   "Trocar o estilo: Bezier, Step, Line, PCB|o traçado das arestas muda de forma" \
-  "Arrastar um terceiro arquivo sobre uma conexão entre outros dois; repetir nos quatro estilos, com seleção e Gradient ligado/desligado|a linha passa por baixo do terceiro bloco, sem cobrir seu código; reaparece ao sair dele; sem Ports as pontas continuam visíveis nos nomes da origem e destino" \
+  "Arrastar um terceiro arquivo sobre uma conexão entre outros dois; repetir nos quatro estilos|as arestas comuns passam por BAIXO do terceiro bloco (o código dele fica legível); as arestas da seleção e as para trás destacadas ficam POR CIMA dos blocos" \
   "Recolher a pasta do terceiro arquivo que cobria a conexão|o retângulo antigo do arquivo oculto deixa de encobrir a linha; expandir a pasta restaura a oclusão" \
   "Desmarcar Arrow Heads|as setas somem" \
   "Arrastar um nó selecionado|as arestas acompanham o nó"
