@@ -42,12 +42,12 @@ fn performance_cst_depth_is_the_cst_panels_depth() {
 }
 
 #[test]
-fn agent_notes_show_their_hint_and_disabled_mcp_controls() {
+fn agent_notes_show_their_hint_and_an_enabled_menu() {
     let mut app = panel(RightPanel::AgentNotes);
-    app.get_by_label("No notes yet.");
-    assert!(app.get_by_label("Connect an MCP agent").is_disabled());
+    app.get_by_label_contains("No notes yet.");
+    app.get_by_label("spatialcoding --mcp");
     app.get_by_label("Agent notes menu").click();
     app.run();
-    assert!(app.get_by_label("Smooth Transition").is_disabled());
-    assert!(app.get_by_label("Reset Agent notes settings").is_disabled());
+    assert!(!app.get_by_label("Smooth Transition").is_disabled());
+    assert!(!app.get_by_label("Clear Agent notes").is_disabled());
 }

@@ -1,87 +1,34 @@
-//! Keyboard shortcut and input handling.
+//! Keyboard shortcut handling: every key press is looked up in the command
+//! registry (`crate::commands`), which owns the shortcut table.
 
 use crate::state::AppState;
 
-/// Process global keyboard shortcuts.
-/// Returns true if a shortcut was consumed.
+/// Runs the command of each key pressed this frame. Returns true if a
+/// shortcut was consumed.
 pub fn handle_shortcuts(ctx: &egui::Context, state: &mut AppState) -> bool {
-    let mut consumed = false;
-    let mut open_all = false;
-    // Read before `ctx.input`: calling back into `ctx` inside that closure
-    // re-locks the context and deadlocks.
-    let screen_rect = ctx.screen_rect();
     // A focused text field (palette, search) owns plain keys: typing "f" or
     // "1" must not fit the view or lay the canvas out. Chords still work.
     let typing = ctx.wants_keyboard_input();
+    state.space_held = ctx.input(|i| i.key_down(egui::Key::Space)) && !typing;
 
-    ctx.input(|i| {
-        // Ctrl+Shift+O: Open all files (file IO runs after the input lock is released)
-        if i.key_pressed(egui::Key::O) && i.modifiers.command && i.modifiers.shift {
-            open_all = true;
-            consumed = true;
-        }
-
-        // Space held detection for pan mode
-        state.space_held = i.key_down(egui::Key::Space) && !typing;
-
-        // Shift+F: Fit to screen. The canvas fits next frame, against its own
-        // rect rather than the whole window.
-        if i.key_pressed(egui::Key::F) && i.modifiers.shift && !typing {
-            state.pending_fit = true;
-            consumed = true;
-        }
-
-        // F: Focus on mouse — move the world point under the cursor to the screen center
-        if i.key_pressed(egui::Key::F) && !i.modifiers.shift && !i.modifiers.ctrl && !typing {
-            if let Some(pos) = i.pointer.hover_pos() {
-                let vp = &mut state.viewport;
-                let world_pos = vp.screen_to_world(pos);
-                vp.offset = screen_rect.center().to_vec2() / vp.zoom - world_pos.to_vec2();
-            }
-            consumed = true;
-        }
-
-        // Ctrl+K: Command palette
-        if i.key_pressed(egui::Key::K) && i.modifiers.command {
-            state.show_command_palette = !state.show_command_palette;
-            consumed = true;
-        }
-
-        // Ctrl+/: Shortcuts
-        if i.key_pressed(egui::Key::Slash) && i.modifiers.command {
-            state.show_shortcuts = !state.show_shortcuts;
-            consumed = true;
-        }
-
-        // Shift+X: Clear canvas
-        if i.key_pressed(egui::Key::X) && i.modifiers.shift && !typing {
-            crate::workspace::clear_canvas(state);
-            consumed = true;
-        }
-
-        // 1: Apply layout
-        if i.key_pressed(egui::Key::Num1) && !i.modifiers.command && !i.modifiers.shift && !typing {
-            crate::layout::hierarchical::apply_layout(
-                &mut state.node_store,
-                &state.edge_store,
-                &state.layout_settings,
-            );
-            consumed = true;
-        }
-
-        // Escape: close modals
-        if i.key_pressed(egui::Key::Escape) {
-            if state.show_settings { state.show_settings = false; consumed = true; }
-            else if state.show_shortcuts { state.show_shortcuts = false; consumed = true; }
-            else if state.show_command_palette { state.show_command_palette = false; consumed = true; }
-            else { state.selection.clear(); consumed = true; }
-        }
+    // Collected before running: a command may need the context again, which
+    // would deadlock inside `ctx.input`.
+    let pressed: Vec<(egui::Key, egui::Modifiers)> = ctx.input(|i| {
+        i.events
+            .iter()
+            .filter_map(|event| match event {
+                egui::Event::Key { key, pressed: true, repeat: false, modifiers, .. } => Some((*key, *modifiers)),
+                _ => None,
+            })
+            .collect()
     });
-
-    if open_all {
-        crate::workspace::open_all_files(state);
+    let mut consumed = false;
+    for (key, modifiers) in pressed {
+        let Some(command) = crate::commands::for_key(key, modifiers, typing) else { continue };
+        if crate::commands::run(state, command.id, &serde_json::Value::Null).is_ok() {
+            consumed = true;
+        }
     }
-
     consumed
 }
 

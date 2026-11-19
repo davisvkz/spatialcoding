@@ -276,3 +276,74 @@ fn selected_edges_outline_their_end_cst_nodes_and_reset_restores_defaults() {
     app.run();
     assert!(app.app_state().settings.cst.selected_edge_nodes);
 }
+
+/// Function-colored (`#3B82F6`) filled rectangles drawn this frame.
+fn function_tints(app: &App) -> Vec<u8> {
+    frame_shapes(app)
+        .iter()
+        .filter_map(|shape| match shape {
+            egui::Shape::Rect(r) if r.fill.a() > 0 && r.fill.b() > r.fill.r().saturating_mul(2) && r.fill.b() >= r.fill.g() => {
+                Some(r.fill.a())
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn zoomed_out_levels_tint_the_cst_by_role() {
+    let fx = fixture();
+    let mut app = app_with(&fx);
+    let id = app.open(&fx.path("src/util.rs"));
+    app.app_state_mut().right_panel = None;
+    let center = app.node_center(id);
+
+    // L1 (zoom >= 0.30): readable text, no base tint.
+    app.app_state_mut().viewport.zoom = 0.5;
+    app.app_state_mut().viewport.target_zoom = 0.5;
+    app.show_at(center, CANVAS_SPOT);
+    assert!(function_tints(&app).is_empty(), "L1 has no CST base tint");
+
+    // L2 (0.10 - 0.30): the function item is tinted at alpha .04.
+    app.app_state_mut().viewport.zoom = 0.2;
+    app.app_state_mut().viewport.target_zoom = 0.2;
+    app.show_at(center, CANVAS_SPOT);
+    let l2 = function_tints(&app);
+    assert!(l2.contains(&10), "L2 tint alpha .04 -> 10, got {l2:?}");
+
+    // L3 (0.04 - 0.10): alpha .10.
+    app.app_state_mut().viewport.zoom = 0.06;
+    app.app_state_mut().viewport.target_zoom = 0.06;
+    app.show_at(center, CANVAS_SPOT);
+    let l3 = function_tints(&app);
+    assert!(l3.contains(&26), "L3 tint alpha .10 -> 26, got {l3:?}");
+
+    // The Toggle CST nodes switch turns the tint off.
+    app.app_state_mut().settings.cst.show_canvas = false;
+    app.run();
+    assert!(function_tints(&app).is_empty());
+}
+
+#[test]
+fn a_hidden_type_is_not_tinted_and_a_style_override_changes_the_alpha() {
+    let fx = fixture();
+    let mut app = app_with(&fx);
+    let id = app.open(&fx.path("src/util.rs"));
+    app.app_state_mut().right_panel = None;
+    let center = app.node_center(id);
+    app.app_state_mut().viewport.zoom = 0.2;
+    app.app_state_mut().viewport.target_zoom = 0.2;
+    app.show_at(center, CANVAS_SPOT);
+    assert!(function_tints(&app).contains(&10));
+
+    let mut style = spatialcoding::analysis::cst_style::CstTypeStyle::default_for("function_item");
+    style.fill_alpha = 0.5;
+    app.app_state_mut().settings.cst.type_styles.insert("function_item".into(), style.clone());
+    app.run();
+    assert!(function_tints(&app).contains(&5), "alpha .04 * .5 -> 5");
+
+    style.visible = false;
+    app.app_state_mut().settings.cst.type_styles.insert("function_item".into(), style);
+    app.run();
+    assert!(function_tints(&app).is_empty(), "a hidden type draws nothing");
+}

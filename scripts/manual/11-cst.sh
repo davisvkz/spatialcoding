@@ -24,7 +24,9 @@ checklist "11 · Árvore sintática (CST)" \
   "Dar zoom out até o nó virar barras (minificado)|o destaque continua alinhado às barras" \
   "Selecionar Button.tsx, legacy.js, cart.py e main.go|cada um mostra sua árvore (\"TSX · …\" e \"JavaScript · …\" com raiz program, Python module, Go source_file)" \
   "Selecionar README.md ou settings.json|\"No syntax tree: <linguagem> is not supported.\"" \
-  "Trocar para a aba Layout com o mouse em cima de uma linha|o destaque some do canvas"
+  "Trocar para a aba Layout com o mouse em cima de uma linha|o destaque some do canvas" \
+  "Dar zoom out para 0,2x e depois 0,06x|cada nó mostra retângulos tintados pelo papel (função azul, classe roxa, variável verde, import laranja, export lima); alpha 0,04 em 0,2x e 0,10 abaixo de 0,10x; if/else/switch não são tintados" \
+  "Ligar e desligar o switch do cabeçalho (Toggle CST nodes) em zoom afastado|a tinta de todos os nós aparece e some"
 launch "$dir" --layout \
   --open rust/src/main.rs --open web/src/components/Button.tsx --open web/src/legacy.js \
   --open python/src/shop/cart.py --open go/main.go --open README.md --open config/settings.json

@@ -3,10 +3,12 @@
 //! The binary in `main.rs` only parses arguments and starts eframe; everything
 //! else lives here so integration tests can drive the real app.
 
+pub mod agent_notes;
 pub mod analysis;
 pub mod app;
 pub mod canvas;
 pub mod cli;
+pub mod commands;
 pub mod edges;
 pub mod folder_actions;
 pub mod fs;

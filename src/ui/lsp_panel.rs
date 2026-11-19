@@ -73,6 +73,11 @@ pub struct LspPanelState {
     pub manager: LspManager,
     /// Independent transient canvas requests; never replace clicked references.
     pub canvas_graph: crate::ui::symbol_graph::CanvasGraphState,
+    /// Symbols pinned by a canvas click, each with its full graph.
+    pub pins: crate::ui::symbol_pins::PinSet,
+    /// App time until which Dim Dependency Edges stays on (see
+    /// [`DIM_RESTORE_DELAY`]).
+    pub dim_until: f64,
     symbols: Option<SymbolsEntry>,
     pub references: Option<References>,
     /// The symbol or reference row under the pointer; reset every frame the
@@ -215,6 +220,7 @@ impl LspPanelState {
     /// Clear Symbols: forgets the references and the jump target.
     pub fn clear_symbols(&mut self) {
         self.canvas_graph.clear();
+        self.pins.clear();
         self.references = None;
         self.target = None;
         self.hovered = None;
@@ -227,7 +233,9 @@ impl LspPanelState {
         if self.canvas_graph.receive(id, &response) {
             return None;
         }
+        let response = self.pins.receive(id, response)?;
         match response {
+            LspResponse::SymbolGraph(result) => return Some(LspResponse::SymbolGraph(result)),
             LspResponse::Symbols(result) => match &mut self.symbols {
                 Some(entry) if entry.fetch == Fetch::Pending(id) => {
                     entry.fetch = Fetch::Done(result)
@@ -247,6 +255,7 @@ impl LspPanelState {
     /// True while an answer is on its way.
     pub fn is_waiting(&self) -> bool {
         self.canvas_graph.is_waiting()
+            || self.pins.is_waiting()
             || self.symbols.as_ref().is_some_and(|s| s.fetch.is_pending())
             || self
                 .references
@@ -280,6 +289,9 @@ pub fn reference_rows(locations: &[Location]) -> Vec<ReferenceRow> {
     }
     rows
 }
+
+/// Seconds the dim of Dependency Edges outlasts the last active symbol.
+pub const DIM_RESTORE_DELAY: f64 = 0.5;
 
 /// What a click in the panel asked for, applied after drawing.
 enum Action {
@@ -327,22 +339,30 @@ pub fn draw_lsp_panel(ui: &mut egui::Ui, state: &mut AppState) {
                 state.lsp.show_advanced = !state.lsp.show_advanced;
             }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                let active = state.lsp.references.is_some() || !state.selection.symbols().is_empty();
-                let clear = ui.add_enabled(
-                    active,
-                    egui::Button::new(format!("{}  Clear Symbols", icons::CLOSE)).small(),
-                );
+                let active = state.lsp.references.is_some()
+                    || !state.selection.symbols().is_empty()
+                    || !state.lsp.pins.is_empty();
+                // "Clear 2 Symbols" while symbols are pinned, as v2.
+                let pinned = state.lsp.pins.len();
+                let name = match pinned {
+                    0 => "Clear Symbols".to_string(),
+                    1 => "Clear 1 Symbol".to_string(),
+                    n => format!("Clear {n} Symbols"),
+                };
+                let clear = ui.add_enabled(active, egui::Button::new(format!("{}  {name}", icons::CLOSE)).small());
+                let accessible = name.clone();
                 clear.widget_info(move || {
-                    egui::WidgetInfo::labeled(egui::WidgetType::Button, active, "Clear Symbols")
+                    egui::WidgetInfo::labeled(egui::WidgetType::Button, active, accessible.clone())
                 });
                 if clear.clicked() {
                     action = Some(Action::Clear);
                 }
             });
         });
-        if state.lsp.references.is_none() {
+        if state.lsp.references.is_none() && state.lsp.pins.is_empty() {
             ui.label(egui::RichText::new(SYMBOL_GRAPH_HINT).small().weak());
         }
+        draw_pins(ui, state, &mut action);
     });
 
     match state
@@ -387,6 +407,83 @@ pub fn draw_lsp_panel(ui: &mut egui::Ui, state: &mut AppState) {
             workspace::focus_location(state, &path, line);
         }
         None => {}
+    }
+}
+
+/// Pinned Symbols, Files, the Results and Edges counts and the grouped
+/// results of the pins (the reference's Symbol Graph panel).
+fn draw_pins(ui: &mut egui::Ui, state: &mut AppState, action: &mut Option<Action>) {
+    use crate::analysis::lsp::graph::Group;
+    use crate::ui::symbol_pins::PinFetch;
+    if state.lsp.pins.is_empty() {
+        return;
+    }
+    let mut remove = None;
+    ui.add_space(4.0);
+    ui.label(egui::RichText::new(format!("Pinned Symbols ({})", state.lsp.pins.len())).strong());
+    for pin in state.lsp.pins.pins() {
+        ui.horizontal(|ui| {
+            let row = ui.add(egui::Label::new(egui::RichText::new(format!("{}  {}", pin.name, pin.label())).monospace().small()).sense(egui::Sense::click()));
+            if row.clicked() {
+                *action = Some(Action::Focus(pin.path.clone(), pin.position.line));
+            }
+            match &pin.fetch {
+                PinFetch::Pending(_) => {
+                    ui.weak("…");
+                }
+                PinFetch::Failed(e) => {
+                    ui.colored_label(egui::Color32::from_rgb(0xef, 0x44, 0x44), "failed").on_hover_text(e);
+                }
+                PinFetch::Done(_) => {}
+            }
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if ui.small_button("✕").on_hover_text("Remove this pin").clicked() {
+                    remove = Some(pin.id);
+                }
+            });
+        });
+    }
+    if let Some(id) = remove {
+        state.lsp.pins.remove(id);
+    }
+    if state.lsp.pins.pins().iter().all(|p| p.graph().is_none()) {
+        return;
+    }
+    let files = state.lsp.pins.files();
+    let (results, edges) = state.lsp.pins.totals();
+    ui.add_space(4.0);
+    ui.label(egui::RichText::new(format!("Files ({})", files.len())).strong());
+    for (path, count) in &files {
+        let name = path.file_name().map_or_else(String::new, |n| n.to_string_lossy().into_owned());
+        ui.label(egui::RichText::new(format!("{name}  {count}")).small());
+    }
+    ui.add_space(4.0);
+    ui.label(egui::RichText::new(format!("Results ({results}) / Edges ({edges})")).strong());
+    for group in Group::ALL {
+        let mut rows: Vec<(crate::analysis::lsp::graph::Role, PathBuf, usize)> = Vec::new();
+        for graph in state.lsp.pins.pins().iter().filter_map(|p| p.graph()) {
+            rows.extend(graph.group(group).into_iter().map(|e| (e.role, e.path.clone(), e.range.start.line)));
+        }
+        if rows.is_empty() {
+            continue;
+        }
+        egui::CollapsingHeader::new(format!("{} ({})", group.title(), rows.len()))
+            .id_salt(("pin_group", group.title()))
+            .default_open(true)
+            .show(ui, |ui| {
+                for (role, path, line) in rows {
+                    let name = path.file_name().map_or_else(String::new, |n| n.to_string_lossy().into_owned());
+                    let text = format!("{}  {name}:{}", role.label(), line + 1);
+                    let [r, g, b] = role.color();
+                    let response = ui.add(
+                        egui::Label::new(egui::RichText::new(text).monospace().small().color(egui::Color32::from_rgb(r, g, b)))
+                            .sense(egui::Sense::click()),
+                    );
+                    if response.clicked() {
+                        *action = Some(Action::Focus(path, line));
+                    }
+                }
+            });
     }
 }
 

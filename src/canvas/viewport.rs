@@ -1,7 +1,6 @@
 use egui::{Pos2, Rect, Vec2};
 
-const MIN_ZOOM: f32 = 0.05;
-const MAX_ZOOM: f32 = 5.0;
+pub use crate::nodes::lod::{MAX_ZOOM, MIN_ZOOM};
 
 #[derive(Clone)]
 pub struct Viewport {
@@ -48,7 +47,8 @@ impl Viewport {
     }
 
     pub fn handle_input(&mut self, response: &egui::Response, canvas_rect: Rect, space_held: bool) {
-        // Pan: right-click drag, or Space + left-click drag
+        // Pan: right-click drag, or Space + left-click drag (the Move tool
+        // passes `space_held` for you)
         if response.dragged_by(egui::PointerButton::Secondary)
             || (space_held && response.dragged_by(egui::PointerButton::Primary))
         {
@@ -74,18 +74,46 @@ impl Viewport {
         let scroll_y = if raw_scroll.y.abs() > 0.1 { raw_scroll.y } else { smooth_scroll.y };
         let scroll_x = if raw_scroll.x.abs() > 0.1 { raw_scroll.x } else { smooth_scroll.x };
 
+        // Pinch (trackpad): `Event::Zoom` carries a multiplicative factor. Not
+        // `zoom_delta()`: egui also folds Ctrl+wheel into it and smooths it over
+        // later frames, which would count the wheel twice.
+        let pinch = ui.input(|i| {
+            i.events
+                .iter()
+                .filter_map(|e| if let egui::Event::Zoom(f) = e { Some(*f) } else { None })
+                .product::<f32>()
+        });
         if ctrl && scroll_y.abs() > 0.1 {
             // Zoom centered on cursor. Only the target is set here; `animate`
             // moves `zoom` toward it (at once or smoothly) around `zoom_center`.
             if let Some(cursor) = ui.input(|i| i.pointer.hover_pos()) {
-                let factor = (scroll_y * 0.005).exp();
-                self.target_zoom = (self.target_zoom * factor).clamp(MIN_ZOOM, MAX_ZOOM);
-                self.zoom_center = Some(cursor);
+                self.zoom_by((scroll_y * 0.005).exp(), cursor);
+            }
+        } else if (pinch - 1.0).abs() > 1e-4 {
+            if let Some(cursor) = ui.input(|i| i.pointer.hover_pos()) {
+                self.zoom_by(pinch, cursor);
             }
         } else if scroll_y.abs() > 0.1 || scroll_x.abs() > 0.1 {
             // Pan via scroll (trackpad or mouse wheel)
             self.offset += Vec2::new(scroll_x, scroll_y) / self.zoom;
         }
+    }
+
+    /// Sets the zoom (clamped) at once, keeping the world point under
+    /// `screen_point` where it is.
+    pub fn zoom_to(&mut self, zoom: f32, screen_point: Pos2) {
+        let world = self.screen_to_world(screen_point);
+        let zoom = zoom.clamp(MIN_ZOOM, MAX_ZOOM);
+        self.zoom = zoom;
+        self.target_zoom = zoom;
+        self.zoom_center = None;
+        self.offset = Vec2::new(screen_point.x / zoom - world.x, screen_point.y / zoom - world.y);
+    }
+
+    /// Multiplies the zoom by `factor` around `screen_point` (Ctrl+ / Ctrl-).
+    pub fn zoom_by(&mut self, factor: f32, screen_point: Pos2) {
+        self.target_zoom = (self.target_zoom * factor).clamp(MIN_ZOOM, MAX_ZOOM);
+        self.zoom_center = Some(screen_point);
     }
 
     /// Moves `zoom` toward `target_zoom`: all at once, or a step per frame when
@@ -246,6 +274,22 @@ mod tests {
         assert_eq!(vp.zoom, MAX_ZOOM);
 
         vp.fit_to_rect(Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0e7, 1.0e7)), screen);
+        assert_eq!(vp.zoom, MIN_ZOOM);
+    }
+
+    #[test]
+    fn zoom_to_keeps_the_point_under_the_cursor_and_clamps() {
+        let mut vp = viewport(Vec2::new(-20.0, 15.0), 0.5);
+        let point = Pos2::new(300.0, 200.0);
+        let anchored = vp.screen_to_world(point);
+
+        vp.zoom_to(0.6, point);
+        assert_eq!((vp.zoom, vp.target_zoom), (0.6, 0.6));
+        assert_close(vp.screen_to_world(point), anchored);
+
+        vp.zoom_to(50.0, point);
+        assert_eq!(vp.zoom, MAX_ZOOM);
+        vp.zoom_to(0.0, point);
         assert_eq!(vp.zoom, MIN_ZOOM);
     }
 

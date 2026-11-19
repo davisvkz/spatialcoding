@@ -4,11 +4,14 @@ use std::path::PathBuf;
 
 pub const USAGE: &str = "\
 Usage: spatialcoding [DIR] [--open FILE]... [--open-all] [--layout]
+       spatialcoding --mcp
 
   DIR            folder to load as the workspace
   --open FILE    open FILE (relative to DIR) on the canvas; repeatable
   --open-all     open every text file in DIR (same as Ctrl+Shift+O)
   --layout       apply the hierarchical layout after opening files
+  --mcp          run as an MCP server over stdio for an agent, talking to the
+                 running app (add it to your MCP config as `spatialcoding --mcp`)
   -h, --help     show this help";
 
 #[derive(Debug, Default, Clone, PartialEq)]
@@ -23,6 +26,8 @@ pub struct StartupOptions {
 #[derive(Debug, PartialEq)]
 pub enum Command {
     Run(StartupOptions),
+    /// `--mcp`: serve the MCP protocol on stdin and stdout.
+    Mcp,
     Help,
 }
 
@@ -33,6 +38,7 @@ pub fn parse<I: IntoIterator<Item = String>>(args: I) -> Result<Command, String>
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "-h" | "--help" => return Ok(Command::Help),
+            "--mcp" => return Ok(Command::Mcp),
             "--open" => {
                 let file = args.next().ok_or("--open needs a FILE")?;
                 opts.open.push(PathBuf::from(file));
@@ -89,6 +95,12 @@ mod tests {
 
     fn run(args: &[&str]) -> Result<Command, String> {
         parse(args.iter().map(|s| s.to_string()))
+    }
+
+    #[test]
+    fn mcp_flag_selects_the_mcp_server() {
+        assert_eq!(run(&["--mcp"]), Ok(Command::Mcp));
+        assert!(USAGE.contains("--mcp"));
     }
 
     #[test]

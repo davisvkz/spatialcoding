@@ -103,6 +103,10 @@ pub struct CstNode {
     /// Last line the node covers, 0-based and inclusive. A node that ends
     /// right after a newline does not count the empty next line.
     pub end_line: usize,
+    /// Column of the first character on `start_line` and the column just
+    /// after the last one on `end_line` (bytes, 0-based).
+    pub start_col: usize,
+    pub end_col: usize,
     /// Source text of a leaf (first line, shortened), unless it equals `kind`.
     pub text: Option<String>,
     pub children: Vec<CstNode>,
@@ -191,6 +195,8 @@ impl Builder<'_> {
             is_error: node.is_error() || node.is_missing(),
             start_line: start.row,
             end_line,
+            start_col: start.column,
+            end_col: end.column,
             text,
             kind,
             children: Vec::new(),

@@ -91,6 +91,34 @@ pub struct AppState {
     /// (`workspace::folder_text_files`) and dropped when the folder changes
     /// or the Git change set is refreshed.
     pub folder_files_cache: std::cell::RefCell<Option<std::rc::Rc<Vec<PathBuf>>>>,
+    /// Screen rectangle of the canvas and the pointer on it (None off the
+    /// canvas), set every frame for the commands that act under the mouse.
+    pub canvas_rect: egui::Rect,
+    pub hover_screen: Option<egui::Pos2>,
+    /// What the app shell must do for a command (native dialogs).
+    pub pending_app_actions: Vec<crate::commands::AppAction>,
+    /// Docs window (Ctrl+Shift+/) and Zoom Levels panel (Shift+V).
+    pub show_docs: bool,
+    pub show_zoom_levels: bool,
+    /// Ctrl+. hides the rails and panels altogether.
+    pub sidebars_hidden: bool,
+    /// Ctrl+S: the panels open when it hid them, to restore.
+    pub panel_memory: Option<(Option<LeftPanel>, Option<RightPanel>)>,
+    pub toasts: Vec<crate::ui::toast::Toast>,
+    /// Go to UI: the control (anchor id) to pulse and since when (seconds).
+    pub ui_highlight: Option<(&'static str, f64)>,
+    /// Screen rectangles of the open left and right panels, for the pulse.
+    pub panel_rect_left: Option<egui::Rect>,
+    pub panel_rect_right: Option<egui::Rect>,
+    /// Markdown cards pushed by agents (`agentNotes:push`).
+    pub notes: crate::agent_notes::Notes,
+    /// Names of the connected MCP agents and the socket they use.
+    pub agents: Vec<String>,
+    pub mcp_socket: Option<PathBuf>,
+    /// The Ignored file settings dialog is open.
+    pub show_ignore_settings: bool,
+    /// Language server commands a repository suggests, waiting for a yes or no.
+    pub command_proposals: Vec<crate::analysis::lsp::project_config::Proposal>,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -187,6 +215,26 @@ pub struct CstSettings {
     pub selected_edge_nodes: bool,
     /// RGB overrides by grammar kind for the Symbol Mapping swatches/highlights.
     pub type_colors: std::collections::BTreeMap<String, [u8; 3]>,
+    /// Style overrides by grammar kind (fill, border, visibility); kinds not
+    /// listed use [`crate::analysis::cst_style::CstTypeStyle::default_for`].
+    pub type_styles: std::collections::BTreeMap<String, crate::analysis::cst_style::CstTypeStyle>,
+}
+
+impl CstSettings {
+    /// The style of `kind`: its override, else the reference default (with
+    /// the color picked in Symbol Mapping, if any).
+    pub fn style_for(&self, kind: &str) -> crate::analysis::cst_style::CstTypeStyle {
+        if let Some(style) = self.type_styles.get(kind) {
+            return style.clone();
+        }
+        let mut style = crate::analysis::cst_style::CstTypeStyle::default_for(kind);
+        if let Some(&rgb) = self.type_colors.get(kind) {
+            style.color = rgb;
+            style.color_end = rgb;
+            style.border_color = rgb;
+        }
+        style
+    }
 }
 
 impl Default for CstSettings {
@@ -200,6 +248,7 @@ impl Default for CstSettings {
             single_hover: true,
             selected_edge_nodes: true,
             type_colors: Default::default(),
+            type_styles: Default::default(),
         }
     }
 }
@@ -244,6 +293,10 @@ impl Default for LspSettings {
     }
 }
 
+fn default_true() -> bool {
+    true
+}
+
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(default)]
 pub struct AppSettings {
@@ -258,6 +311,25 @@ pub struct AppSettings {
     pub font_size: f32,
     pub node_width: f32,
     pub show_dot_folders: bool,
+    /// Answers to `.codecanvas/settings.json` language server suggestions,
+    /// per exact command and folder.
+    #[serde(default)]
+    pub lsp_command_answers: Vec<crate::analysis::lsp::project_config::Answer>,
+    /// Ignore patterns (gitignore syntax) per repository root.
+    #[serde(default)]
+    pub ignored: std::collections::BTreeMap<String, Vec<String>>,
+    /// Workspace › Show ignored files: the tree lists them anyway.
+    #[serde(default)]
+    pub show_ignored: bool,
+    /// Workspace tree: the file count after each folder name.
+    #[serde(default = "default_true")]
+    pub show_folder_counts: bool,
+    /// Folders opened before, newest first (repository dropdown, empty screen).
+    #[serde(default)]
+    pub recent_folders: Vec<PathBuf>,
+    /// Command the editor opens files with (`Open in…`); empty uses $VISUAL/$EDITOR.
+    #[serde(default)]
+    pub editor_command: String,
     #[serde(default)]
     pub folders: FoldersSettings,
     #[serde(default)]
@@ -275,13 +347,67 @@ impl Default for AppSettings {
             show_controls_bar: true,
             show_minimap: true,
             show_grid: false,
-            font_size: 11.0,
-            node_width: 650.0,
+            font_size: 12.0,
+            node_width: 700.0,
             show_dot_folders: false,
+            lsp_command_answers: Vec::new(),
+            ignored: Default::default(),
+            show_ignored: false,
+            show_folder_counts: true,
+            recent_folders: Vec::new(),
+            editor_command: String::new(),
             folders: FoldersSettings::default(),
             files: FilesSettings::default(),
             cst: CstSettings::default(),
             lsp: LspSettings::default(),
+        }
+    }
+}
+
+impl AppState {
+    /// The ignore patterns of the loaded repository.
+    pub fn ignore_patterns(&self) -> Vec<String> {
+        self.loaded_dir
+            .as_ref()
+            .and_then(|d| self.settings.ignored.get(&d.to_string_lossy().into_owned()))
+            .cloned()
+            .unwrap_or_default()
+    }
+
+    /// The compiled ignore list of the loaded repository (empty when the
+    /// tree shows ignored files, which only the tree does).
+    pub fn ignore_set(&self) -> crate::fs::ignore::IgnoreSet {
+        crate::fs::ignore::IgnoreSet::new(&self.ignore_patterns())
+    }
+
+    /// Adds `pattern` to the repository's list; false when already there.
+    pub fn add_ignore_pattern(&mut self, pattern: String) -> bool {
+        let Some(dir) = self.loaded_dir.as_ref().map(|d| d.to_string_lossy().into_owned()) else { return false };
+        let list = self.settings.ignored.entry(dir).or_default();
+        if list.contains(&pattern) {
+            return false;
+        }
+        list.push(pattern);
+        self.folder_files_cache.replace(None);
+        true
+    }
+
+    pub fn remove_ignore_pattern(&mut self, pattern: &str) {
+        if let Some(dir) = self.loaded_dir.as_ref().map(|d| d.to_string_lossy().into_owned()) {
+            if let Some(list) = self.settings.ignored.get_mut(&dir) {
+                list.retain(|p| p != pattern);
+            }
+        }
+        self.folder_files_cache.replace(None);
+    }
+
+    /// The Layout panel settings with the canvas' file node geometry, which
+    /// the layout needs to size every node.
+    pub fn layout_input(&self) -> crate::layout::settings::LayoutSettings {
+        crate::layout::settings::LayoutSettings {
+            node_width: self.settings.node_width,
+            font_size: self.settings.font_size,
+            ..self.layout_settings.clone()
         }
     }
 }
@@ -320,6 +446,22 @@ impl Default for AppState {
             top_level_highlights: HashMap::new(),
             last_opened_folders: Vec::new(),
             folder_files_cache: Default::default(),
+            canvas_rect: egui::Rect::ZERO,
+            hover_screen: None,
+            pending_app_actions: Vec::new(),
+            show_docs: false,
+            show_zoom_levels: false,
+            sidebars_hidden: false,
+            panel_memory: None,
+            toasts: Vec::new(),
+            ui_highlight: None,
+            panel_rect_left: None,
+            panel_rect_right: None,
+            notes: Default::default(),
+            agents: Vec::new(),
+            mcp_socket: None,
+            show_ignore_settings: false,
+            command_proposals: Vec::new(),
         }
     }
 }

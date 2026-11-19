@@ -132,7 +132,7 @@ fn the_diff_window_closes_and_the_palette_opens_it_for_the_selection() {
     let mut app = app_with_git_status(&fx);
     let main = app.open(&fx.path("src/main.rs"));
     app.app_state_mut().selection.select(main);
-    app.execute_palette_command(spatialcoding::ui::command_palette::PaletteCommand::ShowDiff);
+    app.execute_palette_command(spatialcoding::ui::command_palette::PaletteCommand::Command("diff:openLocalSession"));
     app.step();
     assert!(app.app_state().diff.is_some());
     wait_for(&mut app, |a| {

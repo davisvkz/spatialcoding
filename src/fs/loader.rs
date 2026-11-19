@@ -2,6 +2,7 @@ use std::fs;
 use std::io;
 use std::path::Path;
 
+use super::ignore::IgnoreSet;
 use super::tree::TreeNode;
 
 const ALWAYS_SKIP: &[&str] = &["target", "node_modules", ".git", "__pycache__", ".DS_Store"];
@@ -22,6 +23,17 @@ pub fn is_skipped_path(path: &Path, root: &Path, show_dot_folders: bool) -> bool
 }
 
 pub fn load_directory(root: &Path, show_dot_folders: bool) -> io::Result<TreeNode> {
+    load_directory_filtered(root, root, show_dot_folders, &IgnoreSet::default())
+}
+
+/// [`load_directory`] leaving out what the repository's ignore list matches
+/// (paths are matched relative to `repo`).
+pub fn load_directory_filtered(
+    root: &Path,
+    repo: &Path,
+    show_dot_folders: bool,
+    ignore: &IgnoreSet,
+) -> io::Result<TreeNode> {
     let name = root
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
@@ -39,9 +51,12 @@ pub fn load_directory(root: &Path, show_dot_folders: bool) -> io::Result<TreeNod
 
         let path = entry.path();
         let file_type = entry.file_type()?;
+        if !ignore.is_empty() && ignore.is_ignored_path(&path, repo, file_type.is_dir()) {
+            continue;
+        }
 
         if file_type.is_dir() {
-            match load_directory(&path, show_dot_folders) {
+            match load_directory_filtered(&path, repo, show_dot_folders, ignore) {
                 Ok(child) => children.push(child),
                 Err(_) => continue,
             }

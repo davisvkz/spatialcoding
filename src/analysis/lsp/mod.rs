@@ -9,7 +9,9 @@
 //! command found on `PATH`, or the one in `SPATIALCODING_LSP_<SERVER>`.
 
 pub mod client;
+pub mod graph;
 pub mod manager;
+pub mod project_config;
 pub mod protocol;
 
 use std::path::{Path, PathBuf};

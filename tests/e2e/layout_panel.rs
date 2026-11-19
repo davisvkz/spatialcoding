@@ -79,7 +79,7 @@ fn advanced_settings_controls_edit_the_layout_settings_and_reset_config_restores
     app.run();
     app.get_by_label("Alt Rev").click();
     app.run();
-    app.get_by_label("Rank Breaking");
+    app.get_by_label("Break");
     {
         let s = &app.app_state().layout_settings;
         assert_eq!(s.h_align, HAlign::Left);

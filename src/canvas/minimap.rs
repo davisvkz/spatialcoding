@@ -18,15 +18,17 @@ impl Default for Minimap {
 }
 
 impl Minimap {
+    /// Draws the minimap. Returns the world point to center the view on when
+    /// the user clicks or drags inside it.
     pub fn draw(
         &self,
         ui: &mut Ui,
         viewport: &Viewport,
         node_rects: &[Rect],
         canvas_rect: Rect,
-    ) {
+    ) -> Option<Pos2> {
         if !self.enabled || node_rects.is_empty() {
-            return;
+            return None;
         }
 
         let minimap_rect = Rect::from_min_size(
@@ -85,7 +87,20 @@ impl Minimap {
                 egui::StrokeKind::Outside,
             );
         }
+
+        // Click or drag to move the view: the pointer is the new center.
+        let response = ui.interact(minimap_rect, egui::Id::new("minimap"), egui::Sense::click_and_drag());
+        let target = response.interact_pointer_pos().filter(|_| response.clicked() || response.dragged());
+        target.map(|pos| minimap_to_world(pos, minimap_rect.shrink(6.0), padded))
     }
+}
+
+/// The world point under `pos` of a minimap whose map area is `inner` and
+/// whose world extent is `padded`.
+pub fn minimap_to_world(pos: Pos2, inner: Rect, padded: Rect) -> Pos2 {
+    let nx = ((pos.x - inner.min.x) / inner.width()).clamp(0.0, 1.0);
+    let ny = ((pos.y - inner.min.y) / inner.height()).clamp(0.0, 1.0);
+    Pos2::new(padded.min.x + nx * padded.width(), padded.min.y + ny * padded.height())
 }
 
 fn bounding_rect(rects: &[Rect]) -> Rect {
@@ -100,4 +115,18 @@ fn bounding_rect(rects: &[Rect]) -> Rect {
     }
 
     Rect::from_min_max(min, max)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_minimap_point_maps_back_to_the_world_and_clamps_at_the_edges() {
+        let inner = Rect::from_min_size(Pos2::new(10.0, 10.0), Vec2::new(100.0, 50.0));
+        let padded = Rect::from_min_size(Pos2::new(-100.0, 0.0), Vec2::new(1000.0, 500.0));
+        assert_eq!(minimap_to_world(inner.center(), inner, padded), padded.center());
+        assert_eq!(minimap_to_world(inner.min, inner, padded), padded.min);
+        assert_eq!(minimap_to_world(Pos2::new(9999.0, -50.0), inner, padded), Pos2::new(padded.max.x, padded.min.y));
+    }
 }

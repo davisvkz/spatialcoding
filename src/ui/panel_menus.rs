@@ -15,6 +15,8 @@ pub enum MenuAction {
     ResetFiles,
     ResetCst,
     OpenLanguageServers,
+    ToggleSmoothTransition,
+    ClearNotes,
     /// Disabled entries; never applied.
     None,
 }
@@ -60,15 +62,8 @@ pub fn menu(panel: RightPanel, state: &AppState) -> Vec<(MenuItem, MenuAction)> 
             MenuAction::OpenLanguageServers,
         )],
         RightPanel::AgentNotes => vec![
-            (
-                MenuItem::new(icons::PLAY, "Smooth Transition").disabled(crate::ui::agent_panel::NO_MCP),
-                MenuAction::None,
-            ),
-            (
-                MenuItem::new(icons::ROTATE_CCW, "Reset Agent notes settings")
-                    .disabled(crate::ui::agent_panel::NO_MCP),
-                MenuAction::None,
-            ),
+            (MenuItem::new(icons::PLAY, "Smooth Transition"), MenuAction::ToggleSmoothTransition),
+            (MenuItem::new(icons::ROTATE_CCW, "Clear Agent notes"), MenuAction::ClearNotes),
         ],
         RightPanel::Performance => Vec::new(),
     }
@@ -86,6 +81,10 @@ pub fn apply(action: MenuAction, state: &mut AppState) {
         MenuAction::ResetFiles => state.settings.files = Default::default(),
         MenuAction::ResetCst => state.settings.cst = Default::default(),
         MenuAction::OpenLanguageServers => state.lsp.show_servers = true,
+        MenuAction::ToggleSmoothTransition => {
+            state.settings.lsp.smooth_transition = !state.settings.lsp.smooth_transition;
+        }
+        MenuAction::ClearNotes => state.notes.clear(),
         MenuAction::None => {}
     }
 }

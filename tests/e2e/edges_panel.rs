@@ -23,7 +23,7 @@ fn defaults_follow_the_reference() {
     assert!(cfg.scale_arrow_heads && cfg.use_gradient && cfg.show_barrel_edges);
     assert!(!cfg.show_reexport_edges && !cfg.highlight_reexport && !cfg.highlight_barrel);
     assert_eq!((cfg.min_size_pct, cfg.gradient_gap_pct), (0.5, 0.8));
-    assert_eq!(cfg.gradient_min_dist_sq, 40_000.0);
+    assert_eq!(cfg.gradient_min_dist, 40_000.0);
 }
 
 #[test]

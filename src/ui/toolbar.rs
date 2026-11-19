@@ -20,9 +20,41 @@ pub fn draw_toolbar(ui: &mut egui::Ui, state: &mut AppState) {
             .and_then(|p| p.file_name())
             .map(|n| n.to_string_lossy().to_string())
             .unwrap_or_else(|| "No folder".into());
-        if folder_pill(ui, &theme, &folder_label).clicked() {
-            // TODO: open folder picker
+        let pill = folder_pill(ui, &theme, &folder_label);
+        let popup_id = egui::Id::new("repository_dropdown");
+        if pill.clicked() {
+            ui.memory_mut(|m| m.toggle_popup(popup_id));
         }
+        egui::popup_below_widget(ui, popup_id, &pill, egui::PopupCloseBehavior::CloseOnClick, |ui| {
+            ui.set_min_width(220.0);
+            if ui.button("Open folder…").clicked() {
+                state.pending_app_actions.push(crate::commands::AppAction::PickFolder);
+            }
+            let current = state.loaded_dir.clone();
+            let recents: Vec<_> = state
+                .settings
+                .recent_folders
+                .iter()
+                .filter(|d| Some(*d) != current.as_ref())
+                .cloned()
+                .collect();
+            if !recents.is_empty() {
+                ui.separator();
+                ui.weak("Recent");
+                for dir in recents {
+                    let name = dir.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| dir.display().to_string());
+                    if ui.button(name).on_hover_text(dir.display().to_string()).clicked() {
+                        state.pending_app_actions.push(crate::commands::AppAction::OpenFolder(dir));
+                    }
+                }
+            }
+            if current.is_some() {
+                ui.separator();
+                if ui.button("Clear repository").clicked() {
+                    state.pending_app_actions.push(crate::commands::AppAction::CloseFolder);
+                }
+            }
+        });
 
         if let Some(branch) = state.changes.branch().map(str::to_owned)
             && branch_pill(ui, &theme, &branch).clicked()
@@ -30,6 +62,9 @@ pub fn draw_toolbar(ui: &mut egui::Ui, state: &mut AppState) {
             state.left_panel = Some(crate::state::LeftPanel::Changes);
         }
 
+        if !state.settings.show_controls_bar {
+            return;
+        }
         separator(ui, &theme);
 
         if icons::toolbar_icon_button(ui, icons::POINTER, "Select tool", state.active_tool == Tool::Select)

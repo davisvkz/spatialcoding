@@ -49,9 +49,36 @@ pub struct CstPanelState {
     pub mapping: Vec<MappingRow>,
     pub mapping_hover: Vec<(CstHover, egui::Color32)>,
     mapping_hash: Option<u64>,
+    /// The tint of every open file at the zoomed-out levels, by node id.
+    tints: std::collections::HashMap<u64, TintCache>,
     /// How many times a file was parsed (cache misses).
     parses: usize,
 }
+
+/// One CST node as the canvas tints it: where it sits in the file.
+#[derive(Debug, Clone)]
+pub struct TintItem {
+    pub kind: String,
+    pub depth: usize,
+    pub start_line: usize,
+    pub end_line: usize,
+    /// Left and right edge of the node's bounding box, in columns.
+    pub x0: usize,
+    pub x1: usize,
+}
+
+struct TintCache {
+    source_hash: u64,
+    settings_hash: u64,
+    items: Vec<TintItem>,
+}
+
+/// Most nodes of one file the canvas tints.
+const MAX_TINT_ITEMS: usize = 6000;
+/// Lines scanned to find a node's bounding box; longer nodes use the
+/// first line's start and the file's widest column.
+const BOX_SCAN_LINES: usize = 200;
+
 
 struct CachedCst {
     node_id: u64,
@@ -117,6 +144,32 @@ impl CstPanelState {
         self.edge_trees.get(&node_id)?.tree.as_ref()
     }
 
+    /// The tinted nodes of file `node_id`: named nodes below the root,
+    /// within the depth limit, with their bounding boxes. Cached by content
+    /// and settings.
+    pub fn tint_items(&mut self, store: &NodeStore, node_id: u64, settings: &CstSettings) -> &[TintItem] {
+        let Some(node) = store.get_file(node_id) else {
+            self.tints.remove(&node_id);
+            return &[];
+        };
+        let source_hash = source_hash(node);
+        let mut hasher = DefaultHasher::new();
+        (settings.limit_depth, settings.max_depth).hash(&mut hasher);
+        let settings_hash = hasher.finish();
+        let fresh = self
+            .tints
+            .get(&node_id)
+            .is_some_and(|c| c.source_hash == source_hash && c.settings_hash == settings_hash);
+        if !fresh {
+            let items = match self.tree_of(store, node_id) {
+                Some(tree) => collect_tint(&tree.root, &node.content, settings),
+                None => Vec::new(),
+            };
+            self.tints.insert(node_id, TintCache { source_hash, settings_hash, items });
+        }
+        &self.tints[&node_id].items
+    }
+
     /// Clears what the canvas paints for this panel.
     pub fn clear_highlights(&mut self) {
         self.hovered = None;
@@ -133,6 +186,7 @@ impl CstPanelState {
     ) {
         self.edge_trees
             .retain(|id, _| store.get_file(*id).is_some());
+        self.tints.retain(|id, _| store.get_file(*id).is_some());
         let mut ids: Vec<_> = store.file_nodes.keys().copied().collect();
         ids.sort_unstable();
         let mut hasher = DefaultHasher::new();
@@ -170,53 +224,60 @@ impl CstPanelState {
     }
 }
 
-/// Colors match the reference's semantic families; unknown grammar kinds stay muted.
+/// Colors are the reference's role families (`DEFAULT_CST`): see
+/// [`crate::analysis::cst_style::family_of`]. A color picked in Symbol
+/// Mapping wins.
 pub fn mapping_color(kind: &str, settings: &CstSettings) -> egui::Color32 {
     if let Some(&[r, g, b]) = settings.type_colors.get(kind) {
         return egui::Color32::from_rgb(r, g, b);
     }
-    let rgb = if kind.contains("import") || matches!(kind, "use_declaration" | "package_clause") {
-        [251, 146, 60]
-    } else if kind.contains("export") {
-        [163, 230, 53]
-    } else if kind.starts_with("jsx_") {
-        [34, 211, 238]
-    } else if kind.contains("function") || kind.contains("method") {
-        [59, 130, 246]
-    } else if [
-        "class",
-        "interface",
-        "struct",
-        "trait",
-        "type_",
-        "enum",
-        "impl_",
-        "mod_",
-        "decorated_",
-    ]
-    .iter()
-    .any(|prefix| kind.starts_with(prefix) || kind.starts_with(&format!("abstract_{prefix}")))
-    {
-        [168, 85, 247]
-    } else if kind.contains("declaration")
-        || kind.contains("assignment")
-        || matches!(
-            kind,
-            "const_item" | "property_signature" | "public_field_definition"
-        )
-    {
-        [34, 197, 94]
-    } else if kind == "return_statement" {
-        [6, 182, 212]
-    } else if matches!(
-        kind,
-        "for_statement" | "while_statement" | "if_statement" | "if_expression" | "match_expression"
-    ) {
-        [236, 72, 153]
-    } else {
-        [113, 113, 122]
-    };
-    egui::Color32::from_rgb(rgb[0], rgb[1], rgb[2])
+    let [r, g, b] = crate::analysis::cst_style::family_of(kind).color();
+    egui::Color32::from_rgb(r, g, b)
+}
+
+/// The nodes to tint: pre-order, named, below the root.
+fn collect_tint(root: &CstNode, content: &str, settings: &CstSettings) -> Vec<TintItem> {
+    let lines: Vec<&str> = content.lines().collect();
+    let indent: Vec<usize> = lines.iter().map(|l| l.len() - l.trim_start().len()).collect();
+    let widest = lines.iter().map(|l| l.len()).max().unwrap_or(0);
+    let mut out = Vec::new();
+    let mut stack: Vec<(&CstNode, usize)> = root.children.iter().rev().map(|c| (c, 1)).collect();
+    while let Some((node, depth)) = stack.pop() {
+        if out.len() >= MAX_TINT_ITEMS {
+            break;
+        }
+        if settings.limit_depth && depth > settings.max_depth {
+            continue;
+        }
+        if node.named && node.end_line >= node.start_line {
+            let (mut x0, mut x1) = (node.start_col, node.end_col);
+            if node.end_line > node.start_line {
+                let scan = node.end_line - node.start_line <= BOX_SCAN_LINES;
+                x1 = if scan {
+                    (node.start_line..=node.end_line).filter_map(|l| lines.get(l)).map(|l| l.len()).max().unwrap_or(x1)
+                } else {
+                    widest
+                };
+                if scan {
+                    let inner = (node.start_line + 1..=node.end_line)
+                        .filter(|&l| lines.get(l).is_some_and(|t| !t.trim().is_empty()))
+                        .filter_map(|l| indent.get(l).copied())
+                        .min();
+                    x0 = inner.map_or(x0, |i| i.min(x0));
+                }
+            }
+            out.push(TintItem {
+                kind: node.kind.clone(),
+                depth,
+                start_line: node.start_line,
+                end_line: node.end_line,
+                x0,
+                x1: x1.max(x0 + 1),
+            });
+        }
+        stack.extend(node.children.iter().rev().map(|c| (c, depth + 1)));
+    }
+    out
 }
 
 fn is_mapped_semantic(kind: &str) -> bool {
@@ -890,6 +951,8 @@ mod tests {
             is_error: false,
             start_line: 2,
             end_line: 2,
+            start_col: 0,
+            end_col: 5,
             text: Some("hello".into()),
             children: Vec::new(),
         };

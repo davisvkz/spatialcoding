@@ -50,7 +50,10 @@ fn serve(root: PathBuf, mut reader: BufReader<std::io::PipeReader>, mut writer: 
         };
         let result = match msg["method"].as_str() {
             Some("initialize") => {
-                json!({"capabilities": {"documentSymbolProvider": true, "referencesProvider": true}})
+                json!({"capabilities": {
+                    "documentSymbolProvider": true, "referencesProvider": true, "definitionProvider": true,
+                    "callHierarchyProvider": true,
+                }})
             }
             Some("textDocument/didOpen") => {
                 open.insert(
@@ -76,6 +79,26 @@ fn serve(root: PathBuf, mut reader: BufReader<std::io::PipeReader>, mut writer: 
                     None => json!([]),
                 }
             }
+            Some("textDocument/definition") => {
+                let path = doc_path.unwrap();
+                let line = params["position"]["line"].as_u64().unwrap() as usize;
+                let col = params["position"]["character"].as_u64().unwrap() as usize;
+                match word_at(&text_of(&open, &path), line, col) {
+                    Some(word) => definition(&root, &word),
+                    None => json!([]),
+                }
+            }
+            Some("textDocument/prepareCallHierarchy") => {
+                let path = doc_path.unwrap();
+                let line = params["position"]["line"].as_u64().unwrap() as usize;
+                let col = params["position"]["character"].as_u64().unwrap() as usize;
+                match word_at(&text_of(&open, &path), line, col) {
+                    Some(word) => call_item(&root, &word).map_or(json!([]), |item| json!([item])),
+                    None => json!([]),
+                }
+            }
+            Some("callHierarchy/incomingCalls") => incoming_calls(&root, params["item"]["name"].as_str().unwrap_or("")),
+            Some("callHierarchy/outgoingCalls") => json!([]),
             Some("exit") => break,
             _ if msg.get("id").is_some() => Value::Null,
             _ => continue,
@@ -159,4 +182,66 @@ fn collect(dir: &Path, out: &mut Vec<PathBuf>) {
             out.push(path);
         }
     }
+}
+
+/// Where `word` is declared: a `LocationLink` with the declaration line and the name.
+fn definition(root: &Path, word: &str) -> Value {
+    let re = Regex::new(&format!(r"^\s*(?:pub\s+)?(?:export\s+)?(?:fn|struct|function|class|const)\s+({})\b", regex::escape(word))).unwrap();
+    let mut files = Vec::new();
+    collect(root, &mut files);
+    for file in files {
+        let text = std::fs::read_to_string(&file).unwrap_or_default();
+        for (i, line) in text.lines().enumerate() {
+            if let Some(caps) = re.captures(line) {
+                let name = caps.get(1).unwrap();
+                return json!([{
+                    "targetUri": path_to_uri(&file),
+                    "targetRange": range(i, 0, line.len()),
+                    "targetSelectionRange": range(i, name.start(), name.end()),
+                }]);
+            }
+        }
+    }
+    json!([])
+}
+
+/// The `CallHierarchyItem` of the function `word`, if it is declared.
+fn call_item(root: &Path, word: &str) -> Option<Value> {
+    let link = definition(root, word);
+    let link = link.as_array()?.first()?.clone();
+    Some(json!({
+        "name": word, "kind": 12, "uri": link["targetUri"],
+        "range": link["targetRange"], "selectionRange": link["targetSelectionRange"],
+    }))
+}
+
+/// The functions that mention `word` outside its declaration, as callers.
+fn incoming_calls(root: &Path, word: &str) -> Value {
+    let re = Regex::new(&format!(r"\b{}\b", regex::escape(word))).unwrap();
+    let decl = Regex::new(r"^\s*(?:pub\s+)?(?:export\s+)?(?:fn|function)\s+(\w+)").unwrap();
+    let mut files = Vec::new();
+    collect(root, &mut files);
+    let mut out = Vec::new();
+    for file in files {
+        let text = std::fs::read_to_string(&file).unwrap_or_default();
+        let lines: Vec<&str> = text.lines().collect();
+        for (i, line) in lines.iter().enumerate() {
+            if decl.captures(line).is_some_and(|c| &c[1] == word) {
+                continue;
+            }
+            let Some(m) = re.find(line) else { continue };
+            // The enclosing function: the nearest declaration above.
+            let Some((start, caps)) = (0..=i).rev().find_map(|j| decl.captures(lines[j]).map(|c| (j, c))) else { continue };
+            let name = caps.get(1).unwrap();
+            out.push(json!({
+                "from": {
+                    "name": name.as_str(), "kind": 12, "uri": path_to_uri(&file),
+                    "range": range(start, 0, lines[start].len()),
+                    "selectionRange": range(start, name.start(), name.end()),
+                },
+                "fromRanges": [range(i, m.start(), m.end())],
+            }));
+        }
+    }
+    Value::Array(out)
 }

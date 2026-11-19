@@ -21,9 +21,6 @@ use crate::layout::settings::{HAlign, LayoutSettings, SortMode, VAlign};
 use crate::nodes::folder_node::{COLLAPSED_FOLDER_SIZE, FOLDER_HEADER_HEIGHT};
 use crate::nodes::node_store::NodeStore;
 
-const NODE_WIDTH: f32 = 650.0;
-const FONT_SIZE: f32 = 12.0;
-
 /// Vertical gap between items of one column, as a share of the horizontal
 /// spacing: v2 stacks files much tighter than it spaces columns.
 const VERTICAL_GAP_RATIO: f32 = 0.5;
@@ -197,7 +194,7 @@ pub fn apply_layout(nodes: &mut NodeStore, edges: &EdgeStore, settings: &LayoutS
                     for &file in revealed.get(&id).map(Vec::as_slice).unwrap_or(&[]) {
                         if let Some(node) = nodes.get_file_mut(file) {
                             node.position = Pos2::new(pos.x, y);
-                            y += node.world_rect(NODE_WIDTH, FONT_SIZE).height() + REVEALED_GAP;
+                            y += node.world_rect(settings.node_width, settings.font_size).height() + REVEALED_GAP;
                         }
                     }
                 }
@@ -227,15 +224,15 @@ fn layout_group(
         match item {
             Item::File(id) => nodes
                 .get_file(id)
-                .map(|n| n.world_rect(NODE_WIDTH, FONT_SIZE).size())
-                .unwrap_or(Vec2::new(NODE_WIDTH, 100.0)),
+                .map(|n| n.world_rect(settings.node_width, settings.font_size).size())
+                .unwrap_or(Vec2::new(settings.node_width, 100.0)),
             Item::Folder(id) if nodes.layout_collapsed(id) => {
                 // The card, then its revealed files stacked under it.
                 revealed.get(&id).map_or(COLLAPSED_FOLDER_SIZE, |files| {
                     files.iter().fold(COLLAPSED_FOLDER_SIZE, |acc, &f| {
                         let size = nodes
                             .get_file(f)
-                            .map(|n| n.world_rect(NODE_WIDTH, FONT_SIZE).size())
+                            .map(|n| n.world_rect(settings.node_width, settings.font_size).size())
                             .unwrap_or(Vec2::ZERO);
                         Vec2::new(acc.x.max(size.x), acc.y + REVEALED_GAP + size.y)
                     })
@@ -570,7 +567,7 @@ mod tests {
     use super::*;
     use std::path::{Path, PathBuf};
 
-    const NODE_WIDTH: f32 = 650.0;
+    const NODE_WIDTH: f32 = 700.0;
     const SPACING: f32 = 100.0;
     const COLUMN: f32 = NODE_WIDTH + SPACING;
 

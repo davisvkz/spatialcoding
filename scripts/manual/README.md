@@ -25,6 +25,7 @@ scripts/manual/04-edges.sh python
 | `12-lsp.sh` | Aba LSP: símbolos, referências entre arquivos, pular para a linha (TASK-12; precisa do rust-analyzer) | `rust` | `util.rs` e `main.rs` + layout |
 | `13-showcase.sh` | Workspace de exemplo com tudo: todas as relações, barrels, Git, arquivo longo (TASK-46; os arquivos estão em `examples/showcase`) | `showcase` | todos os arquivos + layout |
 | `14-palette-search.sh` | Paleta Ctrl+K e painel Search: arquivos, texto e símbolos (TASK-16, TASK-17) | `showcase` | só a pasta (canvas vazio) |
+| `16-mcp-notes-ignore.sh` | Servidor MCP, Agent notes com links cc://, lista de ignorados e .codecanvas/settings.json (TASK-55.4) | `rust` | todos os arquivos + layout |
 | `15-git-diff-watcher.sh` | Branch na barra, painel Changes, janela de diff e file watcher (TASK-14, TASK-18, TASK-13) | `showcase` | só a pasta (canvas vazio) |
 
 ## Fixtures

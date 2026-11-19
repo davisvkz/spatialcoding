@@ -68,7 +68,7 @@ pub fn draw_edges_panel(ui: &mut egui::Ui, state: &mut AppState) {
             );
         });
         ui.checkbox(&mut state.edge_style.highlight_backwards, "Backwards")
-            .on_hover_text("Highlight incoming dependencies of the selected symbols/files.");
+            .on_hover_text("Keep backwards edges visible when All is off.");
         ui.weak("Folder nesting levels");
         ui.checkbox(&mut state.edge_style.folder_levels, "Levels")
             .on_hover_text(
@@ -82,7 +82,7 @@ pub fn draw_edges_panel(ui: &mut egui::Ui, state: &mut AppState) {
         ui.separator();
         switch(ui, &mut state.edge_style.highlight_reverse_layout, "Highlight Backwards Edges")
             .on_hover_text(
-                "Highlight edges whose source is to the right of their target on the canvas.",
+                "Draw in red the edges whose importer ends to the right of where the exported file starts.",
             );
     });
 
@@ -99,6 +99,9 @@ pub fn draw_edges_panel(ui: &mut egui::Ui, state: &mut AppState) {
                 (EdgeStyle::Pcb, "PCB"),
             ],
         );
+        slider_row(ui, "Curvature", &mut style.bezier_curvature, 0.0..=2.0, |v| format!("{v:.2}"))
+            .on_hover_text("Bezier handle length as a multiple of the horizontal distance.");
+        slider_row(ui, "Lightness", &mut style.base_lightness, 0.0..=200.0, |v| format!("{v:.0}%"));
         ui.label("Opacity");
         segmented(
             ui,
@@ -115,7 +118,7 @@ pub fn draw_edges_panel(ui: &mut egui::Ui, state: &mut AppState) {
         switch(ui, &mut style.scale_arrow_heads, "Scale Arrow Heads")
             .on_hover_text("Arrow heads shrink with the zoom, down to Min Size.");
         ui.add_enabled_ui(style.scale_arrow_heads, |ui| {
-            slider_row(ui, "Min Size", &mut style.min_size_pct, 0.0..=1.0, percent);
+            slider_row(ui, "Min Size", &mut style.min_size_pct, 0.3..=1.0, percent);
         });
     });
 
@@ -136,13 +139,16 @@ pub fn draw_edges_panel(ui: &mut egui::Ui, state: &mut AppState) {
                 ui.add_enabled_ui(style.gradient_gap_mode == GradientGapMode::Percent, |ui| {
                     slider_row(ui, "Gap %", &mut style.gradient_gap_pct, 0.0..=1.0, percent);
                 });
-                slider_row(ui, "Min Dist", &mut style.gradient_min_dist_sq, 0.0..=40_000.0, |v| {
+                ui.add_enabled_ui(style.gradient_gap_mode == GradientGapMode::Fixed, |ui| {
+                    slider_row(ui, "Visible px", &mut style.gradient_fixed_visible_px, 0.0..=5000.0, |v| {
+                        format!("{v:.0}")
+                    })
+                    .on_hover_text("World px that stay visible at each end of the edge.");
+                });
+                slider_row(ui, "Min Dist", &mut style.gradient_min_dist, 0.0..=100_000.0, |v| {
                     format!("{v:.0}")
                 })
-                .on_hover_text(
-                    "Squared screen distance (px²) under which edges draw solid; \
-                     40000 is 200 px. In Fixed mode the solid ends add up to this distance.",
-                );
+                .on_hover_text("Edges shorter than this many world px draw solid, without the gap.");
             });
         });
     state.edge_style.use_gradient = use_gradient;
@@ -253,10 +259,6 @@ pub fn draw_edges_panel(ui: &mut egui::Ui, state: &mut AppState) {
                 ui.label("Symbol");
             });
         });
-        slider_row(ui, "Hide Short Edges", &mut style.hide_short_pct, 0.0..=1.0, |v| {
-            format!("{:.0} px", v * 40.0)
-        })
-        .on_hover_text("Hide edges shorter than this on screen.");
     });
 
     egui::CollapsingHeader::new("Symbol Colors")

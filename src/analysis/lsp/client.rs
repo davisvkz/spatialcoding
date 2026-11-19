@@ -240,6 +240,63 @@ impl LspClient {
         Ok(parse_locations(&result))
     }
 
+    /// The graph of the symbol at `position`: references, definitions, type
+    /// definitions, implementations and both directions of the call
+    /// hierarchy. Only the references must succeed; a server that does not
+    /// know the other requests just contributes nothing to them.
+    pub fn symbol_graph(
+        &mut self,
+        path: &Path,
+        position: Position,
+    ) -> Result<super::graph::SymbolGraph, LspError> {
+        use super::graph::{build, parse_calls, parse_call_items, parse_links, Answers, Call};
+        let references = self.references(path, position)?;
+        let params = json!({
+            "textDocument": {"uri": path_to_uri(path)},
+            "position": position_json(position),
+        });
+        let links = |client: &mut Self, method: &str| {
+            client.request_with_retry(method, params.clone()).map(|r| parse_links(&r)).unwrap_or_default()
+        };
+        let definitions = links(self, "textDocument/definition");
+        let type_definitions = links(self, "textDocument/typeDefinition");
+        let implementations = links(self, "textDocument/implementation");
+
+        let items = self
+            .request_with_retry("textDocument/prepareCallHierarchy", params.clone())
+            .map(|r| parse_call_items(&r))
+            .unwrap_or_default();
+        let mut incoming: Vec<Call> = Vec::new();
+        let mut outgoing: Vec<Call> = Vec::new();
+        for item in items.iter().take(1) {
+            let item_params = json!({"item": item.raw});
+            if let Ok(r) = self.request_with_retry("callHierarchy/incomingCalls", item_params.clone()) {
+                incoming = parse_calls(&r, "from");
+            }
+            if let Ok(r) = self.request_with_retry("callHierarchy/outgoingCalls", item_params) {
+                outgoing = parse_calls(&r, "to");
+            }
+        }
+
+        // The token asked at: the reference or definition under `position`.
+        let under = |range: &super::Range| range.start <= position && position <= range.end;
+        let source = references
+            .iter()
+            .find(|l| l.path == path && under(&l.range))
+            .cloned()
+            .or_else(|| {
+                definitions.iter().find(|l| l.path == path && under(&l.selection)).map(|l| super::Location {
+                    path: l.path.clone(),
+                    range: l.selection,
+                })
+            })
+            .unwrap_or_else(|| super::Location {
+                path: path.to_path_buf(),
+                range: super::Range { start: position, end: position },
+            });
+        Ok(build(source, Answers { references, definitions, type_definitions, implementations, incoming, outgoing }))
+    }
+
     /// Retries while the server says its state changed under the request
     /// (rust-analyzer does this while it indexes).
     fn request_with_retry(&mut self, method: &str, params: Value) -> Result<Value, LspError> {

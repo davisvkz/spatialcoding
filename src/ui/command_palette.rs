@@ -7,7 +7,7 @@ use std::path::PathBuf;
 use egui::{Align2, Color32, FontId, Key, Modifiers};
 
 use crate::search::fuzzy::{fuzzy_match, FuzzyMatch};
-use crate::state::{AppState, LeftPanel, RightPanel};
+use crate::state::AppState;
 
 /// Most rows kept in the list; the list shows `VISIBLE_ROWS` and scrolls.
 const MAX_ROWS: usize = 40;
@@ -18,20 +18,12 @@ const WIDTH: f32 = 520.0;
 /// What the user picked.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PaletteCommand {
-    OpenFolder,
-    OpenAllFiles,
-    FitView,
-    ApplyLayout,
-    ClearCanvas,
-    ToggleLeft(LeftPanel),
-    ToggleRight(RightPanel),
-    ToggleSettings,
-    ToggleShortcuts,
-    ToggleMinimap,
-    /// Open the diff window for the selected file node.
-    ShowDiff,
+    /// A command of the registry (`crate::commands`), by id.
+    Command(&'static str),
     /// Show a file of the folder on the canvas, opening it when needed.
     GoToFile(PathBuf),
+    /// Go to UI: open and pulse where the command's control lives.
+    GoToUi(&'static str),
 }
 
 /// Text, selection and open-state of the palette.
@@ -45,60 +37,28 @@ pub struct PaletteState {
 
 struct Entry {
     label: String,
-    hint: &'static str,
+    hint: String,
     command: PaletteCommand,
     matched: FuzzyMatch,
+    /// The command's control can be shown (Go to UI).
+    ui: Option<&'static str>,
 }
 
 /// Commands that make sense now, with their shortcut hints.
-fn commands(state: &AppState) -> Vec<(String, &'static str, PaletteCommand)> {
-    let has_folder = state.loaded_dir.is_some();
-    let has_nodes = !state.node_store.file_nodes.is_empty();
-    let mut list: Vec<(String, &'static str, PaletteCommand)> = Vec::new();
-    list.push(("Open folder…".into(), "", PaletteCommand::OpenFolder));
-    if has_folder {
-        list.push(("Open all files".into(), "Ctrl+Shift+O", PaletteCommand::OpenAllFiles));
-    }
-    if has_nodes {
-        list.push(("Fit view to nodes".into(), "Shift+F", PaletteCommand::FitView));
-        list.push(("Apply layout".into(), "1", PaletteCommand::ApplyLayout));
-        list.push(("Clear canvas".into(), "Shift+X", PaletteCommand::ClearCanvas));
-    }
-    if state.selection.primary.is_some() {
-        list.push(("Show diff of selected file".into(), "", PaletteCommand::ShowDiff));
-    }
-    for (label, panel) in [
-        ("Workspace", LeftPanel::Workspace),
-        ("Changes", LeftPanel::Changes),
-        ("Search", LeftPanel::Search),
-        ("Local Server", LeftPanel::LocalServer),
-    ] {
-        list.push((format!("Toggle {label} panel"), "", PaletteCommand::ToggleLeft(panel)));
-    }
-    for (label, panel) in [
-        ("Layout", RightPanel::Layout),
-        ("LSP Symbols", RightPanel::LspSymbols),
-        ("Dependency Edges", RightPanel::DependencyEdges),
-        ("Folders", RightPanel::Folders),
-        ("File Nodes", RightPanel::FileNodes),
-        ("CST", RightPanel::Cst),
-        ("Agent Notes", RightPanel::AgentNotes),
-        ("Performance", RightPanel::Performance),
-    ] {
-        list.push((format!("Toggle {label} panel"), "", PaletteCommand::ToggleRight(panel)));
-    }
-    list.push(("Toggle minimap".into(), "", PaletteCommand::ToggleMinimap));
-    list.push(("Open settings".into(), "", PaletteCommand::ToggleSettings));
-    list.push(("Show shortcuts".into(), "Ctrl+/", PaletteCommand::ToggleShortcuts));
-    list
+fn commands(state: &AppState) -> Vec<(String, String, PaletteCommand, Option<&'static str>)> {
+    crate::commands::all()
+        .iter()
+        .filter(|c| c.palette && (c.enabled)(state))
+        .map(|c| (c.title.to_string(), c.shortcut_label(), PaletteCommand::Command(c.id), c.anchor.map(|_| c.id)))
+        .collect()
 }
 
 /// Commands and, once the user types, files, filtered and ranked.
 fn entries(state: &AppState, query: &str) -> Vec<Entry> {
     let mut found: Vec<Entry> = commands(state)
         .into_iter()
-        .filter_map(|(label, hint, command)| {
-            fuzzy_match(query, &label).map(|matched| Entry { label, hint, command, matched })
+        .filter_map(|(label, hint, command, ui)| {
+            fuzzy_match(query, &label).map(|matched| Entry { label, hint, command, matched, ui })
         })
         .collect();
     if !query.trim().is_empty()
@@ -108,7 +68,7 @@ fn entries(state: &AppState, query: &str) -> Vec<Entry> {
         for path in files.iter() {
             let label = path.strip_prefix(root).unwrap_or(path).to_string_lossy().into_owned();
             if let Some(matched) = fuzzy_match(query, &label) {
-                found.push(Entry { label, hint: "file", command: PaletteCommand::GoToFile(path.clone()), matched });
+                found.push(Entry { label, hint: "file".into(), command: PaletteCommand::GoToFile(path.clone()), matched, ui: None });
             }
         }
     }
@@ -189,6 +149,20 @@ pub fn draw_command_palette(ctx: &egui::Context, state: &mut AppState) -> Option
                             if row.clicked() {
                                 chosen = Some(entry.command.clone());
                             }
+                            // Go to UI: show where the control lives, without running.
+                            if let (Some(id), true) = (entry.ui, row.hovered() || active) {
+                                let rect = row.rect;
+                                let goto = egui::Rect::from_center_size(
+                                    egui::pos2(rect.right() - 120.0, rect.center().y),
+                                    egui::vec2(66.0, ROW_HEIGHT - 6.0),
+                                );
+                                let r = ui.interact(goto, egui::Id::new(("goto_ui", id)), egui::Sense::click());
+                                ui.painter().rect_filled(goto, 4.0, theme.control_bg);
+                                ui.painter().text(goto.center(), Align2::CENTER_CENTER, "Go to UI", FontId::proportional(10.5), theme.accent);
+                                if r.clicked() {
+                                    chosen = Some(PaletteCommand::GoToUi(id));
+                                }
+                            }
                         }
                     });
                 });
@@ -229,7 +203,7 @@ fn entry_row(ui: &mut egui::Ui, theme: &crate::ui::theme::Theme, entry: &Entry, 
         ui.painter().text(
             egui::pos2(rect.right() - 8.0, rect.center().y),
             Align2::RIGHT_CENTER,
-            entry.hint,
+            &entry.hint,
             FontId::proportional(10.5),
             theme.text_muted,
         );
@@ -257,7 +231,7 @@ mod tests {
     fn commands_that_need_nodes_are_hidden_without_them() {
         let state = AppState::default();
         assert!(!labels(&state, "").contains(&"Fit view to nodes".to_owned()));
-        assert!(labels(&state, "fit").is_empty());
+        assert!(labels(&state, "fit view").is_empty(), "{:?}", labels(&state, "fit view"));
     }
 
     #[test]
