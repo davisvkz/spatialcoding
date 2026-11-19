@@ -931,13 +931,15 @@ impl SpatialCodingApp {
 
             // Sticky label: once the top of a node scrolls off, its name stays
             // on the canvas top as a pill while the node is still in view.
+            // Skipped on nodes too narrow to hold a readable pill.
             if names.show_names
                 && label_alpha > 0.0
+                && screen_rect.width() >= 60.0
                 && screen_rect.top() < canvas_rect.top() + 4.0
                 && screen_rect.bottom() > canvas_rect.top() + 36.0
             {
-                let x = screen_rect.center().x.clamp(canvas_rect.left() + 60.0, canvas_rect.right() - 60.0);
-                let x = x.clamp(screen_rect.left() + 30.0, screen_rect.right() - 30.0);
+                let x = clamp_or_mid(screen_rect.center().x, canvas_rect.left() + 60.0, canvas_rect.right() - 60.0);
+                let x = clamp_or_mid(x, screen_rect.left() + 30.0, screen_rect.right() - 30.0);
                 let galley = painter.layout_no_wrap(
                     node.file_name().to_string(),
                     egui::FontId::proportional(12.0),
@@ -1612,6 +1614,16 @@ fn draw_line_numbers(
     painter: &egui::Painter,
     count: usize,
     right_top: egui::Pos2,
+/// Like `f32::clamp`, but returns the middle of the range instead of
+/// panicking when `lo > hi` (a node or canvas too narrow for its margins).
+pub(crate) fn clamp_or_mid(v: f32, lo: f32, hi: f32) -> f32 {
+    if lo <= hi {
+        v.clamp(lo, hi)
+    } else {
+        (lo + hi) * 0.5
+    }
+}
+
     line_h: f32,
     font_px: f32,
     color: egui::Color32,
@@ -1948,6 +1960,16 @@ mod tests {
         ];
         let cols = |s: &str| visual_width(s.trim_end_matches(['\n', '\r'])) as f32;
         assert_eq!(x_at_byte(&line, 0, &cols), Some(0.0));
+    #[test]
+    fn clamp_or_mid_never_panics_on_inverted_bounds() {
+        assert_eq!(clamp_or_mid(5.0, 0.0, 10.0), 5.0);
+        assert_eq!(clamp_or_mid(-3.0, 0.0, 10.0), 0.0);
+        assert_eq!(clamp_or_mid(99.0, 0.0, 10.0), 10.0);
+        // Bounds from the reported panic: a ~15 px wide node, zoomed out.
+        let x = clamp_or_mid(1396.0, 1418.4248, 1374.0844);
+        assert!((x - 1396.2546).abs() < 0.01, "got {x}");
+    }
+
         assert_eq!(x_at_byte(&line, 4, &cols), Some(4.0), "span boundary");
         assert_eq!(x_at_byte(&line, 6, &cols), Some(6.0), "inside a span");
         assert_eq!(x_at_byte(&line, 11, &cols), Some(11.0));
