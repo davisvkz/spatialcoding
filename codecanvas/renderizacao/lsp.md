@@ -73,10 +73,12 @@ Os botões Open Importers / Open Imports / Highlight ficam **desabilitados sem s
 
 ### 9.5 Open files that import the selection (`img/31`)
 Com todos os 21 nós selecionados (Ctrl+A), o botão abriu os importadores que faltavam: **Files 21 → 44** (specs de `test/`, `test/typescript/*.test-d.ts`, `examples/…`). Para `kindOf.ts` sozinho nada novo apareceu porque seus importadores já estavam abertos. Durante a seleção as edges dos nós selecionados ficam em azul claro (`#AED6FF`), mais grossas e com setas (`Arrow Heads` / only selected), as demais esmaecem [obs, bate com `edge.selected` do bundle].
-Não testado: **Open imported files** (Open Imports).
+
+### 9.5b Open imported files (`img/32`)
+Partindo de um canvas com **só** `test/combineReducers.spec.ts` (aberto pela árvore, selecionado com Ctrl+A), o botão **Open imported files** levou os arquivos de **1 → 7** (`Files 1 / 7 / 320`): `src/index.ts`, `src/combineReducers.ts` e os arquivos de `types/` e `utils/` que o spec importa, posicionados à direita do spec pelo layout. As edges saem do spec em azul claro (selecionado) com **label pills** nos símbolos importados (`Reducer`, `Action`, `DO_NOT_USE__ActionTypes`). Nesse estado o botão "Open files that import the selection" ficou **desabilitado** (nenhum arquivo analisado importa o spec). Confirma o doc oficial: a lista vem do grafo de dependências, então o arquivo precisa já ter sido analisado.
 
 ### 9.6 Ordem observada das fases ao clicar
 1) hover destaca token; 2) click → "TypeScript language server loading" na barra inferior na 1ª consulta (~8 s a frio, 1–2 s depois); 3) overlays + edges aparecem; 4) painel lista os resultados agrupados (Implementations, Incoming Calls, Outgoing Calls, Type Definitions, Definitions, References).
 
 ## Não verificado
-Open imported files (Open Imports); out-of-view em Shift+pin; outras linguagens (só TypeScript rodou); alpha/largura exatos medidos em pixel.
+Out-of-view com Shift+pin; outras linguagens (só TypeScript rodou); alpha/largura exatos medidos em pixel.

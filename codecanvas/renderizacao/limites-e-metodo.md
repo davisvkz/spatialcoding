@@ -4,6 +4,6 @@
 
 **Limites**
 - Valores [bundle] não foram medidos em pixels; `endpointDotSizePx` parece sem uso; a ordem exata (acima dos nós) das edges selecionadas é inferida.
-- LSP: só TypeScript rodou (redux). Observados na 2ª rodada: type definition, definition, pin múltiplo, Highlight Top-Level Symbols, Open Importers. Não observados: Open imported files, Rust/Python/Vue/Svelte.
+- LSP: só TypeScript rodou (redux). Observados na 2ª rodada: type definition, definition, pin múltiplo, Highlight Top-Level Symbols, Open Importers e Open imported files. Não observados: Rust/Python/Vue/Svelte.
 - Não exercitados: login/Pro, pasta local, PRs/commits privados, MCP conectado a um agente, diff em canvas.
 - Para o LSP foi necessário `--disable-features=LocalNetworkAccessChecks` no Chrome de teste (sessão descartável, só para v2.codecanvas.app). O servidor local foi parado ao final.

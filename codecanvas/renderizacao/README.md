@@ -13,4 +13,4 @@ Como o canvas desenha arquivos, edges, LSP e CST. Análise de 2026-11-18/19 (app
 | [cst.md](cst.md) | tinta por tipo de nó sintático, editor, LOD, opções |
 | [limites-e-metodo.md](limites-e-metodo.md) | método usado e o que não foi verificado |
 
-Screenshots em `../img/` (10–19 zoom/edges/CST, 20–31 LSP e seleção).
+Screenshots em `../img/` (10–19 zoom/edges/CST, 20–32 LSP e seleção).
