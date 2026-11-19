@@ -179,6 +179,11 @@ impl GitRepo {
     pub fn root(&self) -> &Path {
         &self.root
     }
+
+    /// Runs a read-only `git` command in the worktree and returns its output.
+    pub fn run(&self, args: &[&str]) -> Result<Vec<u8>, String> {
+        command(&self.root, args)
+    }
 }
 
 /// Paths of `git status --porcelain=v1 -z` entries.

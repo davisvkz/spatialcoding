@@ -51,3 +51,12 @@ fn agent_notes_show_their_hint_and_an_enabled_menu() {
     assert!(!app.get_by_label("Smooth Transition").is_disabled());
     assert!(!app.get_by_label("Clear Agent notes").is_disabled());
 }
+
+#[test]
+fn performance_explains_where_analysis_is_stored() {
+    let mut app = panel(RightPanel::Performance);
+    app.get_by_label("About analysis storage");
+    app.get_by_label("Expand About analysis storage").click(); // folded by default
+    app.run();
+    app.get_by_label_contains("Syntax trees, language-server answers");
+}

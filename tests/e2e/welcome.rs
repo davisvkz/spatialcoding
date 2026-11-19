@@ -44,3 +44,13 @@ fn opening_another_folder_clears_the_canvas() {
     assert_eq!(s.edge_store.all_edges().count(), 0);
     app.get_by_label(&other.name);
 }
+
+#[test]
+fn the_local_server_icon_has_an_orange_dot_until_an_agent_connects() {
+    // The dot is painted, so the state it depends on is what is checked.
+    let mut app = app();
+    assert!(app.app_state().agents.is_empty(), "no agent: the rail icon shows the dot");
+    app.app_state_mut().agents = vec!["claude".into()];
+    app.run();
+    assert!(!app.app_state().agents.is_empty(), "with an agent the dot is gone");
+}

@@ -29,5 +29,10 @@ checklist "08 · Toolbar, painéis e diálogos" \
   "Abrir Dependency Edges e rolar até Symbol Colors; alternar Layout/Edges|cada painel mantém sua própria posição de rolagem" \
   "No painel LSP Symbols com muitos símbolos, rolar e passar o mouse/clicar numa linha|hover e clique continuam correspondendo ao símbolo visível; controles CST também permanecem acessíveis por rolagem" \
   "Redimensionar as sidebars pela borda|largura muda dentro dos limites" \
-  "Esc sem diálogos abertos|limpa a seleção"
+  "Esc sem diálogos abertos|limpa a seleção" \
+  "Ícone do inseto no rail esquerdo (Send feedback)|abre o diálogo; com 'Include a diagnostic log' o log aparece inteiro, com sua pasta pessoal como ~, o repositório como <repo> e seu usuário como <user>; 'Copy report' copia" \
+  "Local Server no rail, sem agente MCP conectado|o ícone tem um ponto laranja; ele some quando um agente se conecta" \
+  "Ctrl+K, passar o mouse em 'Next diff layout' e clicar em Go to UI|o painel Changes abre e o seletor Changes | Unified | Split pulsa (só ele, não o painel inteiro)" \
+  "Folders → Namespace / package view (Folders, Namespaces, Both, None)|com arquivos .go, .java, .kt ou .cs abertos, Namespaces nomeia a pasta pelo package/namespace, Both mostra 'pasta (namespace)' e None apaga os nomes" \
+  "Performance → About analysis storage (expandir)|explica que a análise fica em memória e só as configurações vão ao disco"
 launch "$dir" --open-all --layout

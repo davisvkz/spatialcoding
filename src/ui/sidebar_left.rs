@@ -18,8 +18,12 @@ const PANELS: &[(&str, &str, LeftPanel)] = &[
     (icons::PLUG, "Local Server", LeftPanel::LocalServer),
 ];
 
+/// The orange dot of the Local Server icon while no agent is connected.
+const AGENT_DOT: egui::Color32 = egui::Color32::from_rgb(0xf9, 0x73, 0x16);
+
 pub fn draw_sidebar_left(ctx: &egui::Context, state: &mut AppState, tree: &mut Option<TreeNode>) {
     state.panel_rect_left = None;
+    state.anchor_rects.clear();
     // 1. The always-visible icon rail, icons centered.
     egui::SidePanel::left("sidebar_left_rail")
         .exact_width(RAIL_WIDTH)
@@ -32,7 +36,13 @@ pub fn draw_sidebar_left(ctx: &egui::Context, state: &mut AppState, tree: &mut O
                 ui.add_space(6.0);
                 for &(ch, label, panel) in PANELS {
                     let active = state.left_panel == Some(panel);
-                    if icons::rail_icon_button(ui, ch, label, active).clicked() {
+                    let response = icons::rail_icon_button(ui, ch, label, active);
+                    if panel == LeftPanel::LocalServer && state.agents.is_empty() {
+                        // v2: an orange dot while no agent is connected.
+                        let dot = response.rect.right_top() + egui::vec2(-7.0, 7.0);
+                        ui.painter().circle_filled(dot, 3.5, AGENT_DOT);
+                    }
+                    if response.clicked() {
                         state.left_panel = if active { None } else { Some(panel) };
                     }
                 }
@@ -46,16 +56,21 @@ pub fn draw_sidebar_left(ctx: &egui::Context, state: &mut AppState, tree: &mut O
                 if icons::rail_icon_button(ui, icons::USER, "Sign in", false).clicked() {
                     // TODO: user/account dialog.
                 }
-                if icons::rail_icon_button(ui, icons::SETTINGS, "Settings", state.show_settings)
-                    .clicked()
-                {
+                let settings = icons::rail_icon_button(ui, icons::SETTINGS, "Settings", state.show_settings);
+                crate::commands::note_anchor(state, "settings", settings.rect);
+                if settings.clicked() {
                     state.show_settings = !state.show_settings;
                 }
                 if icons::rail_icon_button(ui, icons::HELP, "Help", state.show_shortcuts).clicked()
                 {
                     state.show_shortcuts = !state.show_shortcuts;
                 }
-                icons::rail_icon_button(ui, icons::BUG, "Send feedback", false);
+                if icons::rail_icon_button(ui, icons::BUG, "Send feedback", state.feedback.is_some()).clicked() {
+                    state.feedback = match state.feedback.take() {
+                        Some(_) => None,
+                        None => Some(Default::default()),
+                    };
+                }
             });
         });
 

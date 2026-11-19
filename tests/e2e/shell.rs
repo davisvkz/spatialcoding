@@ -193,3 +193,138 @@ fn dropping_a_tree_row_on_the_canvas_opens_it() {
     app.run();
     assert!(app.app_state().node_store.file_nodes.values().any(|n| n.path == path), "the dropped file is open");
 }
+
+fn settle(app: &mut App) {
+    // The app steps 0.1 s per frame here: a few frames let a change rest. Under
+    // load background analysis can still move nodes (an auto layout), so wait
+    // until the history has nothing left to settle.
+    for round in 0..400 {
+        app.step();
+        if round >= 8 && !app.app_state().history.is_settling() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(2));
+    }
+}
+
+#[test]
+fn undo_and_redo_restore_files_and_positions_and_never_fire_while_typing() {
+    let fx = fixture();
+    let mut app = app_with_stepping(&fx, 0.1);
+    settle(&mut app);
+    let main = app.open(&fx.path("src/main.rs"));
+    settle(&mut app);
+    let util = app.open(&fx.path("src/util.rs"));
+    settle(&mut app);
+    assert_eq!(app.app_state().node_store.file_nodes.len(), 2);
+
+    // Under load a background analysis can still nudge a node (an auto
+    // layout) as a step of its own; undo that first, then the opening.
+    for _ in 0..4 {
+        app.press_key_modifiers(Modifiers::COMMAND, Key::Z);
+        settle(&mut app);
+        if app.app_state().node_store.file_nodes.len() == 1 {
+            break;
+        }
+    }
+    let paths: Vec<_> = app.app_state().node_store.file_nodes.values().map(|n| n.path.clone()).collect();
+    assert_eq!(paths, vec![fx.path("src/main.rs")], "undo closes the last opened file");
+
+    for _ in 0..4 {
+        app.press_key_modifiers(Modifiers::COMMAND | Modifiers::SHIFT, Key::Z);
+        settle(&mut app);
+        if app.app_state().node_store.file_nodes.len() == 2 {
+            break;
+        }
+    }
+    assert_eq!(app.app_state().node_store.file_nodes.len(), 2, "redo opens it again");
+
+    // Moving a node is one step too.
+    let moved = app.app_state().node_store.file_nodes.values().find(|n| n.path == fx.path("src/main.rs")).unwrap().id;
+    let before = app.node_position(moved);
+    app.app_state_mut().node_store.get_file_mut(moved).unwrap().position += egui::vec2(300.0, 200.0);
+    settle(&mut app);
+    app.press_key_modifiers(Modifiers::COMMAND, Key::Z);
+    settle(&mut app);
+    let again = app.app_state().node_store.file_nodes.values().find(|n| n.path == fx.path("src/main.rs")).unwrap().id;
+    assert_eq!(app.node_position(again), before, "undo puts the node back");
+    let _ = (main, util);
+
+    // Typing in a text field keeps its own Ctrl+Z: the canvas does not undo.
+    app.press_key_modifiers(Modifiers::COMMAND, Key::K);
+    settle(&mut app);
+    let count = app.app_state().node_store.file_nodes.len();
+    app.press_key_modifiers(Modifiers::COMMAND, Key::Z);
+    settle(&mut app);
+    assert_eq!(app.app_state().node_store.file_nodes.len(), count);
+}
+
+#[test]
+fn go_to_ui_pulses_the_exact_control_when_it_is_drawn() {
+    use spatialcoding::ui::command_palette::PaletteCommand;
+    let fx = fixture();
+    let mut app = app_with(&fx);
+    app.app_state_mut().left_panel = None;
+    // The Changes layout control: the panel opens, the control's own rectangle is recorded.
+    app.execute_palette_command(PaletteCommand::GoToUi("diff:cycleViewMode"));
+    app.step();
+    app.step();
+    let s = app.app_state();
+    assert_eq!(s.left_panel, Some(spatialcoding::state::LeftPanel::Changes));
+    let control = s.anchor_rects.get("changes:layout").copied().expect("the layout switch registered its rectangle");
+    let panel = s.panel_rect_left.expect("the panel is open");
+    assert!(panel.contains_rect(control) && control.height() < panel.height() / 2.0, "a control, not the whole panel");
+    assert_eq!(s.ui_highlight.map(|(id, _)| id), Some("changes:layout"));
+
+    // Settings points at the rail's own Settings button.
+    app.execute_palette_command(PaletteCommand::GoToUi("ui:toggleSettings"));
+    app.step();
+    app.step();
+    assert!(app.app_state().anchor_rects.contains_key("settings"));
+}
+
+#[test]
+fn the_minimap_corner_resizes_it() {
+    let fx = fixture();
+    let mut app = app_with(&fx);
+    let main = app.open(&fx.path("src/main.rs"));
+    let center = app.node_center(main);
+    app.show_at(center, CANVAS_SPOT);
+    app.app_state_mut().right_panel = None;
+    app.run();
+    let canvas = app.app_state().canvas_rect;
+    // The card is 200x150 in the bottom-right corner; grab its top-left corner.
+    let corner = Pos2::new(canvas.max.x - 200.0 - 6.0 + 4.0, canvas.max.y - 150.0 - 6.0 + 4.0);
+    let view = app.app_state().viewport.visible_world_rect(canvas).center();
+    drag(&mut app, corner, corner - Vec2::new(60.0, 40.0));
+    assert_eq!(app.app_state().viewport.visible_world_rect(canvas).center(), view, "the drag resized, it did not pan");
+    // Dragging up and left grew it: the next corner is further out.
+    let bigger = Pos2::new(canvas.max.x - 260.0 - 6.0 + 4.0, canvas.max.y - 190.0 - 6.0 + 4.0);
+    drag(&mut app, bigger, bigger - Vec2::new(10.0, 10.0));
+    assert_eq!(app.app_state().viewport.visible_world_rect(canvas).center(), view, "the card is now 260x190 or more");
+}
+
+#[test]
+fn the_feedback_dialog_builds_a_redacted_report() {
+    let fx = fixture();
+    let mut app = app_with(&fx);
+    app.get_by_label("Send feedback").click();
+    app.run();
+    app.get_by_label("What happened, or what would you like to see?");
+    assert!(app.get_by_label("Copy report").is_disabled(), "nothing to send yet");
+
+    app.get_by_label("Include a diagnostic log").click();
+    app.run();
+    app.get_by_label_contains("Paths and your user name are redacted");
+    let draft = app.app_state().feedback.clone().unwrap();
+    assert!(draft.include_log);
+    let report = spatialcoding::ui::feedback::report(app.app_state(), &draft);
+    let root = fx.root.display().to_string();
+    assert!(report.contains("SpatialCoding "), "{report}");
+    assert!(!report.contains(&root), "the repository path is redacted: {report}");
+    assert!(report.contains("<repo>"));
+
+    app.get_by_label("Close").click();
+    app.run();
+    assert!(app.app_state().feedback.is_none());
+}

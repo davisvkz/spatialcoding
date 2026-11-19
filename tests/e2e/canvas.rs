@@ -492,10 +492,12 @@ fn ports_mark_connected_lines_on_the_border_and_edges_end_there() {
         s.viewport.target_zoom = 0.08;
     }
     app.run();
+    // (The rail's orange agent dot is a circle too, but it is not on the canvas.)
+    let canvas = app.app_state().canvas_rect;
     assert!(
         !frame_shapes(&app)
             .iter()
-            .any(|shape| matches!(shape, egui::Shape::Circle(_))),
+            .any(|shape| matches!(shape, egui::Shape::Circle(c) if canvas.contains(c.center))),
         "title-only zoom paints no ports"
     );
 }

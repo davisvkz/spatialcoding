@@ -495,3 +495,26 @@ fn auto_collapse_on_zoom_turns_small_folders_into_blocks_without_moving_files() 
     app.run();
     assert!(app.app_state().node_store.view.zoom_collapsed.is_empty());
 }
+
+#[test]
+fn the_namespace_view_names_folders_by_the_package_their_files_declare() {
+    use spatialcoding::namespaces::NamespaceView;
+    let fx = fixture();
+    std::fs::create_dir_all(fx.path("svc")).unwrap();
+    std::fs::write(fx.path("svc/a.go"), "package billing\n\nfunc A() {}\n").unwrap();
+    let mut app = app_with(&fx);
+    app.app_state_mut().left_panel = None;
+    app.app_state_mut().right_panel = Some(RightPanel::Folders);
+    let go = app.open(&fx.path("svc/a.go"));
+    app.run();
+    app.get_by_label("Namespace / package view");
+    for label in ["Namespaces", "Both", "None"] {
+        app.get_by_label(label);
+    }
+    app.get_by_label("Both").click();
+    app.run();
+    assert_eq!(app.app_state().settings.folders.namespace_view, NamespaceView::Both);
+    let store = &app.app_state().node_store;
+    let dir = store.file_folder(go).expect("the file has a folder");
+    assert_eq!(spatialcoding::namespaces::folder_namespace(store, dir).as_deref(), Some("billing"));
+}

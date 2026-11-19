@@ -81,12 +81,28 @@ pub struct FileDiff {
     pub is_deleted: bool,
     /// The working file is binary, so no lines are shown.
     pub binary: bool,
+    /// Both sides, so the hunks can be cut again with another context.
+    pub old_text: Option<String>,
+    pub new_text: Option<String>,
+}
+
+impl FileDiff {
+    /// The hunks with `context` unchanged lines around each change.
+    pub fn hunks_with(&self, context: usize) -> Vec<Hunk> {
+        diff_texts_with(self.old_text.as_deref().unwrap_or(""), self.new_text.as_deref().unwrap_or(""), context)
+    }
 }
 
 /// Hunks turning `old` into `new`, with [`CONTEXT_LINES`] of context.
 pub fn diff_texts(old: &str, new: &str) -> Vec<Hunk> {
+    diff_texts_with(old, new, CONTEXT_LINES)
+}
+
+/// Hunks turning `old` into `new`, with `context` unchanged lines around
+/// each change.
+pub fn diff_texts_with(old: &str, new: &str, context: usize) -> Vec<Hunk> {
     let diff = TextDiff::from_lines(old, new);
-    diff.grouped_ops(CONTEXT_LINES)
+    diff.grouped_ops(context)
         .iter()
         .map(|group| Hunk {
             lines: group
@@ -135,6 +151,8 @@ pub fn file_diff(path: &Path) -> Result<FileDiff, String> {
             is_new: old.is_none(),
             is_deleted: false,
             binary: true,
+            old_text: None,
+            new_text: None,
         });
     }
     let hunks = diff_texts(old.as_deref().unwrap_or(""), new.as_deref().unwrap_or(""));
@@ -147,6 +165,8 @@ pub fn file_diff(path: &Path) -> Result<FileDiff, String> {
         is_new: old.is_none(),
         is_deleted: new.is_none(),
         binary: false,
+        old_text: old,
+        new_text: new,
     })
 }
 
@@ -157,17 +177,34 @@ pub enum DiffStatus {
     Failed(String),
 }
 
+/// What a diff compares.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub enum DiffSource {
+    /// The working file against `HEAD`.
+    #[default]
+    Working,
+    /// The file at commit `from` against commit `to`.
+    Between { from: String, to: String },
+}
+
 /// The diff of one file being read in the background. Asking again keeps the
 /// previous answer on screen until the new one arrives.
 pub struct DiffLoader {
     pub path: PathBuf,
+    pub source: DiffSource,
+    /// Unchanged lines around each change in a diff between commits.
+    pub context: usize,
     pub status: DiffStatus,
     pending: Option<Receiver<Result<FileDiff, String>>>,
 }
 
 impl DiffLoader {
     pub fn new(path: PathBuf) -> Self {
-        let mut loader = Self { path, status: DiffStatus::Loading, pending: None };
+        Self::with_source(path, DiffSource::Working, CONTEXT_LINES)
+    }
+
+    pub fn with_source(path: PathBuf, source: DiffSource, context: usize) -> Self {
+        let mut loader = Self { path, source, context, status: DiffStatus::Loading, pending: None };
         loader.request();
         loader
     }
@@ -181,8 +218,17 @@ impl DiffLoader {
         let (sender, receiver) = mpsc::channel();
         self.pending = Some(receiver);
         let path = self.path.clone();
+        let (source, context) = (self.source.clone(), self.context);
         std::thread::spawn(move || {
-            let _ = sender.send(file_diff(&path));
+            let result = match source {
+                DiffSource::Working => file_diff(&path),
+                DiffSource::Between { from, to } => path
+                    .parent()
+                    .and_then(GitRepo::open)
+                    .ok_or_else(|| "Not a Git repository".to_string())
+                    .and_then(|repo| super::history::diff_between(&repo, &from, &to, &path, context)),
+            };
+            let _ = sender.send(result);
         });
     }
 

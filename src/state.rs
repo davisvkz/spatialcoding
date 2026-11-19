@@ -107,6 +107,11 @@ pub struct AppState {
     pub toasts: Vec<crate::ui::toast::Toast>,
     /// Go to UI: the control (anchor id) to pulse and since when (seconds).
     pub ui_highlight: Option<(&'static str, f64)>,
+    /// Screen rectangles of the controls Go to UI can point at, by anchor id
+    /// (filled while the panels draw, cleared each frame).
+    pub anchor_rects: std::collections::HashMap<&'static str, egui::Rect>,
+    /// The Feedback dialog is open, with its draft.
+    pub feedback: Option<crate::ui::feedback::Feedback>,
     /// Screen rectangles of the open left and right panels, for the pulse.
     pub panel_rect_left: Option<egui::Rect>,
     pub panel_rect_right: Option<egui::Rect>,
@@ -117,6 +122,10 @@ pub struct AppState {
     pub mcp_socket: Option<PathBuf>,
     /// The Ignored file settings dialog is open.
     pub show_ignore_settings: bool,
+    /// Undo and redo of the canvas.
+    pub history: crate::undo::History,
+    /// Sources, commit picks and settings of the Changes panel.
+    pub changes_view: crate::ui::changes_panel::ChangesView,
     /// Language server commands a repository suggests, waiting for a yes or no.
     pub command_proposals: Vec<crate::analysis::lsp::project_config::Proposal>,
 }
@@ -137,6 +146,8 @@ pub struct FoldersSettings {
     pub show_folder_names: bool,
     pub min_size_pct: f32,
     pub diff_highlight: bool,
+    /// What names a folder frame: its path, its namespace, both or nothing.
+    pub namespace_view: crate::namespaces::NamespaceView,
     /// Reveal Through Collapse: kept visible inside collapsed folders.
     pub reveal_selected: bool,
     pub reveal_diff_files: bool,
@@ -169,6 +180,7 @@ impl Default for FoldersSettings {
             show_folder_names: true,
             min_size_pct: 0.6,
             diff_highlight: true,
+            namespace_view: Default::default(),
         }
     }
 }
@@ -253,6 +265,44 @@ impl Default for CstSettings {
     }
 }
 
+/// The Changes panel's diff settings (the gear).
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
+pub struct DiffSettings {
+    /// Changes (the current file with marks), Unified or Split.
+    pub mode: crate::ui::diff_view::DiffMode,
+    /// Unchanged lines around each change.
+    pub context: usize,
+    pub char_diff: CharDiff,
+    /// Mark the deleted characters of a removed line.
+    pub show_deleted_chars: bool,
+    /// Lines pair for a character diff only when this similar (0-1).
+    pub similarity: f32,
+    /// Collapse the unchanged lines (the `C` shortcut).
+    pub collapse: bool,
+}
+
+impl Default for DiffSettings {
+    fn default() -> Self {
+        Self {
+            mode: Default::default(),
+            context: 3,
+            char_diff: CharDiff::Word,
+            show_deleted_chars: true,
+            similarity: 0.5,
+            collapse: false,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+pub enum CharDiff {
+    #[default]
+    Word,
+    Char,
+    Off,
+}
+
 /// LSP Symbols › LSP Advanced Settings.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(default)]
@@ -293,6 +343,13 @@ impl Default for LspSettings {
     }
 }
 
+/// Changed lines a diff may have before it asks to be shown.
+pub const DEFAULT_DIFF_SCAN_LIMIT: usize = 5000;
+
+fn default_diff_scan_limit() -> usize {
+    DEFAULT_DIFF_SCAN_LIMIT
+}
+
 fn default_true() -> bool {
     true
 }
@@ -311,6 +368,11 @@ pub struct AppSettings {
     pub font_size: f32,
     pub node_width: f32,
     pub show_dot_folders: bool,
+    #[serde(default)]
+    pub diff: DiffSettings,
+    /// Diffs changing more lines than this wait behind a Large Diffs card.
+    #[serde(default = "default_diff_scan_limit")]
+    pub diff_scan_limit: usize,
     /// Answers to `.codecanvas/settings.json` language server suggestions,
     /// per exact command and folder.
     #[serde(default)]
@@ -350,6 +412,8 @@ impl Default for AppSettings {
             font_size: 12.0,
             node_width: 700.0,
             show_dot_folders: false,
+            diff: DiffSettings::default(),
+            diff_scan_limit: default_diff_scan_limit(),
             lsp_command_answers: Vec::new(),
             ignored: Default::default(),
             show_ignored: false,
@@ -455,12 +519,16 @@ impl Default for AppState {
             panel_memory: None,
             toasts: Vec::new(),
             ui_highlight: None,
+            anchor_rects: Default::default(),
+            feedback: None,
             panel_rect_left: None,
             panel_rect_right: None,
             notes: Default::default(),
             agents: Vec::new(),
             mcp_socket: None,
             show_ignore_settings: false,
+            history: Default::default(),
+            changes_view: Default::default(),
             command_proposals: Vec::new(),
         }
     }

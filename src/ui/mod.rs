@@ -21,6 +21,7 @@ pub mod agent_panel;
 pub mod performance_panel;
 pub mod local_server_panel;
 pub mod toast;
+pub mod feedback;
 pub mod symbol_pins;
 pub mod pin_overlay;
 pub mod markdown;
