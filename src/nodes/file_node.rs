@@ -23,7 +23,11 @@ pub struct FileNode {
     pub content: String,
     pub line_count: usize,
     pub language: String,
+    /// A long file shown cut: only its first [`Self::shown_lines`] lines and a
+    /// clickable "Long file" row (File nodes › Collapse long files).
     pub collapsed: bool,
+    /// Lines shown while `collapsed` (the Max lines setting at open time).
+    pub shown_lines: usize,
 }
 
 impl FileNode {
@@ -38,6 +42,7 @@ impl FileNode {
             line_count,
             language,
             collapsed: false,
+            shown_lines: 0,
         }
     }
 
@@ -49,20 +54,44 @@ impl FileNode {
         egui::Rect::from_min_size(self.position, egui::vec2(node_width, height))
     }
 
-    /// Code lines the node draws: none while collapsed (only its frame and
-    /// a "N lines" note), otherwise every line.
-    pub fn visible_lines(&self) -> usize {
-        if self.collapsed { 0 } else { self.line_count }
+    /// Source lines the node draws: every line, or the first
+    /// [`Self::shown_lines`] while it is a collapsed long file.
+    pub fn code_lines(&self) -> usize {
+        if self.collapsed { self.shown_lines.min(self.line_count) } else { self.line_count }
     }
 
-    /// World-space y of the middle of code line `line` (0-based), or `None`
-    /// when the node does not draw that line.
+    /// Rows the node draws: the code lines plus, for a long file, the
+    /// "Long file" row below them.
+    pub fn visible_lines(&self) -> usize {
+        self.code_lines() + usize::from(self.collapsed)
+    }
+
+    /// The row of the "Long file" marker, for a collapsed long file.
+    pub fn marker_row(&self) -> Option<usize> {
+        self.collapsed.then(|| self.code_lines())
+    }
+
+    /// The row source line `line` is drawn on: itself, or the marker row for
+    /// a line cut off below the first lines. `None` past the end of the file.
+    pub fn anchor_row(&self, line: usize) -> Option<usize> {
+        if line < self.code_lines() {
+            Some(line)
+        } else if line < self.line_count {
+            self.marker_row()
+        } else {
+            None
+        }
+    }
+
+    /// World-space y of the middle of the row source line `line` (0-based) is
+    /// drawn on, or `None` when the node does not draw it. Lines cut off from
+    /// a long file attach to its marker row.
     pub fn line_anchor_y(&self, line: usize, font_size: f32) -> Option<f32> {
-        (line < self.visible_lines()).then(|| {
+        self.anchor_row(line).map(|row| {
             self.position.y
                 + HEADER_HEIGHT
                 + CODE_PADDING
-                + (line as f32 + 0.5) * line_height(font_size)
+                + (row as f32 + 0.5) * line_height(font_size)
         })
     }
 
@@ -141,6 +170,25 @@ mod tests {
         assert_eq!(node("a.rs", &long).visible_lines(), 120);
         assert!(node("a.rs", &long).line_anchor_y(119, 12.0).is_some());
         assert_eq!(node("a.rs", "x\ny").visible_lines(), 2);
+    }
+
+    #[test]
+    fn a_collapsed_long_file_shows_its_first_lines_and_a_marker_row() {
+        let mut n = node("a.rs", &"x\n".repeat(50));
+        n.collapsed = true;
+        n.shown_lines = 10;
+        assert_eq!((n.code_lines(), n.visible_lines(), n.marker_row()), (10, 11, Some(10)));
+        assert_eq!(n.anchor_row(3), Some(3));
+        assert_eq!(n.anchor_row(30), Some(10), "a cut-off line attaches to the marker");
+        assert_eq!(n.anchor_row(50), None, "past the end of the file");
+        assert_eq!(n.line_anchor_y(30, 10.0), n.line_anchor_y(10, 10.0));
+        assert_eq!(n.line_anchor_y(30, 10.0).unwrap(), 6.0 + HEADER_HEIGHT + CODE_PADDING + 10.5 * line_height(10.0));
+        n.collapsed = false;
+        assert_eq!((n.code_lines(), n.visible_lines(), n.marker_row()), (50, 50, None));
+        let mut short = node("b.rs", "a\nb");
+        short.collapsed = true;
+        short.shown_lines = 1000;
+        assert_eq!(short.code_lines(), 2, "never more than the file has");
     }
 
     #[test]

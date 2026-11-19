@@ -69,6 +69,8 @@ pub const ADDED_COLOR: [f32; 3] = hex(0x4CD964);
 pub const REMOVED_COLOR: [f32; 3] = hex(0xFF5F56);
 pub const REEXPORT_COLOR: [f32; 3] = hex(0x38BDF8);
 pub const BARREL_COLOR: [f32; 3] = hex(0xF97316);
+/// Connection markers and endpoint rectangles.
+pub const MARKER_COLOR: egui::Color32 = egui::Color32::from_rgb(0x9A, 0xBA, 0xF2);
 
 /// Relation colors of the reference at 80 %: uses `#6AA7A0`, extends
 /// `#B69B65`, inherits `#9B8AB5`, conforms `#85A87C`. Imports keep the base
@@ -131,6 +133,12 @@ pub struct EdgeStyleConfig {
     pub highlight_selected: bool,
     #[serde(default)]
     pub highlight_reverse_layout: bool,
+    /// With All off: also keep edges between files of different folders,
+    /// up to `external_nesting_max` folders apart (20 means no limit).
+    #[serde(default)]
+    pub show_external: bool,
+    #[serde(default = "default_external_nesting")]
+    pub external_nesting_max: usize,
     #[serde(default)]
     pub folder_levels: bool,
     #[serde(default = "default_folder_depth")]
@@ -197,6 +205,9 @@ pub struct EdgeStyleConfig {
 
 fn default_gradient_gap_mode() -> GradientGapMode {
     GradientGapMode::Percent
+}
+fn default_external_nesting() -> usize {
+    20
 }
 fn default_folder_depth() -> usize {
     1
@@ -320,6 +331,8 @@ impl Default for EdgeStyleConfig {
             relationships: default_relationships(),
             highlight_selected: true,
             highlight_reverse_layout: false,
+            show_external: false,
+            external_nesting_max: default_external_nesting(),
             folder_levels: false,
             folder_depth: default_folder_depth(),
             style: EdgeStyle::Bezier,

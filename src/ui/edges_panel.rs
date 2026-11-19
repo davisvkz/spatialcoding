@@ -69,6 +69,14 @@ pub fn draw_edges_panel(ui: &mut egui::Ui, state: &mut AppState) {
         });
         ui.checkbox(&mut state.edge_style.highlight_backwards, "Backwards")
             .on_hover_text("Keep backwards edges visible when All is off.");
+        ui.checkbox(&mut state.edge_style.show_external, "External")
+            .on_hover_text("With All off, also keep edges between files of different folders.");
+        ui.add_enabled_ui(state.edge_style.show_external, |ui| {
+            slider_row(ui, "Nesting", &mut state.edge_style.external_nesting_max, 1..=20, |v| {
+                if v >= 20.0 { "No limit".to_string() } else { format!("{v:.0}") }
+            })
+            .on_hover_text("Folders apart an external edge may be; 20 is no limit.");
+        });
         ui.weak("Folder nesting levels");
         ui.checkbox(&mut state.edge_style.folder_levels, "Levels")
             .on_hover_text(

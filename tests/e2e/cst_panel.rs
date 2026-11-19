@@ -347,3 +347,57 @@ fn a_hidden_type_is_not_tinted_and_a_style_override_changes_the_alpha() {
     app.run();
     assert!(function_tints(&app).is_empty(), "a hidden type draws nothing");
 }
+
+#[test]
+fn edge_cst_nodes_are_marked_only_with_three_or_fewer_files_selected() {
+    let fx = fixture();
+    let mut app = app_with(&fx);
+    let main = select_and_open_cst(&mut app, &fx, "src/main.rs");
+    app.open(&fx.path("src/util.rs"));
+    app.open(&fx.path("web/app.ts"));
+    app.open(&fx.path("web/a.ts"));
+    app.app_state_mut().selection.select(main);
+    app.run();
+    assert!(!app.app_state().cst.edge_nodes.is_empty(), "one selected file: marked");
+
+    let ids = app.app_state().node_store.all_file_ids();
+    assert!(ids.len() >= 4);
+    app.app_state_mut().selection.select_all(ids);
+    app.run();
+    assert!(app.app_state().cst.edge_nodes.is_empty(), "four selected files: nothing is marked");
+}
+
+#[test]
+fn a_type_style_editor_sets_visibility_fill_and_borders_and_resets() {
+    use spatialcoding::analysis::cst_style::FillMode;
+    let fx = fixture();
+    let mut app = app_with(&fx);
+    app.open(&fx.path("src/util.rs"));
+    app.app_state_mut().selection.clear();
+    app.app_state_mut().right_panel = Some(RightPanel::Cst);
+    app.run();
+
+    app.get_by_label("Style function item").click();
+    app.run();
+    app.get_by_label("Visible");
+    app.get_by_label("4% at zoom 0.30");
+    assert!(app.app_state().settings.cst.type_styles.is_empty(), "opening the editor changes nothing");
+
+    app.get_by_label("Gradient").click();
+    app.run();
+    let style = app.app_state().settings.cst.type_styles["function_item"].clone();
+    assert_eq!(style.fill, FillMode::Gradient);
+
+    app.get_by_label("Visible").click();
+    app.run();
+    assert!(!app.app_state().settings.cst.type_styles["function_item"].visible);
+
+    app.get_by_label("Left").click();
+    app.run();
+    let style = &app.app_state().settings.cst.type_styles["function_item"];
+    assert!(!style.sides.left && style.sides.top, "only the left border is off");
+
+    app.get_by_label("Reset to Default").click();
+    app.run();
+    assert!(app.app_state().settings.cst.type_styles.is_empty());
+}

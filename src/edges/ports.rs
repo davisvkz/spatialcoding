@@ -53,14 +53,11 @@ fn target_kind(edge: &Edge) -> PortKind {
     }
 }
 
-/// The side of a node of horizontal extent `left..right` facing `toward_x`.
-pub fn side_facing(left: f32, right: f32, toward_x: f32) -> PortSide {
-    if toward_x >= (left + right) * 0.5 {
-        PortSide::Right
-    } else {
-        PortSide::Left
-    }
-}
+/// Where an edge meets a node, as in the reference: the importing line on the
+/// node's right border, the exported line on the target's left border,
+/// whichever way the two nodes lie (a backwards edge loops back).
+pub const SOURCE_SIDE: PortSide = PortSide::Right;
+pub const TARGET_SIDE: PortSide = PortSide::Left;
 
 /// Ports of every node, from the edges `draw_edges` would draw. Edges sharing
 /// a line and side share a port; an import anywhere on it makes it an import
@@ -89,18 +86,17 @@ pub fn collect_ports(
         let src_rect = src.world_rect(node_width, font_size);
         let tgt_rect = tgt.world_rect(node_width, font_size);
         let emphasized = !nothing_selected && edge.is_selected(selection);
+        let _ = (src_rect, tgt_rect);
         let ends = [
-            (src, edge.source_span, tgt_rect.center().x, src_rect, source_kind(edge)),
-            (tgt, edge.target_span, src_rect.center().x, tgt_rect, target_kind(edge)),
+            (src, edge.source_span, SOURCE_SIDE, source_kind(edge)),
+            (tgt, edge.target_span, TARGET_SIDE, target_kind(edge)),
         ];
-        for (node, span, toward_x, rect, kind) in ends {
+        for (node, span, side, kind) in ends {
             let Some(span) = span else { continue };
-            if node.collapsed || span.start >= node.visible_lines() {
-                continue;
-            }
-            let side = side_facing(rect.left(), rect.right(), toward_x);
-            let port = by_key.entry((node.id, span.start, side)).or_insert(Port {
-                line: span.start,
+            // A line cut off from a long file attaches to its marker row.
+            let Some(row) = node.anchor_row(span.start) else { continue };
+            let port = by_key.entry((node.id, row, side)).or_insert(Port {
+                line: row,
                 side,
                 kind,
                 emphasized,
@@ -154,7 +150,7 @@ mod tests {
     }
 
     #[test]
-    fn each_end_gets_a_port_on_the_side_facing_the_other_node() {
+    fn the_importer_port_is_on_the_right_border_and_the_exported_one_on_the_left() {
         let (nodes, a, b) = two_files();
         let mut edges = EdgeStore::default();
         edges.add_spanned(a, b, Some("fn".into()), line(2), line(5), name(5));
@@ -168,6 +164,17 @@ mod tests {
             ports[&b],
             vec![Port { line: 5, side: PortSide::Left, kind: PortKind::Symbol, emphasized: false }]
         );
+    }
+
+    #[test]
+    fn a_backwards_edge_keeps_the_same_sides() {
+        let (nodes, a, b) = two_files();
+        let mut edges = EdgeStore::default();
+        // b imports from a: b is to the right of a, so the edge runs backwards.
+        edges.add_spanned(b, a, Some("fn".into()), line(2), line(5), name(5));
+        let ports = collect(&edges, &nodes, &Selection::default());
+        assert_eq!(ports[&b][0].side, PortSide::Right, "importer: right border");
+        assert_eq!(ports[&a][0].side, PortSide::Left, "exported: left border");
     }
 
     #[test]
@@ -207,7 +214,7 @@ mod tests {
     }
 
     #[test]
-    fn no_ports_for_collapsed_nodes_missing_spans_or_hidden_edges() {
+    fn no_ports_for_missing_spans_hidden_edges_or_lines_past_the_file_and_cut_lines_use_the_marker() {
         let (mut nodes, a, b) = two_files();
         let mut edges = EdgeStore::default();
         edges.add_spanned(a, b, None, None, line(20), None);
@@ -218,9 +225,13 @@ mod tests {
         assert!(collect_ports(&edges, &nodes, &config, &Selection::default(), WIDTH, FONT).is_empty());
 
         edges.add_spanned(a, b, None, line(2), line(2), None);
-        nodes.get_file_mut(b).unwrap().collapsed = true;
+        {
+            let b = nodes.get_file_mut(b).unwrap();
+            b.collapsed = true;
+            b.shown_lines = 1;
+        }
         let ports = collect_ports(&edges, &nodes, &config, &Selection::default(), WIDTH, FONT);
-        assert!(ports.contains_key(&a) && !ports.contains_key(&b), "{ports:?}");
+        assert_eq!(ports[&b].iter().map(|p| p.line).collect::<Vec<_>>(), vec![1], "line 2 is cut off: its port sits on the marker row");
     }
 
     #[test]

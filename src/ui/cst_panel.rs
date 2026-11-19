@@ -47,6 +47,8 @@ pub struct CstPanelState {
     /// The settings group under the gear is open.
     pub show_settings: bool,
     pub mapping: Vec<MappingRow>,
+    /// The kind whose style editor is open under its Symbol Mapping row.
+    pub editing_style: Option<String>,
     pub mapping_hover: Vec<(CstHover, egui::Color32)>,
     mapping_hash: Option<u64>,
     /// The tint of every open file at the zoomed-out levels, by node id.
@@ -228,6 +230,10 @@ impl CstPanelState {
 /// [`crate::analysis::cst_style::family_of`]. A color picked in Symbol
 /// Mapping wins.
 pub fn mapping_color(kind: &str, settings: &CstSettings) -> egui::Color32 {
+    if let Some(style) = settings.type_styles.get(kind) {
+        let [r, g, b] = style.color;
+        return egui::Color32::from_rgb(r, g, b);
+    }
     if let Some(&[r, g, b]) = settings.type_colors.get(kind) {
         return egui::Color32::from_rgb(r, g, b);
     }
@@ -387,10 +393,23 @@ fn draw_mapping(ui: &mut egui::Ui, state: &mut AppState) {
                                         egui::Layout::right_to_left(egui::Align::Center),
                                         |ui| {
                                             ui.label(egui::RichText::new(counts).size(10.0).weak());
+                                            let open = state.cst.editing_style.as_deref() == Some(row.kind.as_str());
+                                            let gear = ui
+                                                .small_button(if open { "▾" } else { "⚙" })
+                                                .on_hover_text(format!("Style of {name}"));
+                                            gear.widget_info(|| {
+                                                egui::WidgetInfo::labeled(egui::WidgetType::Button, true, format!("Style {name}"))
+                                            });
+                                            if gear.clicked() {
+                                                state.cst.editing_style = if open { None } else { Some(row.kind.clone()) };
+                                            }
                                         },
                                     );
                                 })
                                 .response;
+                            if state.cst.editing_style.as_deref() == Some(row.kind.as_str()) {
+                                draw_style_editor(ui, &row.kind, &mut state.settings.cst);
+                            }
                             if rgb != mapping_color(&row.kind, &state.settings.cst).to_array()[..3]
                             {
                                 state.settings.cst.type_colors.insert(row.kind.clone(), rgb);
@@ -426,6 +445,63 @@ fn draw_mapping(ui: &mut egui::Ui, state: &mut AppState) {
                 .extend(row.nodes.iter().map(|n| (*n, color)));
         }
     }
+}
+
+/// The style editor of one kind (`codecanvas/img/16`): visibility, solid or
+/// gradient fill with colors and opacity, border color, width, opacity and
+/// sides, a preview of the tint at zoom 0.30 and a reset to the default.
+fn draw_style_editor(ui: &mut egui::Ui, kind: &str, settings: &mut CstSettings) {
+    use crate::analysis::cst_style::FillMode;
+    let original = settings.style_for(kind);
+    let mut style = original.clone();
+    let mut reset = false;
+    egui::Frame::NONE
+        .fill(ui.visuals().faint_bg_color)
+        .corner_radius(3.0)
+        .inner_margin(6.0)
+        .show(ui, |ui| {
+            ui.checkbox(&mut style.visible, "Visible");
+            ui.horizontal(|ui| {
+                ui.label("Fill");
+                crate::ui::panel::segmented(ui, &mut style.fill, &[(FillMode::Solid, "Solid"), (FillMode::Gradient, "Gradient")]);
+            });
+            ui.horizontal(|ui| {
+                ui.color_edit_button_srgb(&mut style.color);
+                if style.fill == FillMode::Gradient {
+                    ui.color_edit_button_srgb(&mut style.color_end);
+                }
+                ui.label("Fill opacity");
+                ui.add(egui::Slider::new(&mut style.fill_alpha, 0.0..=1.0).fixed_decimals(2));
+            });
+            ui.horizontal(|ui| {
+                ui.label("Border");
+                ui.color_edit_button_srgb(&mut style.border_color);
+                ui.add(egui::Slider::new(&mut style.border_width, 0.0..=4.0).text("Width").fixed_decimals(1));
+            });
+            ui.add(egui::Slider::new(&mut style.border_alpha, 0.0..=1.0).text("Border opacity").fixed_decimals(2));
+            ui.horizontal(|ui| {
+                ui.label("Sides");
+                ui.checkbox(&mut style.sides.top, "Top");
+                ui.checkbox(&mut style.sides.right, "Right");
+                ui.checkbox(&mut style.sides.bottom, "Bottom");
+                ui.checkbox(&mut style.sides.left, "Left");
+            });
+            ui.weak(preview_text(&style));
+            if ui.small_button("Reset to Default").clicked() {
+                settings.type_styles.remove(kind);
+                settings.type_colors.remove(kind);
+                reset = true;
+            }
+        });
+    if !reset && style != original {
+        settings.type_styles.insert(kind.to_string(), style);
+    }
+}
+
+/// "4% at zoom 0.30": the tint a type gets at the first zoomed-out level.
+pub fn preview_text(style: &crate::analysis::cst_style::CstTypeStyle) -> String {
+    let alpha = crate::nodes::lod::LodLevel::L2.cst_base_alpha() * style.fill_alpha;
+    format!("{:.0}% at zoom 0.30", alpha * 100.0)
 }
 
 /// Grammar kinds that only group other nodes. "Semantic Nodes Only" lists
@@ -616,8 +692,15 @@ pub fn draw_cst_panel(ui: &mut egui::Ui, state: &mut AppState) {
     }
 }
 
+/// Selected Edge CST Nodes only marks the ends of the edges of at most this
+/// many selected files.
+pub const MAX_EDGE_NODE_SELECTION: usize = 3;
+
 /// Fills [`CstPanelState::edge_nodes`] from the selection's visible edges.
 fn collect_edge_nodes(state: &mut AppState) {
+    if state.selection.count() > MAX_EDGE_NODE_SELECTION {
+        return;
+    }
     let mut ends: Vec<(u64, usize)> = Vec::new();
     for edge in state.edge_store.all_edges() {
         if !edge.is_selected(&state.selection)

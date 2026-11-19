@@ -5,7 +5,7 @@ use crate::analysis::dependencies::LineSpan;
 use crate::canvas::viewport::Viewport;
 use crate::edges::edge_store::{EdgeChange, EdgeKind, EdgeStore, NameSpan};
 use crate::edges::geometry::{self, bezier_points, cubic};
-use crate::edges::ports::{side_facing, PortSide};
+use crate::edges::ports::{PortSide, SOURCE_SIDE, TARGET_SIDE};
 use crate::edges::style::{self, EdgeStyle, EdgeStyleConfig, OpacityMode};
 use crate::nodes::file_node::{FileNode, HEADER_HEIGHT};
 use crate::nodes::lod::LodLevel;
@@ -42,6 +42,14 @@ const UNCONNECTED_RATIO: f32 = 0.57;
 /// Sampling of a curve into pieces: stroke pieces of a gradient edge.
 const CURVE_SAMPLES: usize = 64;
 
+/// Which side of the file nodes an edge is drawn on: the web below them,
+/// the selection and highlighted backwards edges above.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EdgeLayer {
+    Below,
+    Above,
+}
+
 pub fn draw_edges(
     painter: &egui::Painter,
     edges: &EdgeStore,
@@ -54,21 +62,11 @@ pub fn draw_edges(
     symbol_rect: &mut dyn FnMut(&FileNode, NameSpan) -> Option<Rect>,
     workspace_root: Option<&std::path::Path>,
     collapse: &CollapseRouting,
+    layer: EdgeLayer,
 ) {
     let clip = painter.clip_rect();
-    let file_rects: Vec<_> = nodes
-        .file_nodes
-        .values()
-        .filter(|node| !nodes.is_file_hidden(node.id))
-        .map(|node| {
-            (
-                node.id,
-                viewport.world_to_screen_rect(node.world_rect(node_width, font_size)),
-            )
-        })
-        .filter(|(_, rect)| clip.intersects(*rect))
-        .collect();
     let zoom = viewport.zoom;
+    let mut arrows: Vec<ArrowJob> = Vec::new();
     let lod = LodLevel::from_zoom(zoom);
     let min_len_px = config.hide_short_pct * MIN_VISIBLE_LEN_PX;
     let nothing_selected = selection.count() == 0 && selection.symbols().is_empty();
@@ -119,22 +117,22 @@ pub fn draw_edges(
             let src_rect = src_proxy.map_or_else(|| src.world_rect(node_width, font_size), |p| p.1);
             let tgt_rect = tgt_proxy.map_or_else(|| tgt.world_rect(node_width, font_size), |p| p.1);
             let (src_point, src_dir) = match src_proxy {
-                Some(_) => box_anchor(src_rect, tgt_rect.center().x),
+                Some(_) => box_anchor(src_rect, SOURCE_SIDE),
                 None => anchor(
                     src,
                     src_rect,
                     edge.source_span,
-                    tgt_rect.center().x,
+                    SOURCE_SIDE,
                     font_size,
                 ),
             };
             let (tgt_point, tgt_dir) = match tgt_proxy {
-                Some(_) => box_anchor(tgt_rect, src_rect.center().x),
+                Some(_) => box_anchor(tgt_rect, TARGET_SIDE),
                 None => anchor(
                     tgt,
                     tgt_rect,
                     edge.target_span,
-                    src_rect.center().x,
+                    TARGET_SIDE,
                     font_size,
                 ),
             };
@@ -143,13 +141,13 @@ pub fn draw_edges(
 
             let src_screen = edge
                 .source_name_span
-                .filter(|_| src_glyphs && !src.collapsed)
+                .filter(|_| src_glyphs)
                 .and_then(|name| symbol_rect(src, name))
                 .map(|rect| glyph_anchor(rect, src_dir))
                 .unwrap_or_else(|| viewport.world_to_screen(src_point));
             let tgt_screen = edge
                 .name_span
-                .filter(|_| tgt_glyphs && !tgt.collapsed)
+                .filter(|_| tgt_glyphs)
                 .and_then(|name| symbol_rect(tgt, name))
                 .map(|rect| glyph_anchor(rect, tgt_dir))
                 .unwrap_or_else(|| viewport.world_to_screen(tgt_point));
@@ -170,14 +168,23 @@ pub fn draw_edges(
                 && !(is_connected
                     || changes_highlight
                     || (config.highlight_backwards && world_backwards)
-                    || distance == 0
-                    || distance <= config.folder_depth)
+                    || geometry::stays_with_all_off(
+                        distance,
+                        config.folder_depth,
+                        config.show_external,
+                        config.external_nesting_max,
+                    ))
             {
                 continue;
             }
             let selected_edge = (config.highlight_selected && is_connected && !nothing_selected)
                 || changes_highlight;
             let backwards = config.highlight_reverse_layout && world_backwards;
+            // Selected and highlighted backwards edges are drawn above the
+            // nodes, the rest of the web below them.
+            if (selected_edge || backwards) != (layer == EdgeLayer::Above) {
+                continue;
+            }
 
             let mut factor = geometry::depth_opacity(config.opacity_mode, distance);
             if selected_edge {
@@ -271,21 +278,7 @@ pub fn draw_edges(
                 .flatten();
             let arrow_len = geometry::arrow_length(zoom, config.min_size_pct, config.scale_arrow_heads);
 
-            // Keep glyph endpoints above their own files, but never paint
-            // strokes, markers or arrow heads over an unrelated file.
-            let bounds = path
-                .iter()
-                .fold(edge_rect, |rect, point| rect.union(Rect::from_min_max(*point, *point)))
-                .expand(arrow_len.max(width * 1.6) + 2.0)
-                .intersect(clip);
-            let regions = uncovered_regions(
-                bounds,
-                file_rects
-                    .iter()
-                    .filter(|(id, _)| *id != edge.source_node && *id != edge.target_node)
-                    .map(|(_, rect)| *rect),
-            );
-            let paint = |painter: &egui::Painter| {
+            {
                 match gap_visible {
                     Some(visible) => draw_gap_gradient(painter, &path, width, base_color, alpha, visible),
                     None if config.style == EdgeStyle::Bezier => {
@@ -302,57 +295,48 @@ pub fn draw_edges(
                 }
 
                 if config.show_connection_markers {
-                    let r = width * 1.6;
-                    painter.circle_filled(src_screen, r, color);
-                    painter.circle_filled(tgt_screen, r, color);
+                    // `#9ABAF2` at alpha .5, a line tall.
+                    let marker = style::MARKER_COLOR.gamma_multiply(0.5);
+                    let line_h = crate::nodes::file_node::line_height(font_size);
+                    let radius = |proxy: bool| geometry::marker_radius(line_h, proxy, zoom);
+                    painter.circle_filled(src_screen, radius(src_proxy.is_some()), marker);
+                    painter.circle_filled(tgt_screen, radius(tgt_proxy.is_some()), marker);
                 }
 
                 // No arrow on backwards edges, nor when the gap leaves no
-                // stroke at the tips.
+                // stroke at the tips. Arrows share a 16 px grid: the highest
+                // priority wins a cell (decided after the loop).
                 let hidden = world_backwards || gap_visible.is_some_and(|v| v <= 0.0);
                 if arrow_head_visible(config, is_connected, nothing_selected) && !hidden {
-                    let arrives_from = path[path.len().saturating_sub(2)];
-                    draw_arrow_head(painter, arrives_from, tgt_screen, color, arrow_len);
+                    arrows.push(ArrowJob {
+                        from: path[path.len().saturating_sub(2)],
+                        tip: tgt_screen,
+                        color,
+                        length: arrow_len,
+                        priority: geometry::arrow_priority(
+                            selected_edge,
+                            backwards,
+                            selected_edge && !selection.symbols().is_empty(),
+                        ),
+                    });
                 }
-            };
-            for region in regions {
-                paint(&painter.with_clip_rect(region));
             }
         }
     }
+    let tips: Vec<(Pos2, u8)> = arrows.iter().map(|a| (a.tip, a.priority)).collect();
+    for index in geometry::arrows_to_draw(&tips) {
+        let a = &arrows[index];
+        draw_arrow_head(painter, a.from, a.tip, a.color, a.length);
+    }
 }
 
-/// Disjoint clip rectangles covering the edge bounds outside file blocks.
-/// Rectangular clipping applies equally to curves, gradients and decorations.
-fn uncovered_regions(bounds: Rect, blockers: impl Iterator<Item = Rect>) -> Vec<Rect> {
-    let mut regions = vec![bounds];
-    for blocker in blockers {
-        regions = regions
-            .into_iter()
-            .flat_map(|region| {
-                let cut = region.intersect(blocker);
-                if !cut.is_positive() {
-                    return vec![region];
-                }
-                [
-                    Rect::from_min_max(region.min, Pos2::new(region.max.x, cut.min.y)),
-                    Rect::from_min_max(Pos2::new(region.min.x, cut.max.y), region.max),
-                    Rect::from_min_max(
-                        Pos2::new(region.min.x, cut.min.y),
-                        Pos2::new(cut.min.x, cut.max.y),
-                    ),
-                    Rect::from_min_max(
-                        Pos2::new(cut.max.x, cut.min.y),
-                        Pos2::new(region.max.x, cut.max.y),
-                    ),
-                ]
-                .into_iter()
-                .filter(Rect::is_positive)
-                .collect()
-            })
-            .collect();
-    }
-    regions
+/// An arrow head waiting for the collision pass.
+struct ArrowJob {
+    from: Pos2,
+    tip: Pos2,
+    color: Color32,
+    length: f32,
+    priority: u8,
 }
 
 /// Touch the side of the actual name facing the other endpoint, not the file
@@ -365,24 +349,22 @@ fn glyph_anchor(rect: Rect, outward: f32) -> Pos2 {
     }
 }
 
-/// Where an edge meets `node`: on the side facing `toward_x`, at the first
-/// line of `span` when the node draws it (where its port sits), else at the
-/// header. Returns the
+/// Where an edge meets `node`: on `side`, at the first line of `span` when
+/// the node draws it (where its port sits), else at the top. Returns the
 /// point and the outward direction of that side (+1 right, -1 left).
 fn anchor(
     node: &FileNode,
     rect: Rect,
     span: Option<LineSpan>,
-    toward_x: f32,
+    side: PortSide,
     font_size: f32,
 ) -> (Pos2, f32) {
-    let dir = match side_facing(rect.left(), rect.right(), toward_x) {
+    let dir = match side {
         PortSide::Right => 1.0,
         PortSide::Left => -1.0,
     };
     let x = if dir > 0.0 { rect.right() } else { rect.left() };
     let y = span
-        .filter(|_| !node.collapsed)
         .and_then(|s| node.line_anchor_y(s.start, font_size))
         .unwrap_or(rect.top() + HEADER_HEIGHT * 0.5);
     (Pos2::new(x, y), dir)
@@ -397,9 +379,9 @@ pub(crate) fn symbol_dimmed(alpha: u8, connected: bool, dim: Option<f32>) -> u8 
     }
 }
 
-/// Middle of the side of a collapsed folder's box facing `toward_x`.
-fn box_anchor(rect: Rect, toward_x: f32) -> (Pos2, f32) {
-    match side_facing(rect.left(), rect.right(), toward_x) {
+/// Middle of `side` of a collapsed folder's box.
+fn box_anchor(rect: Rect, side: PortSide) -> (Pos2, f32) {
+    match side {
         PortSide::Right => (rect.right_center(), 1.0),
         PortSide::Left => (rect.left_center(), -1.0),
     }
@@ -478,119 +460,18 @@ mod tests {
     }
 
     #[test]
-    fn unrelated_file_occludes_every_edge_style_but_not_its_endpoints() {
-        let mut nodes = NodeStore::default();
-        let source = nodes.add_file("a.rs".into(), "a".into(), Pos2::ZERO);
-        let target = nodes.add_file("b.rs".into(), "b".into(), Pos2::new(400.0, 0.0));
-        nodes.add_file("hidden/c.rs".into(), "c".into(), Pos2::new(200.0, 0.0));
-        let folder = nodes.add_folder("hidden".into(), 1);
-        let mut edges = EdgeStore::default();
-        let name = NameSpan {
-            line: 0,
-            start_byte: 0,
-            end_byte: 1,
-        };
-        edges.add_full(
-            source,
-            target,
-            Some("fn".into()),
-            None,
-            None,
-            None,
-            Some(name),
-            Some(name),
-            EdgeKind::Direct,
-        );
-        let clip = Rect::from_min_size(Pos2::ZERO, Vec2::splat(600.0));
-        let blocked = Pos2::new(250.0, HEADER_HEIGHT * 0.5);
-        for style in [
-            EdgeStyle::Bezier,
-            EdgeStyle::Step,
-            EdgeStyle::Line,
-            EdgeStyle::Pcb,
-        ] {
-            for use_gradient in [false, true] {
-                for hidden in [false, true] {
-                    nodes.folder_nodes.get_mut(&folder).unwrap().collapsed = hidden;
-                    let mut selection = Selection::default();
-                    if !use_gradient {
-                        selection.select(source);
-                    }
-                    let ctx = egui::Context::default();
-                    let output = ctx.run(egui::RawInput::default(), |ctx| {
-                        let painter = ctx
-                            .layer_painter(egui::LayerId::background())
-                            .with_clip_rect(clip);
-                        draw_edges(
-                            &painter,
-                            &edges,
-                            &nodes,
-                            &Viewport::default(),
-                            &EdgeStyleConfig {
-                                style,
-                                use_gradient,
-                                show_ports: false,
-                                ..Default::default()
-                            },
-                            &selection,
-                            100.0,
-                            10.0,
-                            &mut |node, _| {
-                                Some(Rect::from_min_size(
-                                    node.position + Vec2::new(30.0, 10.0),
-                                    Vec2::new(10.0, 8.0),
-                                ))
-                            },
-                            None,
-                            &CollapseRouting::default(),
-                        );
-                    });
-                    assert!(!output.shapes.is_empty());
-                    assert_eq!(
-                        output.shapes.iter().any(|s| s.clip_rect.contains(blocked)),
-                        hidden,
-                        "{style:?}, gradient={use_gradient}, hidden={hidden}",
-                    );
-                    for endpoint in [Pos2::new(40.0, 14.0), Pos2::new(430.0, 14.0)] {
-                        assert!(output.shapes.iter().any(|s| s.clip_rect.contains(endpoint)));
-                    }
-                }
-            }
-        }
-    }
-
-    #[test]
-    fn overlapping_blockers_leave_disjoint_regions_and_preserve_uncovered_area() {
-        let bounds = Rect::from_min_size(Pos2::ZERO, Vec2::splat(100.0));
-        let blockers = [
-            Rect::from_min_max(Pos2::new(20.0, 20.0), Pos2::new(60.0, 60.0)),
-            Rect::from_min_max(Pos2::new(40.0, 40.0), Pos2::new(80.0, 80.0)),
-        ];
-        let regions = uncovered_regions(bounds, blockers.into_iter());
-        assert_eq!(regions.iter().map(Rect::area).sum::<f32>(), 7200.0);
-        for (index, region) in regions.iter().enumerate() {
-            assert!(bounds.contains_rect(*region));
-            assert!(blockers.iter().all(|b| !b.intersect(*region).is_positive()));
-            assert!(regions[index + 1..]
-                .iter()
-                .all(|other| !other.intersect(*region).is_positive()));
-        }
-        assert!(uncovered_regions(bounds, [bounds].into_iter()).is_empty());
-    }
-
-    #[test]
-    fn anchor_sits_on_the_side_facing_the_other_node_at_the_span_line() {
+    fn anchor_sits_on_the_given_side_at_the_span_line() {
         let node = file("a\nb\nc\n", 0.0);
         let rect = node.world_rect(100.0, 10.0);
         let span = Some(LineSpan { start: 2, end: 2 });
         let line_y = node.line_anchor_y(2, 10.0).unwrap();
 
         assert_eq!(
-            anchor(&node, rect, span, 500.0, 10.0),
+            anchor(&node, rect, span, PortSide::Right, 10.0),
             (Pos2::new(100.0, line_y), 1.0)
         );
         assert_eq!(
-            anchor(&node, rect, span, -500.0, 10.0),
+            anchor(&node, rect, span, PortSide::Left, 10.0),
             (Pos2::new(0.0, line_y), -1.0)
         );
     }
@@ -601,22 +482,25 @@ mod tests {
         let mut node = file("a\nb\n", 0.0);
         let rect = node.world_rect(100.0, 10.0);
         assert_eq!(
-            anchor(&node, rect, None, 500.0, 10.0).0.y,
+            anchor(&node, rect, None, PortSide::Right, 10.0).0.y,
             header_y,
             "no span"
         );
         let past_end = Some(LineSpan { start: 7, end: 7 });
         assert_eq!(
-            anchor(&node, rect, past_end, 500.0, 10.0).0.y,
+            anchor(&node, rect, past_end, PortSide::Right, 10.0).0.y,
             header_y,
             "line not drawn"
         );
+        // A collapsed long file showing no lines: every line attaches to the
+        // marker row, the first row of the code area.
         node.collapsed = true;
+        node.shown_lines = 0;
         let first = Some(LineSpan { start: 0, end: 0 });
         assert_eq!(
-            anchor(&node, rect, first, 500.0, 10.0).0.y,
-            header_y,
-            "collapsed"
+            anchor(&node, rect, first, PortSide::Right, 10.0).0.y,
+            node.line_anchor_y(0, 10.0).unwrap(),
+            "the marker row"
         );
     }
 

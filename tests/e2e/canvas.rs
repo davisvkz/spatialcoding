@@ -563,8 +563,8 @@ fn file_nodes_show_and_navigate_to_code_after_line_fifty() {
         })
         .unwrap();
     assert!(
-        (target - name.right_center()).length() < 1.5,
-        "edge reaches a late definition from the right"
+        (target - name.left_center()).length() < 1.5,
+        "edge reaches a late definition on its left border side, as the reference does"
     );
 }
 
@@ -626,15 +626,20 @@ fn minified_edges_touch_identifier_bars_and_collapsed_nodes_use_header_fallbacks
         .get_file_mut(target)
         .unwrap()
         .collapsed = true;
+    // A collapsed long file showing no lines: the definition's line is cut
+    // off, so its edge ends on the "Long file" marker row, at the left border.
+    app.app_state_mut().node_store.get_file_mut(target).unwrap().shown_lines = 0;
     app.run();
     let s = app.app_state();
     let node = s.node_store.get_file(target).unwrap();
-    let fallback = s
-        .viewport
-        .world_to_screen(node.position + egui::vec2(0.0, HEADER_HEIGHT * 0.5));
+    let fallback = s.viewport.world_to_screen(egui::pos2(
+        node.position.x,
+        node.line_anchor_y(name.line, s.settings.font_size).unwrap(),
+    ));
     assert!(
         (end(&app) - fallback).length() < 0.01,
-        "collapsed definition uses its header"
+        "a cut-off definition attaches to the marker row: {:?} vs {fallback:?}",
+        end(&app)
     );
 }
 
@@ -798,4 +803,167 @@ fn an_unreferenced_definition_is_selectable_and_edge_rebuilds_keep_symbol_focus(
         .edge_store
         .focused_spans(&app.app_state().selection, &app.app_state().edge_style);
     assert_eq!(spans[&defs].len(), 1, "the declaration stays marked");
+}
+
+fn first_index(app: &App, pred: impl Fn(&egui::Shape) -> bool) -> Option<usize> {
+    frame_shapes(app).iter().position(pred)
+}
+
+#[test]
+fn the_web_is_drawn_below_the_nodes_and_the_selection_above_them() {
+    let fx = fixture();
+    let mut app = app_with(&fx);
+    let main = app.open(&fx.path("src/main.rs"));
+    let util = app.open(&fx.path("src/util.rs"));
+    {
+        let s = app.app_state_mut();
+        s.node_store.get_file_mut(main).unwrap().position = Pos2::new(0.0, 0.0);
+        s.node_store.get_file_mut(util).unwrap().position = Pos2::new(900.0, 0.0);
+        s.viewport.zoom = 0.6;
+        s.viewport.target_zoom = 0.6;
+        s.right_panel = None;
+    }
+    app.show_at(Pos2::new(800.0, 60.0), Pos2::new(700.0, 300.0));
+    let is_edge = |s: &egui::Shape| matches!(s, egui::Shape::CubicBezier(_));
+    let is_code = |s: &egui::Shape| matches!(s, egui::Shape::Text(t) if t.galley.job.text.contains("hello"));
+
+    let (edge, code) = (first_index(&app, is_edge).unwrap(), first_index(&app, is_code).unwrap());
+    assert!(edge < code, "the idle web ({edge}) lies below the code ({code})");
+
+    app.app_state_mut().selection.select(main);
+    app.run();
+    let shapes = frame_shapes(&app);
+    let last_edge = shapes.iter().rposition(is_edge).unwrap();
+    let last_code = shapes.iter().rposition(is_code).unwrap();
+    assert!(last_edge > last_code, "the selection's edge ({last_edge}) is over the code ({last_code})");
+}
+
+#[test]
+fn edges_leave_the_importer_on_the_right_border_and_enter_the_exported_file_on_the_left() {
+    let fx = fixture();
+    let mut app = app_with(&fx);
+    let main = app.open(&fx.path("src/main.rs"));
+    let util = app.open(&fx.path("src/util.rs"));
+    {
+        let s = app.app_state_mut();
+        // The dependency lies to the LEFT of its importer: a backwards edge.
+        s.node_store.get_file_mut(util).unwrap().position = Pos2::new(0.0, 0.0);
+        s.node_store.get_file_mut(main).unwrap().position = Pos2::new(900.0, 0.0);
+        s.viewport.zoom = 0.6;
+        s.viewport.target_zoom = 0.6;
+        s.right_panel = None;
+    }
+    app.show_at(Pos2::new(800.0, 60.0), Pos2::new(700.0, 300.0));
+    let s = app.app_state();
+    let rect = |id| s.viewport.world_to_screen_rect(s.node_store.get_file(id).unwrap().world_rect(s.settings.node_width, s.settings.font_size));
+    let (importer, exported) = (rect(main), rect(util));
+    let ends: Vec<(Pos2, Pos2)> = frame_shapes(&app)
+        .iter()
+        .filter_map(|shape| match shape {
+            egui::Shape::CubicBezier(b) => Some((b.points[0], b.points[3])),
+            _ => None,
+        })
+        .collect();
+    assert!(!ends.is_empty());
+    for (start, end) in ends {
+        assert!((start.x - importer.right()).abs() < 2.0, "starts on the importer's right border: {start:?} vs {importer:?}");
+        assert!((end.x - exported.left()).abs() < 2.0, "ends on the exported file's left border: {end:?} vs {exported:?}");
+    }
+}
+
+#[test]
+fn a_long_file_shows_its_first_lines_and_a_marker_row_that_expands_it() {
+    let fx = fixture();
+    let body: String = (1..=40).map(|i| format!("let line{i} = {i};\n")).collect();
+    std::fs::write(fx.path("src/long.rs"), body).unwrap();
+    let mut app = app_with(&fx);
+    app.app_state_mut().settings.files.long_max_lines = 10;
+    let id = app.open(&fx.path("src/long.rs"));
+    {
+        let s = app.app_state_mut();
+        s.viewport.zoom = 1.0;
+        s.viewport.target_zoom = 1.0;
+        s.right_panel = None;
+        s.left_panel = None;
+    }
+    let center = app.node_center(id);
+    app.show_at(center, CANVAS_SPOT);
+
+    let node = app.app_state().node_store.get_file(id).unwrap();
+    assert_eq!((node.code_lines(), node.visible_lines()), (10, 11));
+    let texts: Vec<String> = frame_shapes(&app)
+        .iter()
+        .filter_map(|s| match s {
+            egui::Shape::Text(t) => Some(t.galley.job.text.clone()),
+            _ => None,
+        })
+        .collect();
+    assert!(texts.iter().any(|t| t.contains("line10 ")), "line 10 is drawn");
+    assert!(!texts.iter().any(|t| t.contains("line11 ")), "line 11 is cut off");
+    let marker = frame_shapes(&app)
+        .iter()
+        .find_map(|s| match s {
+            egui::Shape::Text(t) if t.galley.job.text.starts_with("Long file") => Some(t.visual_bounding_rect().center()),
+            _ => None,
+        })
+        .expect("the Long file row is painted");
+    assert!(texts.iter().any(|t| t.contains("30 more lines")));
+
+    click_at(&mut app, marker, Modifiers::NONE);
+    app.run();
+    let node = app.app_state().node_store.get_file(id).unwrap();
+    assert!(!node.collapsed && node.visible_lines() == 40, "clicking the row shows the whole file");
+}
+
+#[test]
+fn the_file_name_sticks_to_the_top_when_the_node_top_scrolls_off_and_the_hovered_line_gets_a_band() {
+    let fx = fixture();
+    let body: String = (1..=30).map(|i| format!("let line{i} = {i};\n")).collect();
+    std::fs::write(fx.path("src/long.rs"), body).unwrap();
+    let mut app = app_with(&fx);
+    let id = app.open(&fx.path("src/long.rs"));
+    {
+        let s = app.app_state_mut();
+        s.viewport.zoom = 1.0;
+        s.viewport.target_zoom = 1.0;
+        s.right_panel = None;
+        s.left_panel = None;
+    }
+    let center = app.node_center(id);
+    app.show_at(center, CANVAS_SPOT);
+    let canvas = app.app_state().canvas_rect;
+    let name_texts = |app: &App| -> Vec<egui::Rect> {
+        frame_shapes(app)
+            .iter()
+            .filter_map(|s| match s {
+                egui::Shape::Text(t) if t.galley.job.text == "long.rs" => Some(t.visual_bounding_rect()),
+                _ => None,
+            })
+            .collect()
+    };
+    let node_top = |app: &App| {
+        let s = app.app_state();
+        s.viewport.world_to_screen(s.node_store.get_file(id).unwrap().position).y
+    };
+    assert!(node_top(&app) > canvas.top() + 20.0, "the node top is on screen");
+
+    // Scroll the node up until its top is above the canvas.
+    app.app_state_mut().viewport.offset.y -= 300.0;
+    app.run();
+    assert!(node_top(&app) < canvas.top(), "the node top scrolled off");
+    let pills = name_texts(&app);
+    assert!(
+        pills.iter().any(|r| r.top() >= canvas.top() && r.bottom() < canvas.top() + 40.0),
+        "the name sits at the top of the canvas as a pill: {pills:?} in {canvas:?}"
+    );
+
+    // The pointer over a code line paints a faint white band on it.
+    let at = Pos2::new(canvas.center().x, canvas.center().y - 60.0);
+    app.input_mut().events.push(egui::Event::PointerMoved(at));
+    app.step();
+    let bands = frame_shapes(&app)
+        .iter()
+        .filter(|s| matches!(s, egui::Shape::Rect(r) if r.fill == egui::Color32::from_white_alpha(10)))
+        .count();
+    assert_eq!(bands, 1, "one band under the pointer; hover {:?}, alphas {:?}", app.app_state().hover_screen, frame_shapes(&app).iter().filter_map(|s| match s { egui::Shape::Rect(r) if r.fill.a() < 40 && r.fill.a() > 0 => Some(r.fill), _ => None }).collect::<Vec<_>>());
 }
