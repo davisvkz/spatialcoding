@@ -29,11 +29,11 @@ Planos: repo público sem login; repo privado e pastas locais exigem login + **P
 - [arquitetura.md](arquitetura.md): stack, pipeline, workers, servidor local
 - [ui-e-paineis.md](ui-e-paineis.md): tela e cada painel com seus controles
 - [funcionalidades.md](funcionalidades.md): como cada recurso funciona
-- [renderizacao-canvas.md](renderizacao-canvas.md): como edges, LSP e CST são desenhados (zoom/LOD, cores, geometria)
+- [renderizacao/](renderizacao/README.md): como arquivos, edges, LSP e CST são desenhados (zoom/LOD, cores, geometria, LSP ao vivo)
 - [atalhos-e-comandos.md](atalhos-e-comandos.md): atalhos e IDs de comandos internos
 - [mcp-e-servidor-local.md](mcp-e-servidor-local.md): MCP, Agent Notes, servidor local
 - `img/`: screenshots (home, repo redux aberto, atalhos, paleta, painéis)
 
 ## Limites desta análise
-Não foram exercitados: login/Pro, pasta local (precisa do servidor), PRs/commits (login para privados), MCP conectado,
-LSP ao vivo. O que está descrito desses itens vem dos docs oficiais, do bundle e do pacote npm, não de uso direto.
+Não foram exercitados: login/Pro, pasta local, PRs/commits (login para privados), MCP conectado a um agente.
+O LSP foi observado ao vivo (TypeScript, redux); detalhes e lacunas em renderizacao/limites-e-metodo.md.
