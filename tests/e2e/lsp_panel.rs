@@ -5,6 +5,7 @@ use std::time::{Duration, Instant};
 
 use egui::{Modifiers, Pos2};
 use egui_kittest::kittest::Queryable;
+use spatialcoding::analysis::lsp::install::{Download, Downloader, Installer, Platform, Probe};
 use spatialcoding::analysis::lsp::resolve_command;
 use spatialcoding::nodes::file_node::{line_height, CODE_PADDING, HEADER_HEIGHT};
 use spatialcoding::state::RightPanel;
@@ -433,6 +434,141 @@ fn language_servers_dialog_lists_servers_and_file_counts() {
     app.run();
     app.get_by_label("Canvas files");
     app.get_by_label("1");
+}
+
+/// A registry with one `pyright` package, for the Install button.
+struct FakeRegistry(std::collections::HashMap<String, Vec<u8>>);
+
+impl Downloader for FakeRegistry {
+    fn get(&self, url: &str) -> Result<Download, String> {
+        let body = self.0.get(url).ok_or_else(|| format!("{url}: 404"))?.clone();
+        Ok(Download { len: Some(body.len() as u64), reader: Box::new(std::io::Cursor::new(body)) })
+    }
+}
+
+fn fake_pyright_registry() -> FakeRegistry {
+    use base64::Engine as _;
+    use sha2::Digest as _;
+    use std::io::Write as _;
+    let mut builder = tar::Builder::new(Vec::new());
+    let content = b"//";
+    let mut header = tar::Header::new_gnu();
+    header.set_size(content.len() as u64);
+    header.set_mode(0o644);
+    header.set_cksum();
+    builder.append_data(&mut header, "package/langserver.index.js", &content[..]).unwrap();
+    let mut gz = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
+    gz.write_all(&builder.into_inner().unwrap()).unwrap();
+    let tgz = gz.finish().unwrap();
+    let meta = serde_json::json!({
+        "version": "1.0.0",
+        "dist": {
+            "tarball": "https://registry.npmjs.org/pyright/-/pyright-1.0.0.tgz",
+            "integrity": format!("sha512-{}", base64::engine::general_purpose::STANDARD.encode(sha2::Sha512::digest(&tgz))),
+        },
+    });
+    FakeRegistry(
+        [
+            ("https://registry.npmjs.org/pyright/latest".to_string(), meta.to_string().into_bytes()),
+            ("https://registry.npmjs.org/pyright/-/pyright-1.0.0.tgz".to_string(), tgz),
+        ]
+        .into(),
+    )
+}
+
+fn linux_with_node(node: Option<(u32, u32, u32)>) -> Platform {
+    Platform { os: "linux".into(), arch: "x86_64".into(), node, has_go: true, musl: false }
+}
+
+fn open_language_servers(app: &mut App, fx: &Fixture) {
+    select_and_open_lsp(app, fx, "src/util.rs");
+    app.get_by_label("LSP menu").click();
+    app.run();
+    app.get_by_label("Language servers").click();
+    app.run();
+}
+
+#[test]
+fn language_servers_dialog_installs_a_missing_server() {
+    let fx = fixture();
+    let mut app = app_with_fake_lsp(&fx);
+    let dir = tempfile::tempdir().unwrap();
+    app.app_state_mut().lsp.installer = Installer::with(
+        dir.path().to_path_buf(),
+        Arc::new(fake_pyright_registry()),
+        Some(linux_with_node(Some((24, 0, 0)))),
+        Probe { env: |_| None, exists: |_| false },
+    );
+    open_language_servers(&mut app, &fx);
+    assert!(app.get_all_by_label("Not installed").count() >= 4);
+    app.get_by_label("Install Python").click();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while app.query_by_label("Installed (SpatialCoding)").is_none() {
+        assert!(Instant::now() < deadline, "the install did not finish");
+        app.step();
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert!(dir.path().join("python/node_modules/pyright/langserver.index.js").is_file());
+    assert!(app.query_by_label("Install Python").is_none());
+    assert!(app.app_state().toasts.iter().any(|t| t.text == "Python language server installed"));
+    // Remove deletes the managed copy and the row offers Install again.
+    app.get_by_label("Remove").click();
+    app.run();
+    assert!(!dir.path().join("python").exists());
+    app.get_by_label("Install Python");
+}
+
+#[test]
+fn a_failed_install_shows_why_and_offers_retry() {
+    let fx = fixture();
+    let mut app = app_with_fake_lsp(&fx);
+    let dir = tempfile::tempdir().unwrap();
+    app.app_state_mut().lsp.installer = Installer::with(
+        dir.path().to_path_buf(),
+        Arc::new(FakeRegistry(Default::default())),
+        Some(linux_with_node(Some((24, 0, 0)))),
+        Probe { env: |_| None, exists: |_| false },
+    );
+    open_language_servers(&mut app, &fx);
+    app.get_by_label("Install Python").click();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while app.query_by_label("Retry Python").is_none() {
+        assert!(Instant::now() < deadline, "the install did not fail");
+        app.step();
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    app.get_by_label("Failed");
+    assert!(app.app_state().toasts.iter().any(|t| t.text.contains("Could not install the Python language server")));
+    assert!(!dir.path().join("python").exists());
+}
+
+#[test]
+fn install_is_disabled_without_node_and_servers_on_path_show_installed() {
+    let fx = fixture();
+    let mut app = app_with_fake_lsp(&fx);
+    let dir = tempfile::tempdir().unwrap();
+    app.app_state_mut().lsp.installer = Installer::with(
+        dir.path().to_path_buf(),
+        Arc::new(FakeRegistry(Default::default())),
+        Some(linux_with_node(None)),
+        Probe { env: |_| None, exists: |program| program == "gopls" },
+    );
+    open_language_servers(&mut app, &fx);
+    assert!(app.get_by_label("Install Python").is_disabled());
+    assert!(app.get_by_label("Install TypeScript").is_disabled());
+    assert!(!app.get_by_label("Install Rust").is_disabled());
+    app.get_by_label("Installed (PATH)");
+    assert!(app.query_by_label("Install Go").is_none());
+}
+
+#[test]
+fn the_palette_opens_the_language_servers_dialog() {
+    let fx = fixture();
+    let mut app = app_with_fake_lsp(&fx);
+    assert!(!app.app_state().lsp.show_servers);
+    spatialcoding::commands::run(app.app_state_mut(), "lsp:openLanguageServers", &serde_json::Value::Null).unwrap();
+    app.run();
+    app.get_by_label("Language Servers");
 }
 
 #[test]

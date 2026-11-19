@@ -13,7 +13,8 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use crate::analysis::lsp::manager::{LspManager, LspRequest, LspResponse, RequestId, ServerStatus};
-use crate::analysis::lsp::{server_for, LspSymbol, ServerId};
+use crate::analysis::lsp::install::InstallState;
+use crate::analysis::lsp::{server_for, Availability, LspSymbol, ServerId};
 use crate::state::AppState;
 use crate::ui::icons;
 use crate::workspace;
@@ -76,9 +77,19 @@ pub struct LspPanelState {
     pub servers_count_canvas: bool,
     /// Language Servers dialog: files per language, most first.
     pub language_counts: Vec<(String, usize)>,
+    /// Downloads of language servers started from the dialog (TASK-56).
+    pub installer: crate::analysis::lsp::install::Installer,
 }
 
 impl LspPanelState {
+    /// Forgets a symbols answer that was an error (a server that was missing
+    /// then), so the next sync asks again.
+    pub fn retry_failed_symbols(&mut self) {
+        if self.symbols.as_ref().is_some_and(|s| matches!(s.fetch, Fetch::Done(Err(_)))) {
+            self.symbols = None;
+        }
+    }
+
     /// The symbols of the last synced node, if they arrived.
     pub fn symbols(&self) -> Option<&Fetch<Vec<LspSymbol>>> {
         self.symbols.as_ref().map(|s| &s.fetch)
@@ -616,6 +627,27 @@ pub fn draw_advanced_card(ctx: &egui::Context, state: &mut AppState) {
         });
 }
 
+/// The Install / Retry button of a server's row; disabled, with the reason
+/// as its tooltip, when the machine cannot install it. True when clicked.
+fn install_button(ui: &mut egui::Ui, state: &mut AppState, server: ServerId, label: &str) -> bool {
+    let blocker = state.lsp.installer.blocker(server);
+    let enabled = blocker.is_none();
+    let response = ui.add_enabled(enabled, egui::Button::new(label).small());
+    let response = match &blocker {
+        Some(why) => response.on_disabled_hover_text(why),
+        None => response.on_hover_text(format!(
+            "Download the {} language server into {}",
+            server.name(),
+            state.lsp.installer.dir().display()
+        )),
+    };
+    // One accessible name per row, so tests and screen readers can tell
+    // the buttons apart.
+    let name = format!("{label} {}", server.name());
+    response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, enabled, name.clone()));
+    response.clicked()
+}
+
 /// The "Language Servers" dialog of the LSP kebab: file counts by
 /// language, each server's command and status.
 pub fn draw_language_servers(ctx: &egui::Context, state: &mut AppState) {
@@ -627,7 +659,7 @@ pub fn draw_language_servers(ctx: &egui::Context, state: &mut AppState) {
         .collapsible(false)
         .resizable(false)
         .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
-        .default_width(460.0)
+        .default_width(600.0)
         .open(&mut open)
         .show(ctx, |ui| {
             let canvas = state.lsp.servers_count_canvas;
@@ -651,6 +683,7 @@ pub fn draw_language_servers(ctx: &egui::Context, state: &mut AppState) {
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     if icons::tool_icon_button(ui, icons::REFRESH, "Refresh language servers").clicked() {
                         state.folder_files_cache.replace(None);
+                        state.lsp.installer.refresh_platform();
                     }
                     let mut mode = state.lsp.servers_count_canvas;
                     ui.allocate_ui(egui::vec2(170.0, 26.0), |ui| {
@@ -666,12 +699,26 @@ pub fn draw_language_servers(ctx: &egui::Context, state: &mut AppState) {
             });
             ui.separator();
             let root = state.loaded_dir.clone().unwrap_or_default();
-            egui::Grid::new("language_servers").num_columns(3).striped(true).show(ui, |ui| {
+            let ctx = ui.ctx().clone();
+            let mut to_install: Option<ServerId> = None;
+            let mut to_remove: Option<ServerId> = None;
+            egui::Grid::new("language_servers").num_columns(4).striped(true).show(ui, |ui| {
                 for server in ServerId::ALL {
+                    let availability = state.lsp.installer.availability(server);
                     ui.label(egui::RichText::new(server.name()).strong());
                     match server.command() {
-                        Ok(cmd) => ui.monospace(cmd.join(" ")),
-                        Err(err) => ui.colored_label(ui.visuals().weak_text_color(), err),
+                        Ok(cmd) => {
+                            let text = cmd.join(" ");
+                            ui.add(egui::Label::new(egui::RichText::new(&text).monospace()).truncate())
+                                .on_hover_text(text);
+                        }
+                        Err(err) if availability == Availability::Missing => {
+                            ui.colored_label(ui.visuals().weak_text_color(), "not found")
+                                .on_hover_text(err);
+                        }
+                        Err(err) => {
+                            ui.colored_label(ui.visuals().weak_text_color(), err);
+                        }
                     };
                     let status = match state.lsp.manager.status(server, &root) {
                         None => "Not started".to_owned(),
@@ -681,9 +728,66 @@ pub fn draw_language_servers(ctx: &egui::Context, state: &mut AppState) {
                         Some(ServerStatus::Failed(e)) => format!("Failed: {e}"),
                     };
                     ui.label(status);
+                    ui.horizontal(|ui| {
+                        match state.lsp.installer.state(server) {
+                            Some(InstallState::Downloading { received, total }) => {
+                                ui.spinner();
+                                ui.label(match total {
+                                    Some(total) if total > 0 => format!("Downloading {}%", received * 100 / total),
+                                    _ => format!("Downloading {:.1} MB", received as f64 / 1e6),
+                                });
+                            }
+                            Some(InstallState::Extracting) => {
+                                ui.spinner();
+                                ui.label("Extracting…");
+                            }
+                            Some(InstallState::Building) => {
+                                ui.spinner();
+                                ui.label("Building…");
+                            }
+                            Some(InstallState::Failed(error)) => {
+                                ui.colored_label(ERROR_COLOR, "Failed").on_hover_text(error);
+                                if install_button(ui, state, server, "Retry") {
+                                    to_install = Some(server);
+                                }
+                            }
+                            None => match availability {
+                                Availability::Override => {
+                                    ui.label("Custom command");
+                                }
+                                Availability::Path => {
+                                    ui.label("Installed (PATH)");
+                                }
+                                Availability::Managed => {
+                                    ui.label("Installed (SpatialCoding)");
+                                    let remove = ui
+                                        .small_button("Remove")
+                                        .on_hover_text("Delete the copy SpatialCoding downloaded");
+                                    if remove.clicked() {
+                                        to_remove = Some(server);
+                                    }
+                                }
+                                Availability::Missing => {
+                                    ui.label("Not installed");
+                                    if install_button(ui, state, server, "Install") {
+                                        to_install = Some(server);
+                                    }
+                                }
+                            },
+                        }
+                    });
                     ui.end_row();
                 }
             });
+            if let Some(server) = to_install {
+                state.lsp.installer.install(server, Some(ctx));
+            }
+            if let Some(server) = to_remove {
+                match state.lsp.installer.remove(server) {
+                    Ok(()) => state.lsp.manager.restart_servers(),
+                    Err(e) => crate::ui::toast::push(state, format!("Could not remove the {} server: {e}", server.name())),
+                }
+            }
             ui.weak("Override a server's command with its SPATIALCODING_LSP_* variable (see the docs).");
             ui.separator();
             let mut env = false;

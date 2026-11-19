@@ -5,11 +5,13 @@
 //! - [`manager`]: the non-blocking front end the UI uses; one worker thread
 //!   per running server.
 //!
-//! Servers are external programs. [`ServerId::command`] picks the first default
-//! command found on `PATH`, or the one in `SPATIALCODING_LSP_<SERVER>`.
+//! Servers are external programs. [`ServerId::command`] uses the one in
+//! `SPATIALCODING_LSP_<SERVER>`, else the first default command found on
+//! `PATH`, else a copy downloaded by [`install`].
 
 pub mod client;
 pub mod graph;
+pub mod install;
 pub mod manager;
 pub mod project_config;
 pub mod protocol;
@@ -162,17 +164,63 @@ impl ServerId {
     }
 
     /// The command to start this server: the env override, else the first
-    /// default found on `PATH`.
+    /// default found on `PATH`, else the copy [`install`] downloaded.
     pub fn command(self) -> Result<Vec<String>, String> {
-        resolve_command(self, |key| std::env::var(key).ok(), on_path)
+        let dir = install::install_dir();
+        resolve_command_with(self, |key| std::env::var(key).ok(), on_path, |server| {
+            install::managed_command(server, &dir)
+        })
+    }
+
+    /// Where this server would come from, with the lookups injected.
+    pub fn availability_with(
+        self,
+        dir: &Path,
+        env: impl Fn(&str) -> Option<String>,
+        exists: impl Fn(&str) -> bool,
+    ) -> Availability {
+        if env(self.env_var()).is_some() {
+            Availability::Override
+        } else if self.candidates().iter().any(|cmd| exists(cmd[0])) {
+            Availability::Path
+        } else if install::managed_command(self, dir).is_some() {
+            Availability::Managed
+        } else {
+            Availability::Missing
+        }
     }
 }
 
-/// [`ServerId::command`] with the environment and `PATH` lookup injected.
+/// Where a language server's command comes from (see [`ServerId::command`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Availability {
+    /// `SPATIALCODING_LSP_<SERVER>` is set.
+    Override,
+    /// A default command is on `PATH`.
+    Path,
+    /// A copy downloaded into the install directory.
+    Managed,
+    Missing,
+}
+
+/// [`ServerId::command`] without the managed install: the environment and
+/// `PATH` lookup are injected.
 pub fn resolve_command(
     server: ServerId,
     env: impl Fn(&str) -> Option<String>,
     exists: impl Fn(&str) -> bool,
+) -> Result<Vec<String>, String> {
+    resolve_command_with(server, env, exists, |_| None)
+}
+
+/// [`ServerId::command`] with the environment, `PATH` lookup and managed
+/// install injected. `PATH` wins over the managed copy, so a server the user
+/// installed themselves is never shadowed.
+pub fn resolve_command_with(
+    server: ServerId,
+    env: impl Fn(&str) -> Option<String>,
+    exists: impl Fn(&str) -> bool,
+    managed: impl Fn(ServerId) -> Option<Vec<String>>,
 ) -> Result<Vec<String>, String> {
     if let Some(value) = env(server.env_var()) {
         let words: Vec<String> = value.split_whitespace().map(String::from).collect();
@@ -181,20 +229,18 @@ pub fn resolve_command(
         }
         return Ok(words);
     }
-    server
-        .candidates()
-        .iter()
-        .find(|cmd| exists(cmd[0]))
-        .map(|cmd| cmd.iter().map(|s| s.to_string()).collect())
-        .ok_or_else(|| {
-            let names: Vec<&str> = server.candidates().iter().map(|c| c[0]).collect();
-            format!(
-                "No {} language server found on PATH (tried {}). Install one or set {} to its command.",
-                server.name(),
-                names.join(", "),
-                server.env_var()
-            )
-        })
+    if let Some(cmd) = server.candidates().iter().find(|cmd| exists(cmd[0])) {
+        return Ok(cmd.iter().map(|s| s.to_string()).collect());
+    }
+    managed(server).ok_or_else(|| {
+        let names: Vec<&str> = server.candidates().iter().map(|c| c[0]).collect();
+        format!(
+            "No {} language server found on PATH (tried {}). Install it from the LSP tab's \u{22ee} menu \u{203a} Language servers, or set {} to its command.",
+            server.name(),
+            names.join(", "),
+            server.env_var()
+        )
+    })
 }
 
 /// True if `program` is an executable file in a `PATH` directory.
