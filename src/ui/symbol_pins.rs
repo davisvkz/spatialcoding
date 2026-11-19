@@ -34,7 +34,26 @@ pub struct Pin {
     /// Asked without an egui context: nothing wakes the UI when the answer
     /// arrives, so the shell polls while it waits.
     pub poll: bool,
+    /// A transient pin made by resting on a symbol (Query On Hover): it goes
+    /// when the pointer leaves, and a click makes it permanent.
+    pub preview: bool,
+    /// Auto Open Matches already ran for this answer.
+    pub auto_opened: bool,
 }
+
+/// How a new pin relates to the ones already there.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PinMode {
+    /// A plain click: the only pin.
+    Replace,
+    /// Shift+click: one more (or toggled off when already pinned).
+    Add,
+    /// Query On Hover: transient, silent, never replaces a real pin.
+    Preview,
+}
+
+/// How long the pointer rests on a symbol before Query On Hover asks.
+pub const HOVER_SECONDS: f64 = 0.4;
 
 impl Pin {
     pub fn graph(&self) -> Option<&SymbolGraph> {
@@ -57,6 +76,8 @@ pub struct PinSet {
     next_id: u64,
     /// The pin tip was shown already.
     hinted: bool,
+    /// Query On Hover: the token the pointer rests on and since when.
+    hover: Option<(u64, Position, f64)>,
 }
 
 impl PinSet {
@@ -68,12 +89,47 @@ impl PinSet {
         self.pins.is_empty()
     }
 
+    /// The panel explains pinning itself, so a click on one of its rows
+    /// does not show the canvas tip.
+    pub fn mark_hinted(&mut self) {
+        self.hinted = true;
+    }
+
+    /// Whether any permanent pin exists.
+    pub fn has_pinned(&self) -> bool {
+        self.pins.iter().any(|p| !p.preview)
+    }
+
+    /// Permanent pins (the hover preview is not counted).
     pub fn len(&self) -> usize {
-        self.pins.len()
+        self.pins.iter().filter(|p| !p.preview).count()
     }
 
     pub fn clear(&mut self) {
         self.pins.clear();
+        self.hover = None;
+    }
+
+    /// Drops the transient pins.
+    pub fn drop_previews(&mut self) {
+        self.pins.retain(|p| !p.preview);
+    }
+
+    /// The files of the finished, permanent pins whose answer Auto Open
+    /// Matches has not looked at yet, marking them as looked at.
+    pub fn take_auto_open_files(&mut self) -> Vec<PathBuf> {
+        let mut out: Vec<PathBuf> = Vec::new();
+        for pin in self.pins.iter_mut().filter(|p| !p.preview && !p.auto_opened) {
+            let Some(graph) = pin.graph() else { continue };
+            let files: Vec<PathBuf> = graph.files().into_iter().map(|(path, _)| path).collect();
+            pin.auto_opened = true;
+            for path in files {
+                if !out.contains(&path) {
+                    out.push(path);
+                }
+            }
+        }
+        out
     }
 
     /// Drops one pin.
@@ -107,13 +163,13 @@ impl PinSet {
 
     /// Total entries and edges over the finished pins, for the panel.
     pub fn totals(&self) -> (usize, usize) {
-        self.pins.iter().filter_map(Pin::graph).fold((0, 0), |(r, e), g| (r + g.entries.len(), e + g.edge_count()))
+        self.pins.iter().filter(|p| !p.preview).filter_map(Pin::graph).fold((0, 0), |(r, e), g| (r + g.entries.len(), e + g.edge_count()))
     }
 
     /// The files of all pins with how many entries each holds, summed.
     pub fn files(&self) -> Vec<(PathBuf, usize)> {
         let mut counts: std::collections::BTreeMap<PathBuf, usize> = std::collections::BTreeMap::new();
-        for graph in self.pins.iter().filter_map(Pin::graph) {
+        for graph in self.pins.iter().filter(|p| !p.preview).filter_map(Pin::graph) {
             for (path, n) in graph.files() {
                 *counts.entry(path).or_default() += n;
             }
@@ -142,28 +198,78 @@ pub fn pin(
     start_byte: usize,
     additive: bool,
 ) {
+    let mode = if additive { PinMode::Add } else { PinMode::Replace };
+    pin_token(ctx, state, node_id, line, start_byte, mode);
+}
+
+/// [`pin`] with an explicit [`PinMode`], for the token at `line`/`start_byte`.
+pub fn pin_token(
+    ctx: Option<&egui::Context>,
+    state: &mut AppState,
+    node_id: u64,
+    line: usize,
+    start_byte: usize,
+    mode: PinMode,
+) {
     let Some(node) = state.node_store.get_file(node_id) else { return };
-    let (path, text) = (node.path.clone(), node.content.clone());
-    let Some(text_line) = text.lines().nth(line) else { return };
+    let Some(text_line) = node.content.lines().nth(line) else { return };
     let position = Position { line, character: utf16_column(text_line, start_byte) };
     let name = word_at(text_line, start_byte);
+    pin_at(ctx, state, node_id, position, name, mode);
+}
 
-    if let Some(existing) = state.lsp.pins.pins.iter().find(|p| p.path == path && p.position == position).map(|p| p.id) {
-        if additive {
-            state.lsp.pins.remove(existing);
+/// Pins the symbol at `position` of file node `node_id`, named `name`.
+pub fn pin_at(
+    ctx: Option<&egui::Context>,
+    state: &mut AppState,
+    node_id: u64,
+    position: Position,
+    name: String,
+    mode: PinMode,
+) {
+    let Some(node) = state.node_store.get_file(node_id) else { return };
+    let (path, text) = (node.path.clone(), node.content.clone());
+
+    if let Some(i) = state.lsp.pins.pins.iter().position(|p| p.path == path && p.position == position) {
+        let pins = &mut state.lsp.pins;
+        match mode {
+            PinMode::Preview => {}
+            PinMode::Add => {
+                if pins.pins[i].preview {
+                    pins.pins[i].preview = false;
+                } else {
+                    let id = pins.pins[i].id;
+                    pins.remove(id);
+                }
+            }
+            PinMode::Replace => {
+                // A click on the preview keeps it as the one pin; on a pin
+                // that is already there, nothing changes.
+                if pins.pins[i].preview {
+                    pins.pins[i].preview = false;
+                    let keep = pins.pins[i].id;
+                    pins.pins.retain(|p| p.id == keep);
+                }
+            }
         }
         return;
     }
+    let quiet = mode == PinMode::Preview;
     let Some((server, language_id)) = server_for(&path) else {
-        crate::ui::toast::push(state, format!("No language server for {}. Open the LSP panel for the servers.", ext_of(&path)));
+        if !quiet {
+            crate::ui::toast::push(state, format!("No language server for {}. Open the LSP panel for the servers.", ext_of(&path)));
+        }
         return;
     };
     let Some(root) = state.loaded_dir.clone() else {
-        crate::ui::toast::push(state, "Open a folder first: the language server needs a workspace.");
+        if !quiet {
+            crate::ui::toast::push(state, "Open a folder first: the language server needs a workspace.");
+        }
         return;
     };
-    if !additive {
-        state.lsp.pins.clear();
+    match mode {
+        PinMode::Replace => state.lsp.pins.clear(),
+        PinMode::Add | PinMode::Preview => state.lsp.pins.drop_previews(),
     }
     let request = state.lsp.manager.request(
         ctx,
@@ -174,10 +280,52 @@ pub fn pin(
     let pins = &mut state.lsp.pins;
     pins.next_id += 1;
     let id = pins.next_id;
-    pins.pins.push(Pin { id, node_id, path, name, position, fetch: PinFetch::Pending(request), poll: ctx.is_none() });
-    if !std::mem::replace(&mut pins.hinted, true) {
+    pins.pins.push(Pin {
+        id,
+        node_id,
+        path,
+        name,
+        position,
+        fetch: PinFetch::Pending(request),
+        poll: ctx.is_none(),
+        preview: quiet,
+        auto_opened: false,
+    });
+    if !quiet && !std::mem::replace(&mut pins.hinted, true) {
         crate::ui::toast::push(state, PIN_HINT);
     }
+}
+
+/// Query On Hover: `token` is the symbol under the pointer (file node,
+/// position, name), if any. Once the pointer rests on one for
+/// [`HOVER_SECONDS`] its graph is pinned as a preview; moving to another one
+/// or off any drops the preview. `now` is the app time in seconds. Returns
+/// how long to wait before looking again while the rest is being timed.
+pub fn update_hover(
+    ctx: Option<&egui::Context>,
+    state: &mut AppState,
+    token: Option<(u64, Position, String)>,
+    now: f64,
+) -> Option<f64> {
+    let Some((node_id, position, name)) = token.filter(|_| state.settings.lsp.query_on_hover) else {
+        state.lsp.pins.hover = None;
+        state.lsp.pins.drop_previews();
+        return None;
+    };
+    let since = match state.lsp.pins.hover {
+        Some((n, p, t)) if n == node_id && p == position => t,
+        _ => {
+            // Another token: the old preview goes at once.
+            state.lsp.pins.drop_previews();
+            now
+        }
+    };
+    state.lsp.pins.hover = Some((node_id, position, since));
+    if now - since < HOVER_SECONDS {
+        return Some(HOVER_SECONDS - (now - since));
+    }
+    pin_at(ctx, state, node_id, position, name, PinMode::Preview);
+    None
 }
 
 fn ext_of(path: &Path) -> String {
@@ -207,6 +355,8 @@ mod tests {
             position: Position { line: 4, character: 3 },
             fetch: PinFetch::Pending(42),
             poll: false,
+            preview: false,
+            auto_opened: false,
         });
         assert!(set.is_waiting());
         let other = set.receive(9, LspResponse::SymbolGraph(Err("late".into())));

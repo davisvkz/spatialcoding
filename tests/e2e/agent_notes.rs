@@ -63,9 +63,12 @@ fn clicking_a_cc_link_opens_the_file_and_hovering_only_previews() {
 fn a_symbol_link_opens_the_file_and_pins_the_symbol() {
     let fx = fixture();
     let mut app = app_with(&fx);
+    // The pin would otherwise open the files of its results (Auto Open Matches).
+    app.app_state_mut().settings.lsp.auto_open_matches = false;
     push(&mut app, "Tour", "See [hello](cc://symbol/src/util.rs:1:8).");
     app.get_by_label("hello").click();
-    app.run();
+    app.step();
+    app.step();
     assert_eq!(open_paths(&app), ["src/util.rs"]);
 }
 

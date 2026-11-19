@@ -1,6 +1,8 @@
-//! Right-sidebar "LSP" tab: the language server's symbols for the primary
-//! selected file node. Clicking a symbol lists its references across the
-//! workspace; clicking a reference focuses its line on the canvas.
+//! Right-sidebar "LSP" tab: the Symbol Graph of the pinned symbols (grouped
+//! results, files and counts) and the language server's symbols for the
+//! primary selected file node. Clicking a symbol row pins it exactly like a
+//! click on the canvas; resting on one with Query On Hover pins a preview;
+//! clicking a result focuses its line on the canvas.
 //!
 //! Requests go through [`LspManager`], so the panel never waits on a server:
 //! it shows "Loading…" and picks the answer up on a later frame.
@@ -11,14 +13,12 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use crate::analysis::lsp::manager::{LspManager, LspRequest, LspResponse, RequestId, ServerStatus};
-use crate::analysis::lsp::{server_for, Location, LspSymbol, ServerId};
+use crate::analysis::lsp::{server_for, LspSymbol, ServerId};
 use crate::state::AppState;
 use crate::ui::icons;
 use crate::workspace;
 
 const ERROR_COLOR: egui::Color32 = egui::Color32::from_rgb(0xef, 0x44, 0x44);
-/// Longest line preview in the references list, in characters.
-const MAX_PREVIEW: usize = 80;
 
 /// Lines of a file node to highlight on the canvas. 0-based, inclusive.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -47,39 +47,18 @@ struct SymbolsEntry {
     fetch: Fetch<Vec<LspSymbol>>,
 }
 
-/// One usage of a symbol, with the text of its line.
-#[derive(Debug, Clone, PartialEq)]
-pub struct ReferenceRow {
-    pub path: PathBuf,
-    /// 0-based.
-    pub line: usize,
-    pub preview: String,
-}
-
-/// The references of the symbol last clicked. They stay listed while the
-/// selection moves, so several of them can be visited in turn.
-pub struct References {
-    pub symbol: String,
-    /// The file node and line of the symbol itself.
-    pub node_id: u64,
-    pub line: usize,
-    pub fetch: Fetch<Vec<ReferenceRow>>,
-    /// Auto Open Matches already ran for this answer.
-    pub auto_opened: bool,
-}
-
 #[derive(Default)]
 pub struct LspPanelState {
     pub manager: LspManager,
-    /// Independent transient canvas requests; never replace clicked references.
-    pub canvas_graph: crate::ui::symbol_graph::CanvasGraphState,
-    /// Symbols pinned by a canvas click, each with its full graph.
+    /// The Open importers action waiting for the server's references.
+    pub importers: Option<crate::importers::ImporterQuery>,
+    /// Symbols pinned by a click (canvas or panel row), each with its full
+    /// graph, and the hover preview of Query On Hover.
     pub pins: crate::ui::symbol_pins::PinSet,
     /// App time until which Dim Dependency Edges stays on (see
     /// [`DIM_RESTORE_DELAY`]).
     pub dim_until: f64,
     symbols: Option<SymbolsEntry>,
-    pub references: Option<References>,
     /// The symbol or reference row under the pointer; reset every frame the
     /// panel draws.
     pub hovered: Option<LineHighlight>,
@@ -95,8 +74,6 @@ pub struct LspPanelState {
     /// files on the canvas instead of the repository's.
     pub show_servers: bool,
     pub servers_count_canvas: bool,
-    /// Query On Hover: the symbol row under the pointer and since when.
-    hover_since: Option<(u64, usize, f64)>,
     /// Language Servers dialog: files per language, most first.
     pub language_counts: Vec<(String, usize)>,
 }
@@ -149,39 +126,6 @@ impl LspPanelState {
         });
     }
 
-    /// Asks for every use of `symbol`, declared in file node `node_id`.
-    pub fn find_references(
-        &mut self,
-        ctx: Option<&egui::Context>,
-        root: &Path,
-        node_id: u64,
-        path: &Path,
-        text: &str,
-        symbol: &LspSymbol,
-    ) {
-        let Some((server, language_id)) = server_for(path) else {
-            return;
-        };
-        let id = self.manager.request(
-            ctx,
-            server,
-            root,
-            LspRequest::References {
-                path: path.to_path_buf(),
-                language_id,
-                text: text.to_string(),
-                position: symbol.selection_range.start,
-            },
-        );
-        self.references = Some(References {
-            symbol: symbol.name.clone(),
-            node_id,
-            line: symbol.selection_range.start.line,
-            fetch: Fetch::Pending(id),
-            auto_opened: false,
-        });
-    }
-
     /// Records a queried symbol: drops the forward part, then appends.
     fn push_history(&mut self, node_id: u64, symbol: &LspSymbol) {
         let same = self.history.get(self.history_pos).is_some_and(|(n, s)| {
@@ -217,11 +161,9 @@ impl LspPanelState {
         self.history.get(self.history_pos).cloned()
     }
 
-    /// Clear Symbols: forgets the references and the jump target.
+    /// Clear Symbols: forgets the pins and the jump target.
     pub fn clear_symbols(&mut self) {
-        self.canvas_graph.clear();
         self.pins.clear();
-        self.references = None;
         self.target = None;
         self.hovered = None;
     }
@@ -230,7 +172,9 @@ impl LspPanelState {
     /// waits for; any other answer (stale, or another requester's) is handed
     /// back.
     pub fn receive(&mut self, id: RequestId, response: LspResponse) -> Option<LspResponse> {
-        if self.canvas_graph.receive(id, &response) {
+        if let Some(query) = self.importers.as_mut()
+            && query.receive(id, &response)
+        {
             return None;
         }
         let response = self.pins.receive(id, response)?;
@@ -242,52 +186,17 @@ impl LspPanelState {
                 }
                 _ => return Some(LspResponse::Symbols(result)),
             },
-            LspResponse::References(result) => match &mut self.references {
-                Some(refs) if matches!(refs.fetch, Fetch::Pending(p) if p == id) => {
-                    refs.fetch = Fetch::Done(result.map(|locs| reference_rows(&locs)));
-                }
-                _ => return Some(LspResponse::References(result)),
-            },
+            LspResponse::References(result) => return Some(LspResponse::References(result)),
         }
         None
     }
 
     /// True while an answer is on its way.
     pub fn is_waiting(&self) -> bool {
-        self.canvas_graph.is_waiting()
-            || self.pins.is_waiting()
+        self.pins.is_waiting()
+            || self.importers.as_ref().is_some_and(|q| q.is_waiting())
             || self.symbols.as_ref().is_some_and(|s| s.fetch.is_pending())
-            || self
-                .references
-                .as_ref()
-                .is_some_and(|r| r.fetch.is_pending())
     }
-}
-
-/// Rows for `locations`, with each line's text read from disk.
-pub fn reference_rows(locations: &[Location]) -> Vec<ReferenceRow> {
-    let mut rows = Vec::with_capacity(locations.len());
-    let mut cached: Option<(PathBuf, Vec<String>)> = None;
-    for loc in locations {
-        if cached.as_ref().is_none_or(|(p, _)| *p != loc.path) {
-            let lines = std::fs::read_to_string(&loc.path)
-                .map(|t| t.lines().map(String::from).collect())
-                .unwrap_or_default();
-            cached = Some((loc.path.clone(), lines));
-        }
-        let lines = &cached.as_ref().unwrap().1;
-        let line = loc.range.start.line;
-        let preview: String = lines
-            .get(line)
-            .map(|l| l.trim().chars().take(MAX_PREVIEW).collect())
-            .unwrap_or_default();
-        rows.push(ReferenceRow {
-            path: loc.path.clone(),
-            line,
-            preview,
-        });
-    }
-    rows
 }
 
 /// Seconds the dim of Dependency Edges outlasts the last active symbol.
@@ -295,9 +204,8 @@ pub const DIM_RESTORE_DELAY: f64 = 0.5;
 
 /// What a click in the panel asked for, applied after drawing.
 enum Action {
-    FindReferences(LspSymbol, bool),
-    /// Query On Hover: references only, no selection change.
-    HoverQuery(u64, LspSymbol),
+    /// A symbol row clicked (Shift keeps the other pins).
+    Pin(LspSymbol, bool),
     /// Back/forward in the history.
     Requery(u64, LspSymbol),
     Clear,
@@ -339,8 +247,7 @@ pub fn draw_lsp_panel(ui: &mut egui::Ui, state: &mut AppState) {
                 state.lsp.show_advanced = !state.lsp.show_advanced;
             }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                let active = state.lsp.references.is_some()
-                    || !state.selection.symbols().is_empty()
+                let active = !state.selection.symbols().is_empty()
                     || !state.lsp.pins.is_empty();
                 // "Clear 2 Symbols" while symbols are pinned, as v2.
                 let pinned = state.lsp.pins.len();
@@ -359,7 +266,7 @@ pub fn draw_lsp_panel(ui: &mut egui::Ui, state: &mut AppState) {
                 }
             });
         });
-        if state.lsp.references.is_none() && state.lsp.pins.is_empty() {
+        if !state.lsp.pins.has_pinned() {
             ui.label(egui::RichText::new(SYMBOL_GRAPH_HINT).small().weak());
         }
         draw_pins(ui, state, &mut action);
@@ -375,29 +282,22 @@ pub fn draw_lsp_panel(ui: &mut egui::Ui, state: &mut AppState) {
             ui.label("Select a file node to see its symbols.");
         }
     }
-    draw_references(ui, state, &mut action);
 
     if state.lsp.is_waiting() {
         // The worker repaints when an answer arrives; this keeps the server
         // status line current while it starts or indexes.
         ui.ctx().request_repaint_after(Duration::from_millis(250));
     }
-    if state.lsp.hover_since.is_some() {
-        ui.ctx().request_repaint_after(Duration::from_millis(100));
-    }
 
     match action {
-        Some(Action::FindReferences(symbol, additive)) => {
+        Some(Action::Pin(symbol, additive)) => {
             let Some(node_id) = state.selection.primary else {
                 return;
             };
-            query_symbol(ui.ctx(), state, node_id, &symbol, true, additive);
-        }
-        Some(Action::HoverQuery(node_id, symbol)) => {
-            query_symbol(ui.ctx(), state, node_id, &symbol, false, false);
+            pin_symbol(ui.ctx(), state, node_id, &symbol, additive);
         }
         Some(Action::Requery(node_id, symbol)) => {
-            query_symbol(ui.ctx(), state, node_id, &symbol, true, false);
+            pin_symbol(ui.ctx(), state, node_id, &symbol, false);
         }
         Some(Action::Clear) => {
             state.lsp.clear_symbols();
@@ -415,13 +315,15 @@ pub fn draw_lsp_panel(ui: &mut egui::Ui, state: &mut AppState) {
 fn draw_pins(ui: &mut egui::Ui, state: &mut AppState, action: &mut Option<Action>) {
     use crate::analysis::lsp::graph::Group;
     use crate::ui::symbol_pins::PinFetch;
-    if state.lsp.pins.is_empty() {
+    // A hover preview is drawn on the canvas only: listing it here would shift
+    // the rows under the pointer and end the hover that made it.
+    if !state.lsp.pins.has_pinned() {
         return;
     }
     let mut remove = None;
     ui.add_space(4.0);
     ui.label(egui::RichText::new(format!("Pinned Symbols ({})", state.lsp.pins.len())).strong());
-    for pin in state.lsp.pins.pins() {
+    for pin in state.lsp.pins.pins().iter().filter(|p| !p.preview) {
         ui.horizontal(|ui| {
             let row = ui.add(egui::Label::new(egui::RichText::new(format!("{}  {}", pin.name, pin.label())).monospace().small()).sense(egui::Sense::click()));
             if row.clicked() {
@@ -446,7 +348,7 @@ fn draw_pins(ui: &mut egui::Ui, state: &mut AppState, action: &mut Option<Action
     if let Some(id) = remove {
         state.lsp.pins.remove(id);
     }
-    if state.lsp.pins.pins().iter().all(|p| p.graph().is_none()) {
+    if state.lsp.pins.pins().iter().filter(|p| !p.preview).all(|p| p.graph().is_none()) {
         return;
     }
     let files = state.lsp.pins.files();
@@ -461,7 +363,7 @@ fn draw_pins(ui: &mut egui::Ui, state: &mut AppState, action: &mut Option<Action
     ui.label(egui::RichText::new(format!("Results ({results}) / Edges ({edges})")).strong());
     for group in Group::ALL {
         let mut rows: Vec<(crate::analysis::lsp::graph::Role, PathBuf, usize)> = Vec::new();
-        for graph in state.lsp.pins.pins().iter().filter_map(|p| p.graph()) {
+        for graph in state.lsp.pins.pins().iter().filter(|p| !p.preview).filter_map(|p| p.graph()) {
             rows.extend(graph.group(group).into_iter().map(|e| (e.role, e.path.clone(), e.range.start.line)));
         }
         if rows.is_empty() {
@@ -487,27 +389,19 @@ fn draw_pins(ui: &mut egui::Ui, state: &mut AppState, action: &mut Option<Action
     }
 }
 
-/// Asks for a symbol's references, records it in the history and, unless
-/// it only came from hovering, selects it on the canvas.
-fn query_symbol(
-    ctx: &egui::Context,
-    state: &mut AppState,
-    node_id: u64,
-    symbol: &LspSymbol,
-    select: bool,
-    additive: bool,
-) {
+/// Pins a symbol of the list (the same graph a canvas click asks for),
+/// records it in the history and selects it on the canvas.
+fn pin_symbol(ctx: &egui::Context, state: &mut AppState, node_id: u64, symbol: &LspSymbol, additive: bool) {
+    use crate::ui::symbol_pins::{pin_at, PinMode};
     let Some(node) = state.node_store.get_file(node_id) else {
         return;
     };
-    let root = workspace_root(state, &node.path);
-    let (path, content) = (node.path.clone(), node.content.clone());
-    state.lsp.find_references(Some(ctx), &root, node_id, &path, &content, symbol);
+    let content = node.content.clone();
+    let mode = if additive { PinMode::Add } else { PinMode::Replace };
+    state.lsp.pins.mark_hinted();
+    pin_at(Some(ctx), state, node_id, symbol.selection_range.start, symbol.name.clone(), mode);
     state.lsp.push_history(node_id, symbol);
-    if select
-        && let Some(selected) =
-            crate::nodes::selection::SelectedSymbol::from_lsp(node_id, &content, symbol)
-    {
+    if let Some(selected) = crate::nodes::selection::SelectedSymbol::from_lsp(node_id, &content, symbol) {
         state.selection.select_symbol(node_id, selected, additive);
     }
 }
@@ -540,12 +434,15 @@ fn draw_symbols(
         .sync_symbols(Some(ui.ctx()), &root, node_id, &node.path, &node.content);
     draw_status(ui, &state.lsp.manager, server, &root);
 
+    // The row of a pinned symbol is marked.
     let selected = state
         .lsp
-        .references
-        .as_ref()
-        .filter(|r| r.node_id == node_id)
-        .map(|r| (r.symbol.clone(), r.line));
+        .pins
+        .pins()
+        .iter()
+        .rev()
+        .find(|p| p.node_id == node_id && !p.preview)
+        .map(|p| (p.name.clone(), p.position.line));
     let mut hovered: Option<(usize, usize, LspSymbol)> = None;
     match state.lsp.symbols() {
         None | Some(Fetch::Pending(_)) => {
@@ -558,33 +455,20 @@ fn draw_symbols(
             ui.label("No symbols.");
         }
         Some(Fetch::Done(Ok(symbols))) => {
-            ui.weak("Click a symbol to find its references.");
+            ui.weak("Click a symbol to pin its graph.");
             let id = ui.make_persistent_id(("lsp-symbols", node_id));
             for (i, symbol) in symbols.iter().enumerate() {
                 draw_symbol(ui, symbol, id.with(i), &selected, &mut hovered, action);
             }
         }
     }
-    // Query On Hover: a row rested on for 400 ms asks for its references.
+    // Query On Hover: a row rested on for 400 ms pins a preview of its graph.
     let now = ui.input(|i| i.time);
-    match (&hovered, state.settings.lsp.query_on_hover) {
-        (Some((_, _, symbol)), true) => {
-            let key = (node_id, symbol.selection_range.start.line);
-            let since = match state.lsp.hover_since {
-                Some((n, l, t)) if (n, l) == key => t,
-                _ => now,
-            };
-            state.lsp.hover_since = Some((key.0, key.1, since));
-            let current = state
-                .lsp
-                .references
-                .as_ref()
-                .is_some_and(|r| r.node_id == node_id && r.line == key.1);
-            if now - since >= HOVER_QUERY_SECONDS && !current && action.is_none() {
-                *action = Some(Action::HoverQuery(node_id, symbol.clone()));
-            }
-        }
-        _ => state.lsp.hover_since = None,
+    let token = hovered.as_ref().map(|(_, _, symbol)| (node_id, symbol.selection_range.start, symbol.name.clone()));
+    if (token.is_some() || ui.ui_contains_pointer())
+        && let Some(wait) = crate::ui::symbol_pins::update_hover(Some(ui.ctx()), state, token, now)
+    {
+        ui.ctx().request_repaint_after(Duration::from_secs_f64(wait));
     }
     state.lsp.hovered = hovered.map(|(start_line, end_line, _)| LineHighlight {
         node_id,
@@ -592,9 +476,6 @@ fn draw_symbols(
         end_line,
     });
 }
-
-/// How long the pointer rests on a symbol before Query On Hover asks.
-const HOVER_QUERY_SECONDS: f64 = 0.4;
 
 fn draw_status(ui: &mut egui::Ui, manager: &LspManager, server: ServerId, root: &Path) {
     match manager.status(server, root) {
@@ -661,86 +542,11 @@ fn draw_symbol(
         *hovered = Some((symbol.range.start.line, symbol.range.end.line, symbol.clone()));
     }
     if response.clicked() {
-        *action = Some(Action::FindReferences(
+        *action = Some(Action::Pin(
             symbol.clone(),
             ui.input(|i| i.modifiers.shift),
         ));
     }
-}
-
-fn draw_references(ui: &mut egui::Ui, state: &mut AppState, action: &mut Option<Action>) {
-    let Some(refs) = &state.lsp.references else {
-        return;
-    };
-    ui.separator();
-    ui.heading(format!("References to {}", refs.symbol));
-    let rows = match &refs.fetch {
-        Fetch::Pending(_) => {
-            ui.label("Finding references\u{2026}");
-            return;
-        }
-        Fetch::Done(Err(err)) => {
-            ui.colored_label(ERROR_COLOR, err);
-            return;
-        }
-        Fetch::Done(Ok(rows)) => rows,
-    };
-    if rows.is_empty() {
-        ui.label("No references found.");
-        return;
-    }
-
-    let files = rows.windows(2).filter(|w| w[0].path != w[1].path).count() + 1;
-    ui.weak(format!(
-        "{} {} in {} {}",
-        rows.len(),
-        if rows.len() == 1 {
-            "reference"
-        } else {
-            "references"
-        },
-        files,
-        if files == 1 { "file" } else { "files" },
-    ));
-
-    let mut hovered = None;
-    let mut last_path: Option<&Path> = None;
-    for row in rows {
-        if last_path != Some(row.path.as_path()) {
-            last_path = Some(&row.path);
-            let shown = state
-                .loaded_dir
-                .as_ref()
-                .and_then(|dir| row.path.strip_prefix(dir).ok())
-                .unwrap_or(&row.path);
-            ui.add_space(4.0);
-            ui.label(egui::RichText::new(shown.display().to_string()).strong());
-        }
-        let label = egui::RichText::new(format!("L{}  {}", row.line + 1, row.preview)).monospace();
-        let response = ui.selectable_label(false, label);
-        if response.hovered() {
-            hovered = open_node(state, &row.path).map(|node_id| LineHighlight {
-                node_id,
-                start_line: row.line,
-                end_line: row.line,
-            });
-        }
-        if response.clicked() {
-            *action = Some(Action::Focus(row.path.clone(), row.line));
-        }
-    }
-    if hovered.is_some() {
-        state.lsp.hovered = hovered;
-    }
-}
-
-fn open_node(state: &AppState, path: &Path) -> Option<u64> {
-    state
-        .node_store
-        .file_nodes
-        .values()
-        .find(|n| n.path == path)
-        .map(|n| n.id)
 }
 
 /// Width of the floating LSP Advanced Settings card.
@@ -775,9 +581,9 @@ pub fn draw_advanced_card(ctx: &egui::Context, state: &mut AppState) {
                 let lsp = &mut state.settings.lsp;
                 section(ui, "Query", |ui| {
                     switch(ui, &mut lsp.query_on_hover, "Query On Hover")
-                        .on_hover_text("Rest on a symbol for 0.4 s: canvas code shows a transient reference graph; panel rows list references.");
+                        .on_hover_text("Rest on a symbol for 0.4 s, on the canvas or in the list: its graph shows as a preview until you move away or click it.");
                     switch(ui, &mut lsp.auto_open_matches, "Auto Open Matches")
-                        .on_hover_text("Open the files holding the references when they arrive.");
+                        .on_hover_text("Open the files holding a pinned symbol's results when its graph arrives.");
                     ui.label("Max");
                     ui.horizontal(|ui| {
                         let response = ui.add(egui::DragValue::new(&mut lsp.max_files).range(1..=500usize));
@@ -894,39 +700,6 @@ pub fn draw_language_servers(ctx: &egui::Context, state: &mut AppState) {
     }
 }
 
-/// For each open file holding references whose node is outside the canvas
-/// view: the node's screen center and how many references it holds.
-pub fn out_of_view_markers(state: &AppState, canvas_rect: egui::Rect) -> Vec<(egui::Pos2, usize)> {
-    let Some(References { fetch: Fetch::Done(Ok(rows)), .. }) = &state.lsp.references else {
-        return Vec::new();
-    };
-    let mut out = Vec::new();
-    for path in reference_files(state) {
-        let Some(node) = state.node_store.file_nodes.values().find(|n| n.path == path) else { continue };
-        let rect = state
-            .viewport
-            .world_to_screen_rect(node.world_rect(state.settings.node_width, state.settings.font_size));
-        if !rect.intersects(canvas_rect) {
-            out.push((rect.center(), rows.iter().filter(|r| r.path == path).count()));
-        }
-    }
-    out
-}
-
-/// Paths of the files holding the current references, deduplicated in order.
-pub fn reference_files(state: &AppState) -> Vec<PathBuf> {
-    let Some(References { fetch: Fetch::Done(Ok(rows)), .. }) = &state.lsp.references else {
-        return Vec::new();
-    };
-    let mut out: Vec<PathBuf> = Vec::new();
-    for row in rows {
-        if !out.contains(&row.path) {
-            out.push(row.path.clone());
-        }
-    }
-    out
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -996,7 +769,6 @@ mod tests {
         let root = Path::new("/p");
         lsp.sync_symbols(None, root, 1, Path::new("/p/a.rs"), "a");
         lsp.sync_symbols(None, root, 1, Path::new("/p/a.rs"), "b"); // the first one is stale
-        lsp.find_references(None, root, 1, Path::new("/p/a.rs"), "b", &symbol("a", 0));
 
         let deadline = std::time::Instant::now() + Duration::from_secs(5);
         let mut handed_back = 0;
@@ -1008,32 +780,6 @@ mod tests {
         }
         assert_eq!(handed_back, 1, "the stale symbols answer is not the tab's");
         assert_eq!(lsp.symbols(), Some(&Fetch::Done(Err("boom".into()))));
-        let refs = lsp.references.as_ref().unwrap();
-        assert_eq!((refs.symbol.as_str(), refs.line), ("a", 0));
-        assert_eq!(refs.fetch, Fetch::Done(Err("boom".into())));
-    }
-
-    #[test]
-    fn reference_rows_read_the_line_text() {
-        let dir = tempfile::tempdir().unwrap();
-        let a = dir.path().join("a.rs");
-        std::fs::write(&a, "fn hello() {}\n\n    hello();   \n").unwrap();
-        let loc = |path: &Path, line| Location {
-            path: path.to_path_buf(),
-            range: Range {
-                start: Position { line, character: 0 },
-                end: Position::default(),
-            },
-        };
-        let rows = reference_rows(&[
-            loc(&a, 0),
-            loc(&a, 2),
-            loc(&a, 9),
-            loc(Path::new("/missing.rs"), 0),
-        ]);
-        let previews: Vec<&str> = rows.iter().map(|r| r.preview.as_str()).collect();
-        assert_eq!(previews, ["fn hello() {}", "hello();", "", ""]);
-        assert_eq!(rows[1].line, 2);
     }
 
     #[test]

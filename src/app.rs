@@ -295,7 +295,13 @@ impl SpatialCodingApp {
             );
         }
         if self.state.settings.show_activity_indicator {
-            let busy = if self.state.deps.is_waiting() {
+            let loading = self.state.loaded_dir.as_deref().and_then(|root| self.state.lsp.manager.loading_message(root));
+            if loading.is_some() {
+                self.repaint.request_repaint_after(std::time::Duration::from_millis(250));
+            }
+            let busy = if let Some(text) = loading.as_deref() {
+                Some(text)
+            } else if self.state.deps.is_waiting() {
                 Some("Analyzing dependencies with the language servers…")
             } else if self.state.changes.is_loading() {
                 Some("Reading Git changes…")
@@ -395,22 +401,18 @@ impl SpatialCodingApp {
         self.update_folder_bounds();
         let zoom_collapsed = crate::folder_actions::zoom_collapsed(&self.state, self.state.viewport.zoom);
         self.state.node_store.view.zoom_collapsed = zoom_collapsed;
-        self.update_canvas_symbol_hover(ui, &response, &painter);
+        self.update_canvas_symbol_hover(ui, &response);
         self.draw_folder_nodes(&painter);
         let ports = self.collect_ports();
         // The web of dependencies lies below the nodes; the selection's edges
         // and highlighted backwards edges are drawn over them.
         self.draw_edges(&painter, edge_renderer::EdgeLayer::Below);
-        let graph_names = self.draw_file_nodes(&painter, canvas_rect, &ports);
+        self.draw_file_nodes(&painter, canvas_rect, &ports);
         self.draw_edges(&painter, edge_renderer::EdgeLayer::Above);
-        if let Some(graph) = &self.state.lsp.canvas_graph.graph {
-            ui::symbol_graph::paint_connections(&painter, graph, &graph_names);
-        }
         self.draw_ports(&painter, canvas_rect, &ports);
         // Token edges and, zoomed out, a name pill on every pinned token.
         let pills = self.state.viewport.zoom < crate::nodes::lod::THRESHOLDS[0];
         ui::pin_overlay::paint_connections(&painter, self.state.lsp.pins.pins(), &self.pin_marks, pills);
-        self.draw_out_of_view_references(&painter, canvas_rect);
         self.draw_out_of_view_tags(ui, &painter, canvas_rect);
 
         if self.state.settings.show_minimap {
@@ -582,27 +584,52 @@ impl SpatialCodingApp {
         None
     }
 
-    fn update_canvas_symbol_hover(&mut self, ui: &egui::Ui, response: &egui::Response, painter: &egui::Painter) {
-        let picked = if self.state.settings.lsp.query_on_hover
-            && response.hovered() && !ui.input(|i| i.pointer.any_down())
-            && !self.state.space_held
-        {
-            ui.input(|i| i.pointer.hover_pos()).and_then(|screen| {
-                let world = self.state.viewport.screen_to_world(screen);
-                let id = self.state.node_store.node_at_position(
-                    world, self.state.settings.node_width, self.state.settings.font_size,
-                )?;
-                let selected = self.symbol_at(painter, id, screen)?;
-                let node = self.state.node_store.get_file(selected.node_id)?;
-                let name = selected.name_span;
-                let symbol = self.state.deps.symbol_occurrences(&node.path, name.line)
-                    .into_iter().find(|s| s.definition_path == node.path
-                        && s.definition_name_span == (name.line, name.start_byte, name.end_byte))?
-                    .symbol.clone();
-                Some((selected.node_id, symbol))
-            })
-        } else { None };
-        ui::symbol_graph::update(ui.ctx(), &mut self.state, picked);
+    /// Query On Hover over the canvas: the identifier under the pointer, once
+    /// it has rested, is pinned as a preview (see `symbol_pins::update_hover`).
+    fn update_canvas_symbol_hover(&mut self, ui: &egui::Ui, response: &egui::Response) {
+        if !self.state.settings.lsp.query_on_hover || !response.hovered() {
+            return;
+        }
+        let quiet = !ui.input(|i| i.pointer.any_down()) && !self.state.space_held;
+        let token = ui
+            .input(|i| i.pointer.hover_pos())
+            .filter(|_| quiet)
+            .and_then(|screen| self.hover_token(screen));
+        let now = ui.input(|i| i.time);
+        if let Some(wait) = ui::symbol_pins::update_hover(Some(ui.ctx()), &mut self.state, token, now) {
+            ui.ctx().request_repaint_after(std::time::Duration::from_secs_f64(wait));
+        }
+    }
+
+    /// The identifier under `screen` in a file node's code: node, position
+    /// and name. Only where code is drawn.
+    fn hover_token(&self, screen: egui::Pos2) -> Option<(u64, crate::analysis::lsp::Position, String)> {
+        let zoom = self.state.viewport.zoom;
+        if !LodLevel::from_zoom(zoom).draws_code() {
+            return None;
+        }
+        let world = self.state.viewport.screen_to_world(screen);
+        let id = self.state.node_store.node_at_position(world, self.state.settings.node_width, self.state.settings.font_size)?;
+        let node = self.state.node_store.get_file(id)?;
+        let font_size = self.state.settings.font_size;
+        let code_top = node.position.y + HEADER_HEIGHT + CODE_PADDING;
+        if world.y < code_top {
+            return None;
+        }
+        let line = ((world.y - code_top) / line_height(font_size)) as usize;
+        if line >= node.visible_lines() {
+            return None;
+        }
+        let text = node.content.lines().nth(line)?;
+        let columns = ((world.x - node.position.x - CODE_PAD_X) / code_char_width(font_size)).max(0.0) as usize;
+        let (byte, c) = text.char_indices().nth(columns)?;
+        if !(c.is_alphanumeric() || c == '_' || c == '$') {
+            return None;
+        }
+        let name = ui::symbol_pins::word_at(text, byte);
+        let start = text[..byte].rfind(|ch: char| !(ch.is_alphanumeric() || ch == '_' || ch == '$')).map_or(0, |i| i + text[i..].chars().next().map_or(1, char::len_utf8));
+        let position = crate::analysis::lsp::Position { line, character: crate::analysis::symbol_mapping::utf16_column(text, start) };
+        Some((id, position, name))
     }
 
     fn draw_folder_nodes(&self, painter: &egui::Painter) {
@@ -857,8 +884,7 @@ impl SpatialCodingApp {
         painter: &egui::Painter,
         canvas_rect: egui::Rect,
         ports: &HashMap<u64, Vec<Port>>,
-    ) -> Vec<(usize, egui::Rect)> {
-        let mut graph_names = Vec::new();
+    ) {
         let mut pin_marks: Vec<ui::pin_overlay::PinMark> = Vec::new();
         let zoom = self.state.viewport.zoom;
         let lod = LodLevel::from_zoom(zoom);
@@ -1126,35 +1152,6 @@ impl SpatialCodingApp {
                 }
             }
 
-            if let Some(graph) = &self.state.lsp.canvas_graph.graph {
-                let mut painted_blocks = Vec::new();
-                for (index, site) in graph.sites.iter().enumerate().filter(|(_, s)| s.node_id == node.id) {
-                    if !painted_blocks.contains(&site.span)
-                        && let Some(rect) = ui::symbol_graph::block_rect(
-                            site, code_origin, screen_rect.right() - code_origin.x,
-                            line_h, node.visible_lines(),
-                        )
-                    {
-                        ui::symbol_graph::paint_block(&code_clip, rect, index);
-                        painted_blocks.push(site.span);
-                    }
-                    let name = site.name;
-                    if let Some(spans) = lines.get(name.line)
-                        && let Some((x0, x1)) = name_x_range(
-                            &code_clip, lod, spans, name.start_byte, name.end_byte, font_size * zoom,
-                        )
-                    {
-                        let rect = egui::Rect::from_min_max(
-                            code_origin + egui::vec2(x0, name.line as f32 * line_h),
-                            code_origin + egui::vec2(x1, (name.line + 1) as f32 * line_h),
-                        );
-                        let color = if index == 0 { ui::symbol_graph::DEFINITION_COLOR } else { ui::symbol_graph::NAME_COLOR };
-                        code_clip.rect_filled(rect, 0.0, color.gamma_multiply(0.30));
-                        graph_names.push((index, rect));
-                    }
-                }
-            }
-
             // Pinned symbol graphs: blocks and name marks under the code.
             if !self.state.lsp.pins.is_empty() && lod.draws_code() {
                 let area = ui::pin_overlay::CodeArea {
@@ -1230,14 +1227,12 @@ impl SpatialCodingApp {
             }
         }
         self.pin_marks = pin_marks;
-        graph_names
     }
 
     fn draw_edges(&mut self, painter: &egui::Painter, layer: edge_renderer::EdgeLayer) {
         // LSP "Dim Dependency Edges": while a symbol is active.
         let symbol_active =
-            !self.state.selection.symbols().is_empty() || self.state.lsp.references.is_some()
-                || self.state.lsp.canvas_graph.graph.is_some() || !self.state.lsp.pins.is_empty();
+            !self.state.selection.symbols().is_empty() || !self.state.lsp.pins.is_empty();
         // The dim stays 500 ms after the last symbol goes (v2 "restores with a delay").
         let now = self.repaint.input(|i| i.time);
         if symbol_active {
@@ -1296,26 +1291,6 @@ impl SpatialCodingApp {
             },
             layer,
         );
-    }
-
-    /// LSP "Out of View": a marker on the canvas border toward each file
-    /// holding references that is outside the view.
-    fn draw_out_of_view_references(&self, painter: &egui::Painter, canvas_rect: egui::Rect) {
-        if !self.state.settings.lsp.out_of_view {
-            return;
-        }
-        let inner = canvas_rect.shrink(14.0);
-        for (center, count) in crate::ui::lsp_panel::out_of_view_markers(&self.state, canvas_rect) {
-            let at = egui::pos2(center.x.clamp(inner.left(), inner.right()), center.y.clamp(inner.top(), inner.bottom()));
-            painter.circle_filled(at, 9.0, self.state.theme.selection.gamma_multiply(0.85));
-            painter.text(
-                at,
-                egui::Align2::CENTER_CENTER,
-                count.to_string(),
-                egui::FontId::proportional(10.0),
-                egui::Color32::WHITE,
-            );
-        }
     }
 
     /// Out of View: a tag with the file name at the canvas border for every
@@ -1384,7 +1359,7 @@ impl eframe::App for SpatialCodingApp {
             ctx.request_repaint_after(std::time::Duration::from_millis(100));
         }
         // A pinned symbol's graph is on its way: nothing else wakes the UI.
-        if self.state.lsp.pins.needs_polling() {
+        if self.state.lsp.pins.needs_polling() || self.state.lsp.importers.as_ref().is_some_and(|q| q.needs_polling()) {
             ctx.request_repaint_after(std::time::Duration::from_millis(100));
         }
         if self.state.diff.as_ref().is_some_and(|d| d.loader.is_loading()) {

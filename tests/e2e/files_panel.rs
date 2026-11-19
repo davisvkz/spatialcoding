@@ -167,3 +167,44 @@ fn file_names_switch_hides_the_labels_above_nodes() {
     app.run();
     assert_eq!(texts_equal(&frame_shapes(&app), "util.rs"), 0);
 }
+
+#[test]
+fn open_importers_asks_the_server_for_the_references_of_the_exported_symbols() {
+    let fx = fixture();
+    // `hello()` here is not an import the syntax can follow: only the
+    // server's references find it.
+    std::fs::write(fx.path("src/other.rs"), "fn elsewhere() {\n    hello();\n}\n").unwrap();
+    let mut app = files_panel(&fx);
+    app.app_state_mut().lsp.manager.set_launcher(crate::fake_lsp::launcher());
+    let util = app.open(&fx.path("src/util.rs"));
+    app.app_state_mut().selection.select(util);
+    app.run();
+
+    app.get_by_label("Open files that import the selection").click();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while app.app_state().node_store.file_nodes.len() < 3 {
+        assert!(std::time::Instant::now() < deadline, "timed out: {:?}", open_paths(&app));
+        std::thread::sleep(std::time::Duration::from_millis(10));
+        app.step();
+    }
+    assert_eq!(open_paths(&app), vec!["src/main.rs", "src/other.rs", "src/util.rs"]);
+}
+
+#[test]
+fn file_actions_are_disabled_when_they_would_open_nothing() {
+    let fx = fixture();
+    let mut app = files_panel(&fx);
+    let readme = app.open(&fx.path("README.md"));
+    app.app_state_mut().selection.select(readme);
+    app.run();
+    // Markdown has no language server and nothing links to it.
+    assert!(app.get_by_label("Open files that import the selection").is_disabled());
+    assert!(app.get_by_label("Open imported files").is_disabled());
+
+    // util.rs imports nothing, but a server can look for its importers.
+    let util = app.open(&fx.path("src/util.rs"));
+    app.app_state_mut().selection.select(util);
+    app.run();
+    assert!(!app.get_by_label("Open files that import the selection").is_disabled());
+    assert!(app.get_by_label("Open imported files").is_disabled());
+}

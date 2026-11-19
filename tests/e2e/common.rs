@@ -201,6 +201,17 @@ pub fn click_at(harness: &mut App, pos: Pos2, modifiers: Modifiers) {
     harness.run();
 }
 
+/// [`click_at`] that steps one frame instead of running to rest, for a click
+/// that starts background work asking for repaints (a language server query).
+pub fn click_at_stepping(harness: &mut App, pos: Pos2, modifiers: Modifiers) {
+    harness.input_mut().modifiers = modifiers;
+    send(harness, Event::PointerMoved(pos));
+    button(harness, pos, true, modifiers);
+    button(harness, pos, false, modifiers);
+    harness.input_mut().modifiers = Modifiers::NONE;
+    harness.step();
+}
+
 /// Left double-click at a screen position. egui needs both clicks within
 /// 0.3 s, so use an app stepping 1/60 s frames (`app_with_stepping`).
 pub fn double_click_at(harness: &mut App, pos: Pos2) {

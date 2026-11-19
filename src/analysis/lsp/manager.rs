@@ -152,6 +152,14 @@ impl LspManager {
         self.results_rx.try_iter().collect()
     }
 
+    /// The activity line for servers that are not ready yet ("TypeScript
+    /// language server loading…"), if any is starting or indexing for `root`.
+    pub fn loading_message(&self, root: &Path) -> Option<String> {
+        let statuses: Vec<(ServerId, Option<ServerStatus>)> =
+            ServerId::ALL.iter().map(|&s| (s, self.status(s, root))).collect();
+        loading_text(&statuses)
+    }
+
     /// State of the server for `root`; `None` if it was never asked anything.
     pub fn status(&self, server: ServerId, root: &Path) -> Option<ServerStatus> {
         let handle = self.servers.get(&(server, root.to_path_buf()))?;
@@ -306,8 +314,36 @@ pub fn spawn_server(server: ServerId, root: &Path) -> Result<Connection, String>
     })
 }
 
+/// "TypeScript language server loading…" (or "indexing…") for the servers in
+/// `statuses` that are not ready, joined when several are.
+pub fn loading_text(statuses: &[(ServerId, Option<ServerStatus>)]) -> Option<String> {
+    let parts: Vec<String> = statuses
+        .iter()
+        .filter_map(|(server, status)| match status {
+            Some(ServerStatus::Starting) => Some(format!("{} language server loading", server.name())),
+            Some(ServerStatus::Indexing) => Some(format!("{} language server indexing", server.name())),
+            _ => None,
+        })
+        .collect();
+    (!parts.is_empty()).then(|| format!("{}\u{2026}", parts.join(", ")))
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn the_loading_line_names_the_servers_that_are_not_ready() {
+        use super::{loading_text, ServerId::*, ServerStatus::*};
+        assert_eq!(loading_text(&[]), None);
+        assert_eq!(loading_text(&[(Rust, Some(Ready)), (Go, None)]), None, "ready or never started: nothing");
+        assert_eq!(loading_text(&[(TypeScript, Some(Starting))]).as_deref(), Some("TypeScript language server loading\u{2026}"));
+        assert_eq!(loading_text(&[(Rust, Some(Indexing))]).as_deref(), Some("Rust language server indexing\u{2026}"));
+        assert_eq!(
+            loading_text(&[(Rust, Some(Indexing)), (Python, Some(Failed("x".into()))), (Go, Some(Starting))]).as_deref(),
+            Some("Rust language server indexing, Go language server loading\u{2026}"),
+            "a failed server is not loading"
+        );
+    }
+
     use super::*;
     use crate::analysis::lsp::protocol::{read_message, write_message};
     use serde_json::json;

@@ -395,6 +395,7 @@ pub fn poll_lsp(state: &mut AppState) {
     }
     state.deps.tick(&mut state.lsp.manager);
     auto_open_matches(state);
+    crate::importers::finish(state);
     if state.deps.take_changed() {
         apply_dependency_edges(state);
     }
@@ -416,28 +417,17 @@ pub fn poll_lsp(state: &mut AppState) {
     }
 }
 
-/// LSP "Auto Open Matches": once a symbol's references arrive, open the
-/// files holding them (at most Max files), once per answer.
+/// LSP "Auto Open Matches": once the graph of a pinned symbol arrives, open
+/// the files holding its results (at most Max files), once per answer. A
+/// hover preview opens nothing; a click that keeps it does.
 fn auto_open_matches(state: &mut AppState) {
-    let ready = state.lsp.references.as_ref().is_some_and(|r| {
-        !r.auto_opened && matches!(r.fetch, crate::ui::lsp_panel::Fetch::Done(Ok(_)))
-    });
-    if !ready {
-        return;
-    }
-    if let Some(refs) = state.lsp.references.as_mut() {
-        refs.auto_opened = true;
-    }
-    if !state.settings.lsp.auto_open_matches {
+    let paths = state.lsp.pins.take_auto_open_files();
+    if paths.is_empty() || !state.settings.lsp.auto_open_matches {
         return;
     }
     let max = state.settings.lsp.max_files.max(1);
     let open: HashSet<PathBuf> = state.node_store.file_nodes.values().map(|n| n.path.clone()).collect();
-    let paths: Vec<PathBuf> = crate::ui::lsp_panel::reference_files(state)
-        .into_iter()
-        .filter(|p| !open.contains(p) && p.is_file())
-        .take(max)
-        .collect();
+    let paths: Vec<PathBuf> = paths.into_iter().filter(|p| !open.contains(p) && p.is_file()).take(max).collect();
     if !paths.is_empty() {
         open_files(state, &paths);
     }
