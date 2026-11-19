@@ -14,6 +14,7 @@ pub enum Group {
     Ui,
     FileNodes,
     Repository,
+    Performance,
     Editor,
 }
 
@@ -36,6 +37,7 @@ pub fn reset_group(settings: &mut AppSettings, group: Group) {
             settings.node_width = d.node_width;
         }
         Group::Repository => settings.show_dot_folders = d.show_dot_folders,
+        Group::Performance => settings.diff_scan_limit = d.diff_scan_limit,
         Group::Editor => settings.editor_command = d.editor_command,
     }
 }
@@ -43,7 +45,7 @@ pub fn reset_group(settings: &mut AppSettings, group: Group) {
 /// Every group, for "Reset all". Panel settings (CST, LSP, folders, files)
 /// have their own reset in each panel's menu.
 pub fn reset_all(settings: &mut AppSettings) {
-    for group in [Group::Viewport, Group::Ui, Group::FileNodes, Group::Repository, Group::Editor] {
+    for group in [Group::Viewport, Group::Ui, Group::FileNodes, Group::Repository, Group::Performance, Group::Editor] {
         reset_group(settings, group);
     }
 }
@@ -212,6 +214,12 @@ pub fn draw_settings(ctx: &egui::Context, state: &mut AppState) {
 
             group_header(ui, "Repository", Group::Repository, s);
             ui.checkbox(&mut s.show_dot_folders, "Show dot-prefixed folders");
+            ui.add_space(6.0);
+
+            group_header(ui, "Performance", Group::Performance, s);
+            ui.label("Diff Scan Limit");
+            ui.add(egui::Slider::new(&mut s.diff_scan_limit, 100..=100_000).logarithmic(true).suffix(" lines"))
+                .on_hover_text("A diff changing more lines than this waits behind a Large Diffs card.");
             ui.add_space(6.0);
 
             group_header(ui, "Editor", Group::Editor, s);

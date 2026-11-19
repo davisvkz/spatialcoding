@@ -673,10 +673,16 @@ impl SpatialCodingApp {
             if label_px < min_label_px(settings.min_size_pct).max(1.0) {
                 continue;
             }
-            let text = if settings.merge_empty {
+            let base = if settings.merge_empty {
                 merged_label(store, id)
             } else {
                 folder.label.clone()
+            };
+            let namespace = (settings.namespace_view != crate::namespaces::NamespaceView::Folders)
+                .then(|| crate::namespaces::folder_namespace(store, id))
+                .flatten();
+            let Some(text) = crate::namespaces::folder_text(settings.namespace_view, &base, namespace.as_deref()) else {
+                continue;
             };
             let color = if changed { diff_color } else { theme.text_muted }.gamma_multiply(fog);
             let galley_width = painter
@@ -1364,6 +1370,14 @@ impl eframe::App for SpatialCodingApp {
         input::handle_shortcuts(ctx, &mut self.state);
         self.run_app_actions();
         self.serve_agents();
+        // Undo history: one snapshot per quiet moment of the canvas.
+        let dragging = ctx.input(|i| i.pointer.any_down());
+        let snapshot = crate::undo::Snapshot::capture(&self.state);
+        let now = ctx.input(|i| i.time);
+        self.state.history.observe(snapshot, dragging, now);
+        if self.state.history.is_settling() {
+            ctx.request_repaint_after(std::time::Duration::from_millis(350));
+        }
         crate::workspace::poll_lsp(&mut self.state);
         self.follow_disk();
         if self.state.git_comparison.is_loading() {
@@ -1442,6 +1456,7 @@ impl eframe::App for SpatialCodingApp {
         ui::docs_dialog::draw(ctx, &mut self.state);
         ui::zoom_levels::draw(ctx, &mut self.state);
         ui::toast::draw(ctx, &mut self.state);
+        crate::ui::feedback::draw_feedback(ctx, &mut self.state);
         crate::commands::draw_ui_highlight(ctx, &mut self.state);
         ui::diff_view::draw_diff_view(ctx, &mut self.state);
         if let Some(command) = ui::command_palette::draw_command_palette(ctx, &mut self.state) {

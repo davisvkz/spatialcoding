@@ -895,10 +895,23 @@ pub fn apply_fs_changes(state: &mut AppState, batch: &crate::fs::watcher::WatchB
 
 /// Opens the diff window for `path` (a file against Git HEAD).
 pub fn open_diff(state: &mut AppState, path: PathBuf) {
-    state.diff = Some(crate::ui::diff_view::DiffViewState::open(path));
+    let mut view = crate::ui::diff_view::DiffViewState::open(path);
+    view.mode = state.settings.diff.mode;
+    state.diff = Some(view);
 }
 
 /// Opens the diff of the primary selected file node, when there is one.
+/// Opens the diff window for `path` between two commits.
+pub fn open_diff_between(state: &mut AppState, path: PathBuf, from: String, to: String) {
+    state.diff = Some(crate::ui::diff_view::DiffViewState::open_between(
+        path,
+        from,
+        to,
+        state.settings.diff.context,
+        state.settings.diff.mode,
+    ));
+}
+
 pub fn open_diff_of_selection(state: &mut AppState) {
     let path = state.selection.primary.and_then(|id| state.node_store.get_file(id)).map(|n| n.path.clone());
     if let Some(path) = path {
@@ -964,6 +977,18 @@ pub fn folder_text_files(state: &AppState) -> std::rc::Rc<Vec<PathBuf>> {
     }
     let paths = std::rc::Rc::new(paths);
     *state.folder_files_cache.borrow_mut() = Some(paths.clone());
+    paths
+}
+
+/// The files of the loaded folder with the ignore list not applied (the Search
+/// panel's `Ignored` filter); read each time, never cached.
+pub fn folder_text_files_unfiltered(state: &AppState) -> Vec<PathBuf> {
+    let mut paths = Vec::new();
+    if let Some(dir) = state.loaded_dir.as_deref()
+        && let Ok(tree) = load_directory_filtered(dir, dir, state.settings.show_dot_folders, &crate::fs::ignore::IgnoreSet::default())
+    {
+        collect_files(&tree, &mut paths);
+    }
     paths
 }
 

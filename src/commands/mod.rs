@@ -77,7 +77,9 @@ pub fn go_to_ui(state: &mut AppState, id: &str, now: f64) {
     use crate::state::{LeftPanel, RightPanel};
     let Some(anchor) = find(id).and_then(|c| c.anchor) else { return };
     state.sidebars_hidden = false;
-    match anchor {
+    // "changes:settings" is the control `settings` inside the panel `changes`.
+    let panel = anchor.split_once(':').map_or(anchor, |(panel, _)| panel);
+    match panel {
         "settings" => state.show_settings = true,
         "layout" => state.right_panel = Some(RightPanel::Layout),
         "folders" => state.right_panel = Some(RightPanel::Folders),
@@ -96,6 +98,11 @@ pub fn go_to_ui(state: &mut AppState, id: &str, now: f64) {
     state.ui_highlight = Some((anchor, now));
 }
 
+/// Records where a control drew, for Go to UI.
+pub fn note_anchor(state: &mut AppState, id: &'static str, rect: egui::Rect) {
+    state.anchor_rects.insert(id, rect);
+}
+
 /// How long the Go to UI outline pulses, in seconds.
 const HIGHLIGHT_SECONDS: f64 = 2.0;
 
@@ -109,11 +116,13 @@ pub fn draw_ui_highlight(ctx: &egui::Context, state: &mut AppState) {
         return;
     }
     ctx.request_repaint();
-    let rect = match anchor {
+    // The exact control when it drew this frame, else its panel.
+    let panel = anchor.split_once(':').map_or(anchor, |(panel, _)| panel);
+    let rect = state.anchor_rects.get(anchor).copied().or(match panel {
         "settings" => None,
         "workspace" | "changes" | "search" | "local-server" => state.panel_rect_left,
         _ => state.panel_rect_right,
-    };
+    });
     let Some(rect) = rect else { return };
     let pulse = ((age * 6.0).sin() * 0.5 + 0.5) as f32;
     let color = state.theme.accent.gamma_multiply(0.35 + 0.65 * pulse);
@@ -125,7 +134,8 @@ pub fn draw_ui_highlight(ctx: &egui::Context, state: &mut AppState) {
 pub fn for_key(key: egui::Key, modifiers: egui::Modifiers, typing: bool) -> Option<&'static Command> {
     all().iter().find(|c| {
         c.chords.iter().any(|chord| {
-            chord.matches(key, modifiers) && !(typing && chord.is_plain() && chord.key != egui::Key::Escape)
+            let editing = chord.command && matches!(chord.key, egui::Key::A | egui::Key::X | egui::Key::Z | egui::Key::Y);
+            chord.matches(key, modifiers) && !(typing && (chord.is_plain() && chord.key != egui::Key::Escape || editing))
         })
     })
 }

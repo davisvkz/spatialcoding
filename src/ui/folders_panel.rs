@@ -40,6 +40,17 @@ pub fn draw_folders_panel(ui: &mut egui::Ui, state: &mut AppState) {
             .on_hover_text("A folder holding only one folder shows as one frame named a/b.");
         switch(ui, &mut folders.merge_overlapping_labels, "Merge Overlapping Labels")
             .on_hover_text("Folder names that would overlap are joined into one.");
+        ui.label("Namespace / package view");
+        crate::ui::panel::segmented(
+            ui,
+            &mut folders.namespace_view,
+            &[
+                (crate::namespaces::NamespaceView::Folders, "Folders"),
+                (crate::namespaces::NamespaceView::Namespaces, "Namespaces"),
+                (crate::namespaces::NamespaceView::Both, "Both"),
+                (crate::namespaces::NamespaceView::None, "None"),
+            ],
+        );
         switch(ui, &mut folders.show_folder_names, "Folder Names");
         ui.add_enabled_ui(folders.show_folder_names, |ui| {
             slider_row(ui, "Min Size", &mut folders.min_size_pct, 0.0..=1.0, |v| {

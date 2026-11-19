@@ -8,6 +8,18 @@ pub struct Minimap {
     pub size: Vec2,
 }
 
+/// Smallest and largest minimap, in screen pixels.
+pub const MIN_SIZE: Vec2 = Vec2::new(120.0, 90.0);
+pub const MAX_SIZE: Vec2 = Vec2::new(520.0, 400.0);
+/// Side of the corner handle that resizes it.
+const HANDLE: f32 = 14.0;
+
+/// The size the minimap takes when its top-left corner is dragged by
+/// `delta` (up and left grow it), within [`MIN_SIZE`] and [`MAX_SIZE`].
+pub fn resized(size: Vec2, delta: Vec2) -> Vec2 {
+    (size - delta).clamp(MIN_SIZE, MAX_SIZE)
+}
+
 impl Default for Minimap {
     fn default() -> Self {
         Self {
@@ -21,7 +33,7 @@ impl Minimap {
     /// Draws the minimap. Returns the world point to center the view on when
     /// the user clicks or drags inside it.
     pub fn draw(
-        &self,
+        &mut self,
         ui: &mut Ui,
         viewport: &Viewport,
         node_rects: &[Rect],
@@ -90,7 +102,28 @@ impl Minimap {
 
         // Click or drag to move the view: the pointer is the new center.
         let response = ui.interact(minimap_rect, egui::Id::new("minimap"), egui::Sense::click_and_drag());
-        let target = response.interact_pointer_pos().filter(|_| response.clicked() || response.dragged());
+        // The top-left corner resizes the card (it is anchored bottom-right).
+        // Registered after the card, so it wins the pointer there.
+        let handle = ui.interact(
+            Rect::from_min_size(minimap_rect.min, Vec2::splat(HANDLE)),
+            egui::Id::new("minimap_resize"),
+            egui::Sense::drag(),
+        );
+        if handle.dragged() {
+            self.size = resized(self.size, handle.drag_delta());
+        }
+        if handle.hovered() || handle.dragged() {
+            ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeNwSe);
+        }
+        let target = response
+            .interact_pointer_pos()
+            .filter(|_| !handle.dragged() && !handle.hovered() && (response.clicked() || response.dragged()));
+        // The grip of the resize corner.
+        let grip = minimap_rect.left_top() + egui::vec2(6.0, 6.0);
+        painter.line_segment(
+            [grip + egui::vec2(0.0, 5.0), grip + egui::vec2(5.0, 0.0)],
+            egui::Stroke::new(1.0_f32, Color32::from_white_alpha(70)),
+        );
         target.map(|pos| minimap_to_world(pos, minimap_rect.shrink(6.0), padded))
     }
 }
@@ -120,6 +153,14 @@ fn bounding_rect(rects: &[Rect]) -> Rect {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn dragging_the_top_left_corner_resizes_within_limits() {
+        let size = Vec2::new(200.0, 150.0);
+        assert_eq!(resized(size, Vec2::new(-50.0, -30.0)), Vec2::new(250.0, 180.0), "up and left grow it");
+        assert_eq!(resized(size, Vec2::new(500.0, 500.0)), MIN_SIZE);
+        assert_eq!(resized(size, Vec2::new(-900.0, -900.0)), MAX_SIZE);
+    }
 
     #[test]
     fn a_minimap_point_maps_back_to_the_world_and_clamps_at_the_edges() {

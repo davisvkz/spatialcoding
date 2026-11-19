@@ -143,3 +143,147 @@ fn the_diff_window_closes_and_the_palette_opens_it_for_the_selection() {
     app.run();
     assert!(app.query_by_label_contains("Diff — ").is_none());
 }
+
+/// `git_fixture` plus two more commits: `src/main.rs` edited, then
+/// `src/util.rs` and `web/a.ts` changed. Returns the fixture; the working
+/// tree is clean afterwards.
+fn history_fixture() -> Fixture {
+    let fx = fixture();
+    let git = |args: &[&str]| {
+        let out = Command::new("git").arg("-C").arg(&fx.root).args(args).output().unwrap();
+        assert!(out.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&out.stderr));
+    };
+    let commit = |msg: &str| git(&["-c", "user.name=T", "-c", "user.email=t@e", "commit", "-qam", msg]);
+    git(&["init", "-q", "-b", "trunk"]);
+    git(&["add", "Cargo.toml", "README.md", "src", "web"]);
+    commit("init");
+    std::fs::write(fx.path("src/main.rs"), "mod util;\n\nfn main() {\n    util::hello();\n    second();\n}\n").unwrap();
+    commit("edit main");
+    std::fs::write(fx.path("src/util.rs"), "pub fn hello() {}\npub fn extra() {}\n").unwrap();
+    std::fs::write(fx.path("web/a.ts"), "export const a = 2;\n").unwrap();
+    commit("edit util and a");
+    fx
+}
+
+fn diff_ready(a: &App) -> bool {
+    matches!(a.app_state().diff.as_ref().map(|d| &d.loader.status), Some(spatialcoding::git::diff::DiffStatus::Ready(_)))
+}
+
+#[test]
+fn the_commits_source_lists_history_and_a_commit_shows_its_files_and_diff() {
+    let fx = history_fixture();
+    let mut app = app_with_git_status(&fx);
+    app.get_by_label("Changes").click();
+    app.run();
+    app.get_by_label("Commits").click();
+    wait_for(&mut app, |a| a.query_by_label_contains("edit util and a").is_some());
+    app.get_by_label_contains("edit main");
+    app.get_by_label_contains("init");
+    app.get_by_label("Pull requests").is_disabled();
+
+    app.get_by_label_contains("edit util and a").click();
+    wait_for(&mut app, |a| a.query_by_label("src/util.rs").is_some());
+    app.get_by_label("web/a.ts");
+    assert!(app.query_by_label("src/main.rs").is_none(), "only this commit's files");
+
+    app.get_by_label("src/util.rs").click();
+    wait_for(&mut app, diff_ready);
+    app.get_by_label_contains("Diff — src/util.rs (");
+    app.get_by_label("+ pub fn extra() {}");
+
+    app.get_by_label("Back to working tree").click();
+    app.run();
+    assert_eq!(app.app_state().changes_view.source, spatialcoding::ui::changes_panel::ChangesSource::Local);
+}
+
+#[test]
+fn the_commit_range_source_shows_net_changes_between_two_commits() {
+    let fx = history_fixture();
+    let mut app = app_with_git_status(&fx);
+    let hashes = {
+        let repo = spatialcoding::git::repo::GitRepo::open(&fx.root).unwrap();
+        spatialcoding::git::history::commits(&repo, 10).unwrap()
+    };
+    app.get_by_label("Changes").click();
+    app.run();
+    app.get_by_label("Commit range").click();
+    wait_for(&mut app, |a| a.app_state().changes_view.commits().is_some_and(|c| c.value.is_some()));
+    {
+        let view = &mut app.app_state_mut().changes_view;
+        view.range_from = Some(hashes[2].hash.clone()); // init
+        view.range_to = Some(hashes[0].hash.clone()); // edit util and a
+    }
+    wait_for(&mut app, |a| a.query_by_label("src/main.rs").is_some());
+    app.get_by_label("src/util.rs");
+    app.get_by_label("web/a.ts");
+
+    app.get_by_label("src/main.rs").click();
+    wait_for(&mut app, diff_ready);
+    app.get_by_label("+     second();");
+}
+
+#[test]
+fn the_layout_switch_and_the_gear_shape_the_diff() {
+    use spatialcoding::state::CharDiff;
+    use spatialcoding::ui::diff_view::DiffMode;
+    let fx = git_fixture();
+    let mut app = app_with_git_status(&fx);
+    app.get_by_label("Changes").click();
+    app.run();
+    app.get_by_label("Split").click();
+    app.run();
+    assert_eq!(app.app_state().settings.diff.mode, DiffMode::Split);
+
+    app.get_by_label("Diff settings").click();
+    app.run();
+    app.get_by_label("Character diff");
+    app.get_by_label("Off").click();
+    app.run();
+    assert_eq!(app.app_state().settings.diff.char_diff, CharDiff::Off);
+    app.get_by_label("Collapse unchanged lines (C)").click();
+    app.run();
+    assert!(app.app_state().settings.diff.collapse);
+    assert_eq!(app.app_state().settings.diff.context, 3);
+
+    // The window opens in the chosen layout, and the Changes layout flags removed lines.
+    app.get_all_by_label("Changes").last().unwrap().click(); // the layout switch's own button
+    app.run();
+    assert_eq!(app.app_state().settings.diff.mode, DiffMode::Changes);
+    spatialcoding::workspace::open_diff(app.app_state_mut(), fx.path("src/util.rs"));
+    wait_for(&mut app, diff_ready);
+    app.get_by_label("− 1 removed line");
+}
+
+#[test]
+fn d_cycles_the_layout_and_c_collapses_unchanged_lines_while_a_diff_is_open() {
+    use spatialcoding::ui::diff_view::DiffMode;
+    let fx = git_fixture();
+    let mut app = app_with_git_status(&fx);
+    spatialcoding::workspace::open_diff(app.app_state_mut(), fx.path("src/main.rs"));
+    wait_for(&mut app, diff_ready);
+    assert_eq!(app.app_state().diff.as_ref().unwrap().mode, DiffMode::Unified);
+    app.press_key(egui::Key::D);
+    app.run();
+    assert_eq!(app.app_state().diff.as_ref().unwrap().mode, DiffMode::Split);
+    app.press_key_modifiers(egui::Modifiers::SHIFT, egui::Key::D);
+    app.run();
+    assert_eq!(app.app_state().diff.as_ref().unwrap().mode, DiffMode::Unified);
+    app.press_key(egui::Key::C);
+    app.run();
+    assert!(app.app_state().settings.diff.collapse);
+    assert!(app.query_all_by_label_contains("unchanged line").count() >= 1, "a note stands for the collapsed lines");
+}
+
+#[test]
+fn a_diff_over_the_scan_limit_waits_behind_the_large_diffs_card() {
+    let fx = git_fixture();
+    let mut app = app_with_git_status(&fx);
+    app.app_state_mut().settings.diff_scan_limit = 0;
+    spatialcoding::workspace::open_diff(app.app_state_mut(), fx.path("src/main.rs"));
+    wait_for(&mut app, diff_ready);
+    app.get_by_label("Large Diffs");
+    assert!(app.query_by_label("+     changed_line();").is_none(), "no lines yet");
+    app.get_by_label("Show anyway").click();
+    app.run();
+    app.get_by_label("+     changed_line();");
+}

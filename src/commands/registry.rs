@@ -192,6 +192,18 @@ fn escape(state: &mut AppState) -> Result {
     ok()
 }
 
+/// D / Shift+D: the next or previous layout of the open diff.
+fn cycle_diff_mode(state: &mut AppState, forward: bool) -> Result {
+    use crate::ui::diff_view::DiffMode;
+    const ORDER: [DiffMode; 3] = [DiffMode::Changes, DiffMode::Unified, DiffMode::Split];
+    if let Some(diff) = state.diff.as_mut() {
+        let at = ORDER.iter().position(|m| *m == diff.mode).unwrap_or(1);
+        diff.mode = ORDER[(at + if forward { 1 } else { ORDER.len() - 1 }) % ORDER.len()];
+        state.settings.diff.mode = diff.mode;
+    }
+    ok()
+}
+
 fn zoom_by(state: &mut AppState, factor: f32) -> Result {
     let center = if state.canvas_rect.is_positive() { state.canvas_rect.center() } else { egui::pos2(400.0, 300.0) };
     state.viewport.zoom_by(factor, center);
@@ -366,6 +378,19 @@ fn build() -> Vec<Command> {
         ok()
     }).hidden());
 
+    v.push(
+        cmd("canvas:undo", "Undo", |s, _| if crate::undo::undo(s) { ok() } else { Err("nothing to undo".into()) })
+            .group("Canvas")
+            .keys(keys![Chord::ctrl(Key::Z)])
+            .when(|s| s.history.can_undo()),
+    );
+    v.push(
+        cmd("canvas:redo", "Redo", |s, _| if crate::undo::redo(s) { ok() } else { Err("nothing to redo".into()) })
+            .group("Canvas")
+            .keys(keys![Chord::ctrl_shift(Key::Z), Chord::ctrl(Key::Y)])
+            .when(|s| s.history.can_redo()),
+    );
+
     // ---- folders --------------------------------------------------------
     for (id, title, action, key) in [
         ("folder:collapseLeaves", "Collapse leaf folders", FolderAction::CollapseLeaves, Some(Key::R)),
@@ -490,20 +515,43 @@ fn build() -> Vec<Command> {
         .when(has_primary),
     );
     v.push(
-        cmd("diff:cycleViewMode", "Cycle the diff layout", |s, _| {
-            use crate::ui::diff_view::DiffMode;
-            if let Some(diff) = s.diff.as_mut() {
-                diff.mode = match diff.mode {
-                    DiffMode::Unified => DiffMode::Split,
-                    DiffMode::Split => DiffMode::Unified,
-                };
-            }
+        cmd("diff:cycleViewMode", "Next diff layout", |s, _| cycle_diff_mode(s, true))
+            .group("Diff")
+            .anchor("changes:layout")
+            .keys(keys![Chord::new(Key::D)])
+            .when(has_diff)
+            .hidden(),
+    );
+    v.push(
+        cmd("diff:cycleViewModeBack", "Previous diff layout", |s, _| cycle_diff_mode(s, false))
+            .group("Diff")
+            .keys(keys![Chord::shift(Key::D)])
+            .when(has_diff)
+            .hidden(),
+    );
+    v.push(cmd("diff:setViewMode", "Set the diff layout", |s, args| {
+        use crate::ui::diff_view::DiffMode;
+        let mode = match args.get("mode").and_then(Value::as_str) {
+            Some("changes") => DiffMode::Changes,
+            Some("unified") => DiffMode::Unified,
+            Some("split") => DiffMode::Split,
+            _ => return Err("mode is changes, unified or split".into()),
+        };
+        s.settings.diff.mode = mode;
+        if let Some(diff) = s.diff.as_mut() {
+            diff.mode = mode;
+        }
+        ok()
+    }));
+    v.push(
+        cmd("diff:toggleCollapsed", "Collapse unchanged lines", |s, _| {
+            s.settings.diff.collapse = !s.settings.diff.collapse;
             ok()
         })
         .group("Diff")
-        .keys(keys![Chord::new(Key::D), Chord::shift(Key::D)])
+        .keys(keys![Chord::new(Key::C)])
         .when(has_diff)
-        .hidden(),
+        .anchor("changes:settings"),
     );
     v.push(cmd("diff:close", "Close the diff", |s, _| {
         s.diff = None;

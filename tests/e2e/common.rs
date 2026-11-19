@@ -304,6 +304,13 @@ pub fn texts_equal(shapes: &[egui::Shape], text: &str) -> usize {
         .count()
 }
 
+/// Types `text` like [`type_text`] but steps one frame instead of running to
+/// rest: a debounced background search keeps asking for repaints.
+pub fn type_text_stepping(harness: &mut App, text: &str) {
+    send(harness, Event::Text(text.to_owned()));
+    harness.step();
+}
+
 /// Types `text` into the focused text field, as one text event.
 pub fn type_text(harness: &mut App, text: &str) {
     send(harness, Event::Text(text.to_owned()));

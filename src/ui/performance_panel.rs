@@ -15,6 +15,12 @@ answers are kept until you close it. There is no local server or database to con
 const NO_MODES: &str = "This app analyzes each file when it opens; Eager and Lazy analysis need \
 v2's local server.";
 
+/// What this app keeps and where.
+const STORAGE_ABOUT: &str = "Syntax trees, language-server answers and dependency edges live in this \
+app's memory and are rebuilt when a file changes or you open it again. Nothing is written to disk \
+except your settings. Diffs larger than the Diff Scan Limit (Settings › Performance) wait behind a \
+Large Diffs card.";
+
 pub fn draw_performance_panel(ui: &mut egui::Ui, state: &mut AppState) {
     Section::new("Analysis").info(ANALYSIS_HELP).show(ui, |ui| {
         let mut auto = true;
@@ -33,6 +39,10 @@ pub fn draw_performance_panel(ui: &mut egui::Ui, state: &mut AppState) {
             "Use SQLite database",
             "Results are not stored on disk in this app.",
         );
+    });
+
+    Section::new("About analysis storage").collapsible(false).show(ui, |ui| {
+        ui.add(egui::Label::new(egui::RichText::new(STORAGE_ABOUT).small().weak()).wrap());
     });
 
     section(ui, "CST Depth", |ui| crate::ui::cst_panel::draw_depth_controls(ui, &mut state.settings.cst));
