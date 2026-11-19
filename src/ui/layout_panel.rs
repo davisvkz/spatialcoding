@@ -29,7 +29,7 @@ pub fn draw_layout_panel(ui: &mut egui::Ui, state: &mut AppState) {
 
     section(ui, "Advanced Settings", |ui| {
         let settings = &mut state.layout_settings;
-        slider_row(ui, "Rank Breaking", &mut settings.rank_breaking, 0..=8, |v| {
+        slider_row(ui, "Break", &mut settings.rank_breaking, 0..=8, |v| {
             if v == 0.0 { "Off".to_owned() } else { format!("{v}") }
         })
         .on_hover_text(RANK_BREAKING_HELP);

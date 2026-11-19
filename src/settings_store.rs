@@ -21,7 +21,15 @@ use crate::state::{AppSettings, AppState};
 ///    folded most of a freshly opened project into tiny cards), so files
 ///    written before then lose their stored `true`, which was only ever the
 ///    old default.
-pub const CURRENT_VERSION: u32 = 1;
+///
+/// 2: Settings defaults follow v2 (font 12, width 700, ranges 8–20 and
+///    300–2100): the old defaults 11 and 650 move to the new ones and every
+///    stored value is clamped into the new ranges.
+///
+/// 3: Edge colors and weights follow v2. Colors still at the old defaults
+///    move to the new ones, Hide Short Edges (not in v2) is turned off and
+///    Min Size is clamped to 0.3–1.
+pub const CURRENT_VERSION: u32 = 3;
 
 fn legacy_version() -> u32 {
     0
@@ -98,6 +106,17 @@ impl PersistedSettings {
         if self.version < 1 {
             self.app.folders.open_collapsed_by_default = false;
         }
+        if self.version < 2 {
+            if self.app.font_size == 11.0 && self.app.node_width == 650.0 {
+                self.app.font_size = 12.0;
+                self.app.node_width = 700.0;
+            }
+            self.app.font_size = self.app.font_size.clamp(8.0, 20.0);
+            self.app.node_width = self.app.node_width.clamp(300.0, 2100.0);
+        }
+        if self.version < 3 {
+            self.edges.migrate_to_v3();
+        }
         self.version = CURRENT_VERSION;
         self
     }
@@ -157,6 +176,46 @@ mod tests {
         assert!(!loaded.app.folders.open_collapsed_by_default, "the stored true was the old default");
         assert!(loaded.app.folders.zoom_fog, "other choices are kept");
         assert_eq!(loaded.version, CURRENT_VERSION);
+    }
+
+    #[test]
+    fn files_before_version_2_move_the_old_size_defaults_and_clamp_ranges() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        std::fs::write(&path, r#"{"version": 1, "app": {"font_size": 11.0, "node_width": 650.0}}"#).unwrap();
+        let loaded = load(&path).unwrap();
+        assert_eq!((loaded.app.font_size, loaded.app.node_width), (12.0, 700.0));
+
+        std::fs::write(&path, r#"{"version": 1, "app": {"font_size": 24.0, "node_width": 2500.0}}"#).unwrap();
+        let loaded = load(&path).unwrap();
+        assert_eq!((loaded.app.font_size, loaded.app.node_width), (20.0, 2100.0));
+
+        std::fs::write(&path, r#"{"version": 2, "app": {"font_size": 11.0, "node_width": 650.0}}"#).unwrap();
+        assert_eq!(load(&path).unwrap().app.font_size, 11.0, "a choice made on version 2 is kept");
+    }
+
+    #[test]
+    fn files_before_version_3_move_old_edge_defaults_to_the_reference_colors() {
+        use crate::edges::style::{self, EdgeStyleConfig};
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        let old = r#"{"version": 2, "edges": {"base_color": [0.55, 0.61, 0.75], "selected_color": [0.72, 0.84, 1.0],
+            "reexport_color": [0.98, 0.72, 0.30], "barrel_color": [0.37, 0.80, 0.98], "hide_short_pct": 0.5, "min_size_pct": 0.1}}"#;
+        std::fs::write(&path, old).unwrap();
+        let edges = load(&path).unwrap().edges;
+        assert_eq!(edges.base_color, style::BASE_COLOR);
+        assert_eq!(edges.selected_color, style::SELECTED_COLOR);
+        assert_eq!(edges.reexport_color, style::REEXPORT_COLOR);
+        assert_eq!(edges.barrel_color, style::BARREL_COLOR);
+        assert_eq!((edges.hide_short_pct, edges.min_size_pct), (0.0, 0.3));
+
+        // A color the user picked is kept.
+        std::fs::write(&path, r#"{"version": 2, "edges": {"base_color": [1.0, 0.0, 0.0]}}"#).unwrap();
+        assert_eq!(load(&path).unwrap().edges.base_color, [1.0, 0.0, 0.0]);
+        // The old squared-px Min Dist field still loads.
+        std::fs::write(&path, r#"{"version": 2, "edges": {"gradient_min_dist_sq": 123.0}}"#).unwrap();
+        assert_eq!(load(&path).unwrap().edges.gradient_min_dist, 123.0);
+        let _ = EdgeStyleConfig::default();
     }
 
     #[test]

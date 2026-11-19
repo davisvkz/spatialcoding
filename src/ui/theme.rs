@@ -63,7 +63,7 @@ impl Theme {
             selection: Color32::from_rgb(0x3b, 0x82, 0xf6),
             node_bg: Color32::from_rgb(0x0c, 0x0c, 0x0e),
             node_border: Color32::from_rgba_unmultiplied(0x71, 0x71, 0x7a, 128),
-            selected_border: Color32::from_white_alpha(220),
+            selected_border: Color32::from_rgb(0x60, 0xA5, 0xFA),
             node_header: Color32::from_rgb(0x2a, 0x2a, 0x2a),
             folder_bg: Color32::TRANSPARENT,
             folder_border: Color32::from_rgba_unmultiplied(0x52, 0x52, 0x5b, 140),

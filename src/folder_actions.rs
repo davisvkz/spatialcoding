@@ -23,7 +23,7 @@ pub fn toggle_folder(state: &mut AppState, folder: u64) {
     set_collapsed(state, folder, !collapsed);
 }
 
-fn set_many(state: &mut AppState, folders: &[u64], collapsed: bool) {
+pub fn set_many(state: &mut AppState, folders: &[u64], collapsed: bool) {
     let (w, f) = (state.settings.node_width, state.settings.font_size);
     // Refresh the boxes first so a collapsed folder keeps its top-left.
     state.node_store.update_folder_bounds(w, f, state.layout_settings.folder_padding);
@@ -83,6 +83,43 @@ pub fn leaf_folders(state: &AppState) -> Vec<u64> {
 /// Collapsed folders not inside another collapsed folder.
 pub fn topmost_collapsed(state: &AppState) -> Vec<u64> {
     shown_folders(state).into_iter().filter(|f| f.2).map(|f| f.0).collect()
+}
+
+/// The folder and every folder nested in it.
+pub fn folder_subtree(state: &AppState, folder: u64) -> Vec<u64> {
+    let Some(root) = state.node_store.get_folder(folder).map(|f| f.path.clone()) else {
+        return Vec::new();
+    };
+    let mut ids: Vec<u64> = state
+        .node_store
+        .folder_nodes
+        .values()
+        .filter(|f| f.path.starts_with(&root))
+        .map(|f| f.id)
+        .collect();
+    ids.sort();
+    ids
+}
+
+/// Folders at absolute `level` (the loaded folder's children are level 1)
+/// that are in the given collapse state.
+pub fn folders_at_level(state: &AppState, level: usize, collapsed: bool) -> Vec<u64> {
+    let root = state.loaded_dir.clone().unwrap_or_default();
+    let mut ids: Vec<u64> = state
+        .node_store
+        .folder_nodes
+        .values()
+        .filter(|f| f.collapsed == collapsed && state.node_store.folder_depth(f.id, &root) == level)
+        .map(|f| f.id)
+        .collect();
+    ids.sort();
+    ids
+}
+
+/// The folder block under the pointer, if the pointer is on the canvas.
+pub fn folder_under_pointer(state: &AppState) -> Option<u64> {
+    let world = state.viewport.screen_to_world(state.hover_screen?);
+    state.node_store.folder_block_at_position(world)
 }
 
 fn all_folders(state: &AppState, collapsed: bool) -> Vec<u64> {

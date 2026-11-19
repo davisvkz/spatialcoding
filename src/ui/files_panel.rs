@@ -19,9 +19,16 @@ pub fn draw_files_panel(ui: &mut egui::Ui, state: &mut AppState) {
                 action_button(ui, icons::LAYERS, "Highlight top-level symbols", active)
             });
             if button.inner.clicked() {
-                workspace::toggle_top_level_highlights(state);
+                workspace::toggle_top_level_highlights(state, Some(ui.ctx()));
             }
-            button.response.on_disabled_hover_text("Select a file node first.");
+            let count = workspace::top_level_symbol_count(state);
+            button
+                .response
+                .on_hover_text(format!(
+                    "Highlight all {count} top-level symbols in the selected file{}",
+                    if state.settings.files.skip_imports { " (imports skipped)" } else { "" }
+                ))
+                .on_disabled_hover_text("Select a file node first.");
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 ui.checkbox(&mut state.settings.files.skip_imports, "Skip imports")
                     .on_hover_text("Leave import statements out of the top-level symbols.");

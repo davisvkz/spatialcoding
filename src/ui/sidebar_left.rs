@@ -19,6 +19,7 @@ const PANELS: &[(&str, &str, LeftPanel)] = &[
 ];
 
 pub fn draw_sidebar_left(ctx: &egui::Context, state: &mut AppState, tree: &mut Option<TreeNode>) {
+    state.panel_rect_left = None;
     // 1. The always-visible icon rail, icons centered.
     egui::SidePanel::left("sidebar_left_rail")
         .exact_width(RAIL_WIDTH)
@@ -70,7 +71,7 @@ pub fn draw_sidebar_left(ctx: &egui::Context, state: &mut AppState, tree: &mut O
         .find(|(_, _, p)| *p == panel)
         .expect("PANELS covers every LeftPanel variant");
 
-    egui::SidePanel::left("sidebar_left_panel")
+    let shown = egui::SidePanel::left("sidebar_left_panel")
         .exact_width(PANEL_WIDTH)
         .resizable(false)
         .show_separator_line(false)
@@ -78,7 +79,49 @@ pub fn draw_sidebar_left(ctx: &egui::Context, state: &mut AppState, tree: &mut O
         .show(ctx, |ui| {
             bubble_frame(&theme).show(ui, |ui| {
                 ui.set_min_width(ui.available_width());
-                if panel_header(ui, HeaderSpec::new(icon_ch, title)).close {
+                // Workspace kebab: Clear repository, Show folder file counts.
+                let mut spec = HeaderSpec::new(icon_ch, title);
+                let counts_label = if state.settings.show_folder_counts {
+                    "Hide folder file counts"
+                } else {
+                    "Show folder file counts"
+                };
+                let menu_actions = [
+                    WorkspaceMenu::ClearRepository,
+                    WorkspaceMenu::ToggleCounts,
+                    WorkspaceMenu::ToggleIgnored,
+                    WorkspaceMenu::IgnoreSettings,
+                ];
+                if panel == LeftPanel::Workspace {
+                    spec.menu = vec![
+                        crate::ui::panel::MenuItem::new(icons::TRASH, "Clear repository")
+                            .disabled_if(state.loaded_dir.is_none(), "No folder is loaded"),
+                        crate::ui::panel::MenuItem::new(icons::FOLDERS, counts_label),
+                        crate::ui::panel::MenuItem::new(
+                            icons::SLASH,
+                            if state.settings.show_ignored { "Hide ignored files" } else { "Show ignored files" },
+                        ),
+                        crate::ui::panel::MenuItem::new(icons::SETTINGS, "Ignored file settings"),
+                    ];
+                    spec.menu_label = Some("Workspace menu");
+                }
+                let header = panel_header(ui, spec);
+                if let Some(i) = header.menu_clicked {
+                    match menu_actions[i] {
+                        WorkspaceMenu::ClearRepository => {
+                            state.pending_app_actions.push(crate::commands::AppAction::CloseFolder);
+                        }
+                        WorkspaceMenu::ToggleCounts => {
+                            state.settings.show_folder_counts = !state.settings.show_folder_counts;
+                        }
+                        WorkspaceMenu::ToggleIgnored => {
+                            state.settings.show_ignored = !state.settings.show_ignored;
+                            state.pending_app_actions.push(crate::commands::AppAction::ReloadTree);
+                        }
+                        WorkspaceMenu::IgnoreSettings => state.show_ignore_settings = true,
+                    }
+                }
+                if header.close {
                     state.left_panel = None;
                 }
                 egui::ScrollArea::vertical()
@@ -93,6 +136,7 @@ pub fn draw_sidebar_left(ctx: &egui::Context, state: &mut AppState, tree: &mut O
                     });
             });
         });
+    state.panel_rect_left = Some(shown.response.rect);
 }
 
 fn draw_workspace(ui: &mut egui::Ui, state: &mut AppState, tree: &mut Option<TreeNode>) {
@@ -105,6 +149,16 @@ fn draw_workspace(ui: &mut egui::Ui, state: &mut AppState, tree: &mut Option<Tre
     if cta_button(ui, &format!("Open All {count}"), false).clicked() {
         crate::workspace::open_all_files(state);
     }
+    ui.add_space(2.0);
+    ui.horizontal(|ui| {
+        if ui.small_button("Expand all folders").clicked() {
+            set_all_expanded(root, true);
+        }
+        if ui.small_button("Collapse").clicked() {
+            set_all_expanded(root, false);
+        }
+    });
+    ui.label(egui::RichText::new("Drag a folder onto the canvas").small().weak());
     ui.add_space(4.0);
     // v2 lists the folder's children directly, without a row for the root.
     match root {
@@ -115,6 +169,40 @@ fn draw_workspace(ui: &mut egui::Ui, state: &mut AppState, tree: &mut Option<Tre
             }
         }
         TreeNode::File { .. } => draw_tree_node(ui, root, state, 0),
+    }
+}
+
+/// What a tree row carries while dragged: the file or folder path. The canvas
+/// opens it on drop.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TreeDrag(pub std::path::PathBuf);
+
+/// Which entry of the Workspace kebab was clicked.
+#[derive(Clone, Copy)]
+enum WorkspaceMenu {
+    ClearRepository,
+    ToggleCounts,
+    ToggleIgnored,
+    IgnoreSettings,
+}
+
+/// Adds `path` to the repository's ignore list and reloads the tree.
+fn add_to_ignore_list(state: &mut AppState, path: &std::path::Path, is_dir: bool) {
+    let Some(root) = state.loaded_dir.clone() else { return };
+    let Some(pattern) = crate::fs::ignore::pattern_for(path, &root, is_dir) else { return };
+    if state.add_ignore_pattern(pattern.clone()) {
+        crate::ui::toast::push(state, format!("Ignoring {pattern}"));
+        state.pending_app_actions.push(crate::commands::AppAction::ReloadTree);
+    }
+}
+
+/// Opens or closes every folder row of the tree.
+fn set_all_expanded(node: &mut TreeNode, expanded: bool) {
+    if let TreeNode::Dir { children, expanded: open, .. } = node {
+        *open = expanded;
+        for child in children {
+            set_all_expanded(child, expanded);
+        }
     }
 }
 
@@ -145,10 +233,12 @@ fn draw_tree_node(ui: &mut egui::Ui, node: &mut TreeNode, state: &mut AppState, 
                 chevron: Some(*expanded),
                 badge: None,
                 name,
-                count: Some(file_count),
+                count: state.settings.show_folder_counts.then_some(file_count),
                 label: &label,
             };
             let response = tree_row(ui, &state.theme, row);
+            // Drag a folder onto the canvas to open it (the canvas takes the drop).
+            response.dnd_set_drag_payload(TreeDrag(path.clone()));
             if response.clicked() {
                 *expanded = !*expanded;
             }
@@ -159,6 +249,10 @@ fn draw_tree_node(ui: &mut egui::Ui, node: &mut TreeNode, state: &mut AppState, 
                 }
                 if ui.button("Remove from canvas").clicked() {
                     crate::workspace::remove_folder_from_canvas(state, path);
+                    ui.close_menu();
+                }
+                if ui.button("Add to ignore list…").clicked() {
+                    add_to_ignore_list(state, path, true);
                     ui.close_menu();
                 }
             });
@@ -177,9 +271,35 @@ fn draw_tree_node(ui: &mut egui::Ui, node: &mut TreeNode, state: &mut AppState, 
                 count: None,
                 label: name,
             };
-            if tree_row(ui, &state.theme, row).clicked() {
+            let response = tree_row(ui, &state.theme, row);
+            if response.clicked() {
                 crate::workspace::open_file(state, path);
             }
+            response.dnd_set_drag_payload(TreeDrag(path.clone()));
+            response.context_menu(|ui| {
+                if ui.button("Open on canvas").clicked() {
+                    crate::workspace::open_file(state, path);
+                    ui.close_menu();
+                }
+                let open_node = state.node_store.file_nodes.values().find(|n| &n.path == path).map(|n| n.id);
+                if ui.add_enabled(open_node.is_some(), egui::Button::new("Remove from canvas")).clicked() {
+                    if let Some(id) = open_node {
+                        crate::workspace::remove_nodes(state, &[id]);
+                    }
+                    ui.close_menu();
+                }
+                if ui.button("Add to ignore list…").clicked() {
+                    add_to_ignore_list(state, path, false);
+                    ui.close_menu();
+                }
+                let editor = crate::workspace::editor_command(state).is_some();
+                if ui.add_enabled(editor, egui::Button::new("Open in editor")).on_disabled_hover_text("Set an editor in Settings or $EDITOR").clicked() {
+                    if let Err(e) = crate::workspace::open_in_editor(state, path) {
+                        crate::ui::toast::push(state, e);
+                    }
+                    ui.close_menu();
+                }
+            });
         }
     }
 }
@@ -242,7 +362,7 @@ fn tree_row(
     use egui::{Align2, FontId};
     let (rect, response) = ui.allocate_exact_size(
         egui::vec2(ui.available_width(), ROW_HEIGHT),
-        egui::Sense::click(),
+        egui::Sense::click_and_drag(),
     );
     let ak_label = row.label.to_owned();
     response.widget_info(move || {

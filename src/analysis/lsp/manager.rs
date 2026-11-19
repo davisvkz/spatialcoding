@@ -38,12 +38,20 @@ pub enum LspRequest {
         text: String,
         position: Position,
     },
+    /// Everything about the symbol at `position` (see [`super::graph`]).
+    SymbolGraph {
+        path: PathBuf,
+        language_id: &'static str,
+        text: String,
+        position: Position,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum LspResponse {
     Symbols(Result<Vec<LspSymbol>, String>),
     References(Result<Vec<Location>, String>),
+    SymbolGraph(Result<super::graph::SymbolGraph, String>),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -96,6 +104,12 @@ impl LspManager {
             results_tx,
             results_rx,
         }
+    }
+
+    /// Stops the running servers; the next request starts them again (after
+    /// an answer about a suggested command, say).
+    pub fn restart_servers(&mut self) {
+        self.servers.clear();
     }
 
     /// Replaces how servers are started, and stops the running ones.
@@ -158,6 +172,7 @@ fn failure(request: &LspRequest, err: String) -> LspResponse {
     match request {
         LspRequest::Symbols { .. } => LspResponse::Symbols(Err(err)),
         LspRequest::References { .. } => LspResponse::References(Err(err)),
+        LspRequest::SymbolGraph { .. } => LspResponse::SymbolGraph(Err(err)),
     }
 }
 
@@ -232,13 +247,40 @@ fn run(client: &mut LspClient, request: &LspRequest) -> LspResponse {
                 .and_then(|_| client.references(path, *position))
                 .map_err(|e| e.to_string()),
         ),
+        LspRequest::SymbolGraph {
+            path,
+            language_id,
+            text,
+            position,
+        } => LspResponse::SymbolGraph(
+            client
+                .sync_document(path, language_id, text)
+                .and_then(|_| client.symbol_graph(path, *position))
+                .map_err(|e| e.to_string()),
+        ),
+    }
+}
+
+/// The command that starts `server` for the workspace `root`: a user
+/// override (`SPATIALCODING_LSP_*`) wins; then a command the repository
+/// suggests in `.codecanvas/settings.json` and the user allowed (an
+/// unanswered suggestion is queued for the dialog); then the defaults.
+pub fn server_command(server: ServerId, root: &Path) -> Result<Vec<String>, String> {
+    let suggested = if std::env::var_os(server.env_var()).is_some() {
+        None
+    } else {
+        super::project_config::command_for(server, root)
+    };
+    match suggested {
+        Some(cmd) => Ok(cmd),
+        None => server.command(),
     }
 }
 
 /// The default [`Launcher`]: runs [`ServerId::command`] in `root` with piped
 /// stdio.
 pub fn spawn_server(server: ServerId, root: &Path) -> Result<Connection, String> {
-    let cmd = server.command()?;
+    let cmd = server_command(server, root)?;
     let mut child = Command::new(&cmd[0])
         .args(&cmd[1..])
         .current_dir(root)

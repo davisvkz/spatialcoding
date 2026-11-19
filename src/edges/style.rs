@@ -49,17 +49,46 @@ pub struct RelationshipStyle {
     pub color: [f32; 3],
 }
 
+/// `#RRGGBB` as the `[f32; 3]` the config stores.
+pub const fn hex(rgb: u32) -> [f32; 3] {
+    [
+        ((rgb >> 16) & 0xff) as f32 / 255.0,
+        ((rgb >> 8) & 0xff) as f32 / 255.0,
+        (rgb & 0xff) as f32 / 255.0,
+    ]
+}
+
+/// Idle edge color of the reference (`#7684A0`, times Lightness).
+pub const BASE_COLOR: [f32; 3] = hex(0x7684A0);
+pub const SELECTED_COLOR: [f32; 3] = hex(0xAED6FF);
+pub const BACKWARDS_COLOR: [f32; 3] = hex(0xEF4444);
+pub const SELECTED_BACKWARDS_COLOR: [f32; 3] = hex(0xE85580);
+/// Below L3 thin edges switch to this color.
+pub const SEMANTIC_FADE_COLOR: [f32; 3] = hex(0x3E3D48);
+pub const ADDED_COLOR: [f32; 3] = hex(0x4CD964);
+pub const REMOVED_COLOR: [f32; 3] = hex(0xFF5F56);
+pub const REEXPORT_COLOR: [f32; 3] = hex(0x38BDF8);
+pub const BARREL_COLOR: [f32; 3] = hex(0xF97316);
+
+/// Relation colors of the reference at 80 %: uses `#6AA7A0`, extends
+/// `#B69B65`, inherits `#9B8AB5`, conforms `#85A87C`. Imports keep the base
+/// color; the four types map as Imports = base, References = uses,
+/// Inherits = extends, Renders = inherits.
 fn default_relationships() -> [RelationshipStyle; 4] {
+    [BASE_COLOR, hex(0xB69B65), hex(0x6AA7A0), hex(0x9B8AB5)].map(|color| RelationshipStyle {
+        visible: true,
+        color,
+    })
+}
+
+/// Relation colors written by builds before settings version 3.
+pub(crate) fn legacy_relationship_colors() -> [[f32; 3]; 4] {
     [
         [0.55, 0.61, 0.75],
         [0.67, 0.58, 0.81],
         [0.55, 0.61, 0.75],
         [0.34, 0.66, 0.62],
     ]
-    .map(|color| RelationshipStyle {
-        visible: true,
-        color,
-    })
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -124,10 +153,21 @@ pub struct EdgeStyleConfig {
     pub gradient_gap_mode: GradientGapMode,
     #[serde(default = "default_gradient_gap_pct")]
     pub gradient_gap_pct: f32,
-    /// Squared screen distance (px²) under which an edge draws solid, as
-    /// v2's "Min Dist" (40000 = 200 px). In Fixed mode the solid tails also
-    /// add up to this distance.
-    pub gradient_min_dist_sq: f32,
+    /// Length in world px under which an edge draws solid: v2's "Min Dist"
+    /// (default 40000, so only huge edges fade). Stored as
+    /// `gradient_min_dist_sq` by earlier builds, which read it as px².
+    #[serde(alias = "gradient_min_dist_sq", default = "default_gradient_min_dist")]
+    pub gradient_min_dist: f32,
+    /// Fixed mode: world px that stay visible at each end of the edge.
+    #[serde(default = "default_gradient_fixed_visible_px")]
+    pub gradient_fixed_visible_px: f32,
+    /// Bezier handle length as a multiple of the horizontal distance
+    /// (`h = dx * k`, 0–2).
+    #[serde(default = "default_bezier_curvature")]
+    pub bezier_curvature: f32,
+    /// Percent (0–200) applied to the base color's channels.
+    #[serde(default = "default_base_lightness")]
+    pub base_lightness: f32,
     pub base_color: [f32; 3],
     /// Color of edges touching the selection (v2: light blue, fully opaque).
     #[serde(default = "default_selected_color")]
@@ -164,18 +204,17 @@ fn default_folder_depth() -> usize {
 fn default_gradient_gap_pct() -> f32 {
     0.8
 }
-fn default_gradient_min_dist_sq() -> f32 {
+fn default_gradient_min_dist() -> f32 {
     40_000.0
 }
 fn default_selected_color() -> [f32; 3] {
-    [0.72, 0.84, 1.0]
+    SELECTED_COLOR
 }
 fn default_true() -> bool {
     true
 }
 fn default_reexport_color() -> [f32; 3] {
-    // Warm amber: lifted from v2's re-export highlight hue.
-    [0.98, 0.72, 0.30]
+    REEXPORT_COLOR
 }
 fn default_import_port_color() -> [f32; 3] {
     // Muted teal: imports read apart from symbols without competing with
@@ -187,8 +226,16 @@ fn default_symbol_port_color() -> [f32; 3] {
     [0.48, 0.50, 0.54]
 }
 fn default_barrel_color() -> [f32; 3] {
-    // Cool cyan: distinct from re-export amber so the two highlight at once.
-    [0.37, 0.80, 0.98]
+    BARREL_COLOR
+}
+fn default_bezier_curvature() -> f32 {
+    0.5
+}
+fn default_base_lightness() -> f32 {
+    100.0
+}
+fn default_gradient_fixed_visible_px() -> f32 {
+    1000.0
 }
 
 pub fn default_symbol_colors() -> HashMap<String, [f32; 3]> {
@@ -211,6 +258,25 @@ pub fn default_symbol_colors() -> HashMap<String, [f32; 3]> {
 }
 
 impl EdgeStyleConfig {
+    /// Moves colors still at the pre-v2 defaults to the reference ones
+    /// (settings version 3); a color the user changed is kept.
+    pub(crate) fn migrate_to_v3(&mut self) {
+        let swap = |value: &mut [f32; 3], old: [f32; 3], new: [f32; 3]| {
+            if *value == old {
+                *value = new;
+            }
+        };
+        swap(&mut self.base_color, [0.55, 0.61, 0.75], BASE_COLOR);
+        swap(&mut self.selected_color, [0.72, 0.84, 1.0], SELECTED_COLOR);
+        swap(&mut self.reexport_color, [0.98, 0.72, 0.30], REEXPORT_COLOR);
+        swap(&mut self.barrel_color, [0.37, 0.80, 0.98], BARREL_COLOR);
+        let (old, new) = (legacy_relationship_colors(), default_relationships());
+        for ((slot, old), new) in self.relationships.iter_mut().zip(old).zip(new) {
+            swap(&mut slot.color, old, new.color);
+        }
+        self.hide_short_pct = 0.0;
+        self.min_size_pct = self.min_size_pct.clamp(0.3, 1.0);
+    }
     /// A stable palette keyed by the workspace-relative folder prefix. Opening
     /// another file does not change an existing folder's color.
     pub fn folder_color(&self, file: &std::path::Path, root: &std::path::Path) -> Option<[f32; 3]> {
@@ -268,13 +334,15 @@ impl Default for EdgeStyleConfig {
             only_selected: true,
             scale_arrow_heads: true,
             min_size_pct: 0.5,
-            hide_short_pct: 0.5,
+            hide_short_pct: 0.0,
             use_gradient: true,
             gradient_gap_mode: default_gradient_gap_mode(),
             gradient_gap_pct: default_gradient_gap_pct(),
-            gradient_min_dist_sq: default_gradient_min_dist_sq(),
-            // Cool blue-grey, measured from v2 Code Canvas idle edges.
-            base_color: [0.55, 0.61, 0.75],
+            gradient_min_dist: default_gradient_min_dist(),
+            gradient_fixed_visible_px: default_gradient_fixed_visible_px(),
+            bezier_curvature: default_bezier_curvature(),
+            base_lightness: default_base_lightness(),
+            base_color: BASE_COLOR,
             selected_color: default_selected_color(),
             symbol_colors: default_symbol_colors(),
             show_reexport_edges: false,

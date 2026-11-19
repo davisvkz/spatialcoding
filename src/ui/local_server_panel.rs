@@ -19,6 +19,13 @@ pub fn draw_local_server_panel(ui: &mut egui::Ui, state: &mut AppState) {
     let any_server_running = !progress.is_empty() && progress.iter().any(|p| p.error.is_none());
 
     section(ui, "Status", |ui| {
+        if let Some(socket) = &state.mcp_socket {
+            ui.label(
+                egui::RichText::new("MCP bridge listening")
+                    .color(egui::Color32::from_rgb(0x4a, 0xde, 0x80)),
+            );
+            ui.weak(socket.display().to_string());
+        }
         if any_server_running {
             ui.label(
                 egui::RichText::new("Local server running")
@@ -52,6 +59,15 @@ pub fn draw_local_server_panel(ui: &mut egui::Ui, state: &mut AppState) {
             });
         if ui.button("Copy to clipboard").clicked() {
             ui.ctx().copy_text(MCP_SNIPPET.to_string());
+        }
+    });
+
+    section(ui, "Connected agents", |ui| {
+        if state.agents.is_empty() {
+            ui.weak("No agent connected. Add the snippet above to your MCP config.");
+        }
+        for name in &state.agents {
+            ui.label(format!("\u{2022} {name}"));
         }
     });
 

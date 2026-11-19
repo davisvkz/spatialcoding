@@ -10,12 +10,15 @@ use crate::fs::tree::TreeNode;
 use crate::highlight::syntect_hl::Highlighter;
 use crate::input;
 use crate::nodes::file_node::{line_height, CODE_PADDING, CODE_PAD_X, GUTTER_RIGHT, HEADER_HEIGHT};
-use crate::nodes::lod::LodLevel;
+use crate::nodes::lod::{LodLevel, RenderMode};
 use crate::nodes::selection::SelectedSymbol;
 use crate::state::{AppState, Tool};
 use crate::ui;
 use crate::ui::cst_panel;
 use crate::workspace;
+
+/// Folders remembered for the repository dropdown.
+const MAX_RECENT_FOLDERS: usize = 8;
 
 pub struct SpatialCodingApp {
     state: AppState,
@@ -36,6 +39,11 @@ pub struct SpatialCodingApp {
     watcher: Option<crate::fs::watcher::FileWatcher>,
     /// Wakes the UI from the watcher's thread.
     repaint: egui::Context,
+    /// Tokens of the pinned symbol graphs painted this frame.
+    pin_marks: Vec<ui::pin_overlay::PinMark>,
+    /// The socket MCP agents reach this app through (binary only).
+    #[cfg(unix)]
+    bridge: Option<crate::server::bridge::Bridge>,
 }
 
 impl SpatialCodingApp {
@@ -54,8 +62,48 @@ impl SpatialCodingApp {
             layout_when_indexed: false,
             watcher: None,
             repaint: cc.egui_ctx.clone(),
+            pin_marks: Vec::new(),
+            #[cfg(unix)]
+            bridge: None,
         }
     }
+
+    /// Starts the socket an MCP server (`spatialcoding --mcp`) connects to.
+    /// Off by default so tests do not open sockets.
+    #[cfg(unix)]
+    pub fn enable_bridge(&mut self) {
+        self.enable_bridge_in(&crate::server::bridge::socket_dir());
+    }
+
+    /// Like [`Self::enable_bridge`], with the socket in `dir`.
+    #[cfg(unix)]
+    pub fn enable_bridge_in(&mut self, dir: &std::path::Path) {
+        match crate::server::bridge::Bridge::start(dir, self.repaint.clone()) {
+            Ok(bridge) => {
+                self.state.mcp_socket = Some(bridge.path().to_path_buf());
+                self.bridge = Some(bridge);
+            }
+            Err(e) => log::warn!("MCP bridge not started: {e}"),
+        }
+    }
+
+    #[cfg(not(unix))]
+    pub fn enable_bridge(&mut self) {}
+
+    /// Answers the tool calls agents sent since the last frame.
+    #[cfg(unix)]
+    fn serve_agents(&mut self) {
+        let Some(bridge) = &self.bridge else { return };
+        self.state.agents = bridge.agents();
+        for call in bridge.poll() {
+            let result = crate::server::api::handle(&mut self.state, &call.tool, &call.args);
+            let _ = call.reply.send(result);
+        }
+        self.run_app_actions();
+    }
+
+    #[cfg(not(unix))]
+    fn serve_agents(&mut self) {}
 
     pub fn state(&self) -> &AppState {
         &self.state
@@ -109,16 +157,32 @@ impl SpatialCodingApp {
         self.state.changes.reset();
         self.state.diff = None;
         self.state.folder_files_cache.replace(None);
-        self.file_tree =
-            match crate::fs::loader::load_directory(&dir, self.state.settings.show_dot_folders) {
-                Ok(tree) => Some(tree),
-                Err(e) => {
-                    log::error!("Failed to load {}: {e}", dir.display());
-                    None
-                }
-            };
+        // The ignore list is per repository: the folder must be known first.
+        self.state.loaded_dir = Some(dir.clone());
+        self.file_tree = match self.load_tree(&dir) {
+            Ok(tree) => Some(tree),
+            Err(e) => {
+                log::error!("Failed to load {}: {e}", dir.display());
+                None
+            }
+        };
         self.watcher = start_watcher(&dir, &self.repaint);
+        let recents = &mut self.state.settings.recent_folders;
+        recents.retain(|d| d != &dir);
+        recents.insert(0, dir.clone());
+        recents.truncate(MAX_RECENT_FOLDERS);
         self.state.loaded_dir = Some(dir);
+    }
+
+    /// The Workspace tree of `dir`: without the ignored paths, unless
+    /// Workspace › Show ignored files is on.
+    fn load_tree(&self, dir: &std::path::Path) -> std::io::Result<TreeNode> {
+        let ignore = if self.state.settings.show_ignored {
+            crate::fs::ignore::IgnoreSet::default()
+        } else {
+            self.state.ignore_set()
+        };
+        crate::fs::loader::load_directory_filtered(dir, dir, self.state.settings.show_dot_folders, &ignore)
     }
 
     /// Applies what the watcher saw on disk to the canvas and the file tree.
@@ -134,7 +198,7 @@ impl SpatialCodingApp {
         }
         if applied.tree_stale
             && let Some(dir) = self.state.loaded_dir.clone()
-            && let Ok(mut tree) = crate::fs::loader::load_directory(&dir, self.state.settings.show_dot_folders)
+            && let Ok(mut tree) = self.load_tree(&dir)
         {
             if let Some(old) = &self.file_tree {
                 tree.copy_expanded_from(old);
@@ -164,40 +228,98 @@ impl SpatialCodingApp {
     /// Runs what the command palette picked.
     pub fn execute_command(&mut self, command: ui::command_palette::PaletteCommand) {
         use ui::command_palette::PaletteCommand as C;
-        let state = &mut self.state;
         match command {
-            C::OpenFolder => {
-                if let Some(dir) = rfd::FileDialog::new().pick_folder() {
-                    self.open_folder(dir);
+            C::Command(id) => {
+                if let Err(e) = crate::commands::run(&mut self.state, id, &serde_json::Value::Null) {
+                    log::warn!("{e}");
                 }
             }
-            C::OpenAllFiles => {
-                workspace::open_all_files(state);
+            C::GoToUi(id) => {
+                let now = self.repaint.input(|i| i.time);
+                crate::commands::go_to_ui(&mut self.state, id, now);
             }
-            C::FitView => state.pending_fit = true,
-            C::ApplyLayout => self.apply_layout(),
-            C::ClearCanvas => workspace::clear_canvas(state),
-            C::ToggleLeft(panel) => {
-                state.left_panel = if state.left_panel == Some(panel) { None } else { Some(panel) };
-            }
-            C::ToggleRight(panel) => {
-                state.right_panel = if state.right_panel == Some(panel) { None } else { Some(panel) };
-            }
-            C::ToggleSettings => state.show_settings = !state.show_settings,
-            C::ToggleShortcuts => state.show_shortcuts = !state.show_shortcuts,
-            C::ToggleMinimap => state.settings.show_minimap = !state.settings.show_minimap,
-            C::ShowDiff => workspace::open_diff_of_selection(state),
             C::GoToFile(path) => {
-                workspace::focus_location(state, &path, 0);
+                workspace::focus_location(&mut self.state, &path, 0);
+            }
+        }
+        self.run_app_actions();
+    }
+
+    /// What commands asked of the shell: the native folder dialog.
+    fn run_app_actions(&mut self) {
+        for action in std::mem::take(&mut self.state.pending_app_actions) {
+            match action {
+                crate::commands::AppAction::PickFolder => {
+                    if let Some(dir) = rfd::FileDialog::new().pick_folder() {
+                        self.open_folder(dir);
+                    }
+                }
+                crate::commands::AppAction::OpenFolder(dir) => self.open_folder(dir),
+                crate::commands::AppAction::ReloadTree => {
+                    self.state.folder_files_cache.replace(None);
+                    if let Some(dir) = self.state.loaded_dir.clone()
+                        && let Ok(mut tree) = self.load_tree(&dir)
+                    {
+                        if let Some(old) = &self.file_tree {
+                            tree.copy_expanded_from(old);
+                        }
+                        self.file_tree = Some(tree);
+                    }
+                }
+                crate::commands::AppAction::CloseFolder => {
+                    workspace::clear_canvas(&mut self.state);
+                    self.state.changes.reset();
+                    self.state.diff = None;
+                    self.state.folder_files_cache.replace(None);
+                    self.state.loaded_dir = None;
+                    self.file_tree = None;
+                    self.watcher = None;
+                }
+            }
+        }
+    }
+
+    /// Settings → Viewport Details and Activity Indicator.
+    fn draw_canvas_overlays(&self, painter: &egui::Painter, canvas_rect: egui::Rect) {
+        let theme = &self.state.theme;
+        let font = egui::FontId::monospace(10.5);
+        if self.state.settings.show_viewport_details {
+            let vp = &self.state.viewport;
+            let text = format!("{:.3}x  L{}  {:.0},{:.0}", vp.zoom, LodLevel::from_zoom(vp.zoom).number(), -vp.offset.x, -vp.offset.y);
+            painter.text(
+                canvas_rect.left_bottom() + egui::vec2(12.0, -10.0),
+                egui::Align2::LEFT_BOTTOM,
+                text,
+                font.clone(),
+                theme.text_muted,
+            );
+        }
+        if self.state.settings.show_activity_indicator {
+            let busy = if self.state.deps.is_waiting() {
+                Some("Analyzing dependencies with the language servers…")
+            } else if self.state.changes.is_loading() {
+                Some("Reading Git changes…")
+            } else {
+                None
+            };
+            if let Some(text) = busy {
+                painter.text(
+                    canvas_rect.center_bottom() + egui::vec2(0.0, -10.0),
+                    egui::Align2::CENTER_BOTTOM,
+                    text,
+                    font,
+                    theme.text_secondary,
+                );
             }
         }
     }
 
     fn apply_layout(&mut self) {
+        let input = self.state.layout_input();
         crate::layout::hierarchical::apply_layout(
             &mut self.state.node_store,
             &self.state.edge_store,
-            &self.state.layout_settings,
+            &input,
         );
         self.state.layout_dirty = false;
     }
@@ -205,6 +327,17 @@ impl SpatialCodingApp {
     fn draw_canvas(&mut self, ui: &mut egui::Ui) {
         let canvas_rect = ui.available_rect_before_wrap();
         let response = ui.allocate_rect(canvas_rect, egui::Sense::click_and_drag());
+        // Commands under the pointer (F, Shift+E, Ctrl+R…) read these.
+        self.state.canvas_rect = canvas_rect;
+        // A file or folder dragged from the Workspace tree and dropped here.
+        if let Some(drag) = response.dnd_release_payload::<ui::sidebar_left::TreeDrag>() {
+            if drag.0.is_dir() {
+                workspace::open_folder_on_canvas(&mut self.state, &drag.0);
+            } else {
+                workspace::open_file(&mut self.state, &drag.0);
+            }
+        }
+        self.state.hover_screen = ui.input(|i| i.pointer.hover_pos()).filter(|p| canvas_rect.contains(*p));
 
         if std::mem::take(&mut self.state.pending_fit)
             && let Some(world_rect) = input::compute_nodes_bounding_rect(&self.state)
@@ -217,7 +350,7 @@ impl SpatialCodingApp {
             // on its line, gliding there with Smooth Transition.
             let lsp = &self.state.settings.lsp;
             let vp = &mut self.state.viewport;
-            if !lsp.keep_zoom && LodLevel::from_zoom(vp.zoom) != LodLevel::Full {
+            if !lsp.keep_zoom && LodLevel::from_zoom(vp.zoom) != LodLevel::L1 {
                 vp.zoom = 1.0;
                 vp.target_zoom = 1.0;
             }
@@ -233,7 +366,11 @@ impl SpatialCodingApp {
 
         self.state
             .viewport
-            .handle_input(&response, canvas_rect, self.state.space_held);
+            .handle_input(
+                &response,
+                canvas_rect,
+                self.state.space_held || self.state.active_tool == crate::state::Tool::Move,
+            );
 
         let dt = ui.input(|i| i.stable_dt);
         let animating = self
@@ -267,13 +404,21 @@ impl SpatialCodingApp {
             ui::symbol_graph::paint_connections(&painter, graph, &graph_names);
         }
         self.draw_ports(&painter, canvas_rect, &ports);
+        // Token edges and, zoomed out, a name pill on every pinned token.
+        let pills = self.state.viewport.zoom < crate::nodes::lod::THRESHOLDS[0];
+        ui::pin_overlay::paint_connections(&painter, self.state.lsp.pins.pins(), &self.pin_marks, pills);
         self.draw_out_of_view_references(&painter, canvas_rect);
+        self.draw_out_of_view_tags(ui, &painter, canvas_rect);
 
         if self.state.settings.show_minimap {
             let node_rects = self.collect_node_rects();
-            self.minimap
-                .draw(ui, &self.state.viewport, &node_rects, canvas_rect);
+            if let Some(world) = self.minimap.draw(ui, &self.state.viewport, &node_rects, canvas_rect) {
+                let vp = &mut self.state.viewport;
+                vp.offset = canvas_rect.center().to_vec2() / vp.zoom - world.to_vec2();
+                vp.pan_target = None;
+            }
         }
+        self.draw_canvas_overlays(&painter, canvas_rect);
 
         // v2 frames the canvas in a thin rounded outline.
         painter.rect_stroke(
@@ -303,11 +448,22 @@ impl SpatialCodingApp {
                 ) {
                     let additive = ui.input(|i| i.modifiers.shift);
                     if let Some(symbol) = self.symbol_at(&painter, id, pos) {
+                        let name = symbol.name_span;
                         self.state.selection.select_symbol(id, symbol, additive);
-                    } else if additive {
-                        self.state.selection.toggle(id);
+                        // The click also pins the symbol: the language server
+                        // answers with its whole graph.
+                        ui::symbol_pins::pin(Some(ui.ctx()), &mut self.state, id, name.line, name.start_byte, additive);
                     } else {
-                        self.state.selection.select(id);
+                        if additive {
+                            self.state.selection.toggle(id);
+                        } else {
+                            self.state.selection.select(id);
+                        }
+                        // A click in a region of code (a body, an initializer,
+                        // call arguments) maps to a token inside or around it.
+                        if let Some((line, byte)) = self.mapped_token(id, world_pos) {
+                            ui::symbol_pins::pin(Some(ui.ctx()), &mut self.state, id, line, byte, additive);
+                        }
                     }
                 } else if let Some(id) = self.folder_block_at(world_pos) {
                     if ui.input(|i| i.modifiers.shift) {
@@ -354,13 +510,31 @@ impl SpatialCodingApp {
             .then_some(id)
     }
 
+    /// Symbol Mapping for a click at `world` inside file node `node_id`: the
+    /// `(line, byte column)` of the token the region maps to, if the click is
+    /// in the code area.
+    fn mapped_token(&self, node_id: u64, world: egui::Pos2) -> Option<(usize, usize)> {
+        let node = self.state.node_store.get_file(node_id)?;
+        let font_size = self.state.settings.font_size;
+        let code_top = node.position.y + HEADER_HEIGHT + CODE_PADDING;
+        if node.collapsed || world.y < code_top {
+            return None;
+        }
+        let line = ((world.y - code_top) / line_height(font_size)) as usize;
+        let text = node.content.lines().nth(line)?;
+        let columns = ((world.x - node.position.x - CODE_PAD_X) / code_char_width(font_size)).max(0.0) as usize;
+        let byte = text.char_indices().nth(columns).map_or(text.len(), |(i, _)| i);
+        let token = crate::analysis::symbol_mapping::map_click(&node.path, &node.content, line, byte)?;
+        Some((token.line, token.start))
+    }
+
     /// Pick only the exact name returned by LSP, measured with the same token
     /// spans and font as painting. Whitespace and keywords select the file.
     fn symbol_at(&mut self, painter: &egui::Painter, node_id: u64, screen: egui::Pos2) -> Option<SelectedSymbol> {
         let node = self.state.node_store.get_file(node_id)?;
         let zoom = self.state.viewport.zoom;
         let lod = LodLevel::from_zoom(zoom);
-        if node.collapsed || lod == LodLevel::TitleOnly {
+        if node.collapsed || !lod.draws_code() {
             return None;
         }
         let font_size = self.state.settings.font_size;
@@ -597,7 +771,7 @@ impl SpatialCodingApp {
     fn collect_ports(&self) -> HashMap<u64, Vec<Port>> {
         let state = &self.state;
         if !state.edge_style.show_ports
-            || LodLevel::from_zoom(state.viewport.zoom) == LodLevel::TitleOnly
+            || !LodLevel::from_zoom(state.viewport.zoom).draws_code()
         {
             return HashMap::new();
         }
@@ -655,6 +829,7 @@ impl SpatialCodingApp {
         ports: &HashMap<u64, Vec<Port>>,
     ) -> Vec<(usize, egui::Rect)> {
         let mut graph_names = Vec::new();
+        let mut pin_marks: Vec<ui::pin_overlay::PinMark> = Vec::new();
         let zoom = self.state.viewport.zoom;
         let lod = LodLevel::from_zoom(zoom);
         let theme = &self.state.theme;
@@ -683,7 +858,9 @@ impl SpatialCodingApp {
             let label_anchor = screen_rect.center_top() - egui::vec2(0.0, 4.0);
             let label_size = (font_size * zoom).clamp(10.0, 14.0);
             let names = &self.state.settings.files;
-            if names.show_names {
+            // L1-L3 show the name, L4 fades it out (0.04 → 0.01), L5 hides it.
+            let label_alpha = LodLevel::header_alpha(zoom);
+            if names.show_names && label_alpha > 0.0 {
                 draw_fitted_label(
                     painter,
                     node.file_name(),
@@ -692,19 +869,45 @@ impl SpatialCodingApp {
                     screen_rect.width(),
                     label_size,
                     min_label_px(names.min_size_pct),
-                    theme.text_secondary,
+                    theme.text_secondary.gamma_multiply(label_alpha),
                 );
             }
 
-            if lod == LodLevel::TitleOnly {
-                // Far away: solid block only — the floating label above is the name.
-                painter.rect_filled(screen_rect, rounding, theme.node_bg);
+            if !lod.draws_code() {
+                // Far away: solid block only — the floating label above is the
+                // name. L5 fills the whole node with the semantic color:
+                // selection or diff.
+                let fill = if !lod.semantic_fill() {
+                    theme.node_bg
+                } else if selected {
+                    semantic_selected()
+                } else if self.state.changes.is_changed(&node.path) {
+                    semantic_diff()
+                } else {
+                    theme.node_bg
+                };
+                painter.rect_filled(screen_rect, rounding, fill);
                 painter.rect_stroke(
                     screen_rect,
                     rounding,
                     egui::Stroke::new(border_width, border_color),
                     egui::StrokeKind::Outside,
                 );
+                // The CST tint is the node's embedded minimap from L3 on.
+                if self.state.settings.cst.show_canvas
+                    && lod.cst_base_alpha() > 0.0
+                    && !node.collapsed
+                    && !node.content.is_empty()
+                {
+                    let origin = egui::pos2(
+                        screen_rect.left() + CODE_PAD_X * zoom,
+                        screen_rect.top() + (HEADER_HEIGHT + CODE_PADDING) * zoom,
+                    );
+                    let clip = painter.with_clip_rect(screen_rect.intersect(painter.clip_rect()));
+                    let items = self.state.cst.tint_items(&self.state.node_store, node.id, &self.state.settings.cst);
+                    let (line_h, char_w) = (line_height(font_size) * zoom, code_char_width(font_size * zoom));
+                    paint_cst_tint(&clip, items, &self.state.settings.cst, lod, origin, line_h, char_w);
+                }
                 continue;
             }
 
@@ -751,6 +954,14 @@ impl SpatialCodingApp {
             );
             let line_h = line_height(font_size) * zoom;
             let code_clip = painter.with_clip_rect(screen_rect.intersect(painter.clip_rect()));
+
+            // Base tint of the CST by role, from L2 down (L1 only paints what
+            // is hovered or selected).
+            if self.state.settings.cst.show_canvas && lod.cst_base_alpha() > 0.0 {
+                let char_w = code_char_width(font_size * zoom);
+                let items = self.state.cst.tint_items(&self.state.node_store, node.id, &self.state.settings.cst);
+                paint_cst_tint(&code_clip, items, &self.state.settings.cst, lod, code_origin, line_h, char_w);
+            }
 
             // Under the code text: the statements joined by the edges of the
             // selected nodes, the lines of the CST or LSP row under the
@@ -913,8 +1124,22 @@ impl SpatialCodingApp {
                 }
             }
 
-            match lod {
-                LodLevel::Full => {
+            // Pinned symbol graphs: blocks and name marks under the code.
+            if !self.state.lsp.pins.is_empty() && lod.draws_code() {
+                let area = ui::pin_overlay::CodeArea {
+                    origin: code_origin,
+                    right: screen_rect.right(),
+                    line_h,
+                    char_w: code_char_width(font_size * zoom),
+                    visible_lines: node.visible_lines(),
+                };
+                ui::pin_overlay::paint_node(
+                    &code_clip, self.state.lsp.pins.pins(), &node.path, &node.content, area, &mut pin_marks,
+                );
+            }
+
+            match lod.render_mode() {
+                RenderMode::Text => {
                     draw_line_numbers(
                         &code_clip,
                         lines.len(),
@@ -925,22 +1150,32 @@ impl SpatialCodingApp {
                     );
                     draw_code_text(&code_clip, lines, code_origin, line_h, font_size * zoom)
                 }
-                LodLevel::Minified => {
+                RenderMode::Minimap => {
                     draw_code_bars(&code_clip, lines, code_origin, line_h, font_size * zoom)
                 }
-                LodLevel::TitleOnly => unreachable!(),
+                RenderMode::None => unreachable!(),
             }
         }
+        self.pin_marks = pin_marks;
         graph_names
     }
 
     fn draw_edges(&mut self, painter: &egui::Painter) {
         // LSP "Dim Dependency Edges": while a symbol is active.
-        let lsp = &self.state.settings.lsp;
         let symbol_active =
             !self.state.selection.symbols().is_empty() || self.state.lsp.references.is_some()
-                || self.state.lsp.canvas_graph.graph.is_some();
-        let symbol_dim = (lsp.dim_edges && symbol_active).then_some(lsp.dim_pct);
+                || self.state.lsp.canvas_graph.graph.is_some() || !self.state.lsp.pins.is_empty();
+        // The dim stays 500 ms after the last symbol goes (v2 "restores with a delay").
+        let now = self.repaint.input(|i| i.time);
+        if symbol_active {
+            self.state.lsp.dim_until = now + crate::ui::lsp_panel::DIM_RESTORE_DELAY;
+        }
+        let holding = !symbol_active && now < self.state.lsp.dim_until;
+        if holding {
+            self.repaint.request_repaint_after(std::time::Duration::from_millis(100));
+        }
+        let lsp = &self.state.settings.lsp;
+        let symbol_dim = (lsp.dim_edges && (symbol_active || holding)).then_some(lsp.dim_pct);
         let viewport = &self.state.viewport;
         let zoom = viewport.zoom;
         let lod = LodLevel::from_zoom(zoom);
@@ -948,7 +1183,7 @@ impl SpatialCodingApp {
         let node_width = self.state.settings.node_width;
         let highlighter = &mut self.highlighter;
         let mut symbol_rect = |node: &crate::nodes::file_node::FileNode, name: crate::edges::edge_store::NameSpan| {
-            if node.collapsed || lod == LodLevel::TitleOnly || name.line >= node.visible_lines() {
+            if node.collapsed || !lod.draws_code() || name.line >= node.visible_lines() {
                 return None;
             }
             let spans = highlighter.highlight_file(&node.path, &node.content).get(name.line)?;
@@ -956,12 +1191,12 @@ impl SpatialCodingApp {
             let origin = viewport.world_to_screen(node.position);
             let line_h = line_height(font_size) * zoom;
             let line_top = origin.y + (HEADER_HEIGHT + CODE_PADDING) * zoom + name.line as f32 * line_h;
-            let (top, height) = if lod == LodLevel::Full {
+            let (top, height) = if lod.render_mode() == RenderMode::Text {
                 let text = node.content.lines().nth(name.line)?.get(name.start_byte..name.end_byte)?;
                 let height = painter.layout_no_wrap(text.to_string(), code_font(font_size * zoom), egui::Color32::PLACEHOLDER).size().y;
                 (line_top, height)
             } else {
-                let height = (line_h * 0.6).max(1.0);
+                let height = (line_h - 2.0).max(1.0);
                 (line_top + (line_h - height) * 0.5, height)
             };
             let rect = egui::Rect::from_min_max(
@@ -1009,6 +1244,37 @@ impl SpatialCodingApp {
         }
     }
 
+    /// Out of View: a tag with the file name at the canvas border for every
+    /// file holding a pinned entry that is off screen; clicking pans there.
+    fn draw_out_of_view_tags(&mut self, ui: &mut egui::Ui, painter: &egui::Painter, canvas_rect: egui::Rect) {
+        if !self.state.settings.lsp.out_of_view {
+            return;
+        }
+        let tags = ui::pin_overlay::out_of_view(&self.state, canvas_rect);
+        for tag in tags {
+            let galley = painter.layout_no_wrap(tag.name.clone(), egui::FontId::proportional(11.0), egui::Color32::WHITE);
+            let rect = egui::Rect::from_center_size(tag.at, galley.size() + egui::vec2(14.0, 6.0));
+            let rect = rect.translate(egui::vec2(
+                (canvas_rect.left() + 4.0 - rect.left()).max(0.0) - (rect.right() - canvas_rect.right() + 4.0).max(0.0),
+                0.0,
+            ));
+            let response = ui.interact(rect, egui::Id::new(("out_of_view", tag.node_id)), egui::Sense::click());
+            let fill = if response.hovered() { self.state.theme.control_active } else { self.state.theme.control_bg };
+            painter.rect_filled(rect, 6.0, fill);
+            painter.rect_stroke(rect, 6.0, egui::Stroke::new(1.0_f32, self.state.theme.selection), egui::StrokeKind::Inside);
+            painter.galley(rect.min + egui::vec2(7.0, 3.0), galley, egui::Color32::WHITE);
+            if response.clicked() {
+                let vp = &mut self.state.viewport;
+                let target = canvas_rect.center().to_vec2() / vp.zoom - tag.world_center.to_vec2();
+                if self.state.settings.lsp.smooth_transition {
+                    vp.pan_target = Some(target);
+                } else {
+                    vp.offset = target;
+                }
+            }
+        }
+    }
+
     fn collect_node_rects(&self) -> Vec<egui::Rect> {
         input::shown_node_rects(&self.state)
     }
@@ -1028,9 +1294,15 @@ fn start_watcher(dir: &std::path::Path, ctx: &egui::Context) -> Option<crate::fs
 impl eframe::App for SpatialCodingApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         input::handle_shortcuts(ctx, &mut self.state);
+        self.run_app_actions();
+        self.serve_agents();
         crate::workspace::poll_lsp(&mut self.state);
         self.follow_disk();
         if self.state.git_comparison.is_loading() {
+            ctx.request_repaint_after(std::time::Duration::from_millis(100));
+        }
+        // A pinned symbol's graph is on its way: nothing else wakes the UI.
+        if self.state.lsp.pins.needs_polling() {
             ctx.request_repaint_after(std::time::Duration::from_millis(100));
         }
         if self.state.diff.as_ref().is_some_and(|d| d.loader.is_loading()) {
@@ -1064,7 +1336,7 @@ impl eframe::App for SpatialCodingApp {
 
         if self.state.loaded_dir.is_some() && self.file_tree.is_none() {
             if let Some(ref dir) = self.state.loaded_dir {
-                match crate::fs::loader::load_directory(dir, self.state.settings.show_dot_folders) {
+                match self.load_tree(dir) {
                     Ok(tree) => self.file_tree = Some(tree),
                     Err(e) => log::error!("Failed to load directory: {}", e),
                 }
@@ -1079,8 +1351,10 @@ impl eframe::App for SpatialCodingApp {
                 ui::toolbar::draw_toolbar(ui, &mut self.state);
             });
 
-        ui::sidebar_left::draw_sidebar_left(ctx, &mut self.state, &mut self.file_tree);
-        ui::sidebar_right::draw_sidebar_right(ctx, &mut self.state);
+        if !self.state.sidebars_hidden {
+            ui::sidebar_left::draw_sidebar_left(ctx, &mut self.state, &mut self.file_tree);
+            ui::sidebar_right::draw_sidebar_right(ctx, &mut self.state);
+        }
 
         egui::CentralPanel::default()
             .frame(
@@ -1093,7 +1367,14 @@ impl eframe::App for SpatialCodingApp {
             });
 
         ui::settings_dialog::draw_settings(ctx, &mut self.state);
+        ui::settings_dialog::draw_ignore_settings(ctx, &mut self.state);
+        ui::settings_dialog::draw_command_proposals(ctx, &mut self.state);
+        self.run_app_actions();
         ui::shortcuts_dialog::draw_shortcuts(ctx, &mut self.state.show_shortcuts);
+        ui::docs_dialog::draw(ctx, &mut self.state);
+        ui::zoom_levels::draw(ctx, &mut self.state);
+        ui::toast::draw(ctx, &mut self.state);
+        crate::commands::draw_ui_highlight(ctx, &mut self.state);
         ui::diff_view::draw_diff_view(ctx, &mut self.state);
         if let Some(command) = ui::command_palette::draw_command_palette(ctx, &mut self.state) {
             self.execute_command(command);
@@ -1110,33 +1391,94 @@ impl eframe::App for SpatialCodingApp {
 
 impl SpatialCodingApp {
     fn draw_welcome_screen(&mut self, ctx: &egui::Context) {
+        let theme = self.state.theme.clone();
+        let recents = self.state.settings.recent_folders.clone();
+        let example = example_workspace();
+        let mut actions: Vec<crate::commands::AppAction> = Vec::new();
+        let mut command: Option<&'static str> = None;
         egui::Area::new(egui::Id::new("welcome"))
             .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
             .show(ctx, |ui| {
-                egui::Frame::popup(ui.style()).show(ui, |ui| {
-                    ui.set_max_width(500.0);
-                    ui.vertical_centered(|ui| {
-                        ui.heading("SpatialCoding");
-                        ui.add_space(8.0);
-                        ui.label("Spatial code visualization");
-                        ui.add_space(16.0);
-
+                let card = |ui: &mut egui::Ui, title: &str, add: &mut dyn FnMut(&mut egui::Ui)| {
+                    egui::Frame::NONE
+                        .fill(theme.panel_bg)
+                        .stroke(egui::Stroke::new(1.0_f32, theme.panel_border))
+                        .corner_radius(10.0)
+                        .inner_margin(14.0)
+                        .show(ui, |ui| {
+                            ui.set_width(270.0);
+                            ui.set_min_height(150.0);
+                            ui.label(egui::RichText::new(title).strong().size(15.0));
+                            ui.add_space(6.0);
+                            add(ui);
+                        });
+                };
+                ui.vertical_centered(|ui| {
+                    ui.heading("SpatialCoding");
+                    ui.label(egui::RichText::new("Spatial code visualization").color(theme.text_muted));
+                    ui.add_space(12.0);
+                });
+                ui.horizontal_top(|ui| {
+                    card(ui, "Local Server", &mut |ui| {
+                        ui.label("Language servers run on this machine, one per workspace, started as child processes: rust-analyzer, typescript-language-server, pyright and gopls.");
+                        ui.add_space(4.0);
+                        ui.label(egui::RichText::new("Folders, diffs and file watching work without a server.").small().color(theme.text_muted));
+                    });
+                    card(ui, "Repository", &mut |ui| {
                         if ui.button("Open folder...").clicked() {
-                            if let Some(dir) = rfd::FileDialog::new().pick_folder() {
-                                self.open_folder(dir);
+                            actions.push(crate::commands::AppAction::PickFolder);
+                        }
+                        if !recents.is_empty() {
+                            ui.add_space(6.0);
+                            ui.label(egui::RichText::new("Recent").small().color(theme.text_muted));
+                            for dir in recents.iter().take(4) {
+                                let name = dir.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| dir.display().to_string());
+                                if ui.link(name).on_hover_text(dir.display().to_string()).clicked() {
+                                    actions.push(crate::commands::AppAction::OpenFolder(dir.clone()));
+                                }
                             }
                         }
-
-                        ui.add_space(8.0);
-                        ui.label(
-                            egui::RichText::new("Ctrl+/ for shortcuts")
-                                .small()
-                                .color(self.state.theme.text_muted),
-                        );
+                        if let Some(dir) = &example {
+                            ui.add_space(6.0);
+                            ui.label(egui::RichText::new("Example").small().color(theme.text_muted));
+                            if ui.link("showcase workspace").on_hover_text(dir.display().to_string()).clicked() {
+                                actions.push(crate::commands::AppAction::OpenFolder(dir.clone()));
+                            }
+                        }
                     });
                 });
+                ui.add_space(10.0);
+                ui.vertical_centered(|ui| {
+                    ui.horizontal(|ui| {
+                        if ui.button("Docs").clicked() {
+                            command = Some("ui:toggleDocsWindow");
+                        }
+                        if ui.button("Shortcuts").clicked() {
+                            command = Some("ui:openShortcutsPanel");
+                        }
+                        if ui.button("Command Palette").clicked() {
+                            command = Some("ui:toggleCommandPalette");
+                        }
+                    });
+                    ui.add_space(4.0);
+                    ui.label(egui::RichText::new("Ctrl+/ for shortcuts").small().color(theme.text_muted));
+                });
             });
+        self.state.pending_app_actions.extend(actions);
+        if let Some(id) = command {
+            let _ = crate::commands::run(&mut self.state, id, &serde_json::Value::Null);
+        }
+        self.run_app_actions();
     }
+}
+
+/// The checked-in showcase workspace, when the app runs from the repository
+/// (or a directory below it).
+fn example_workspace() -> Option<PathBuf> {
+    let cwd = std::env::current_dir().ok()?;
+    cwd.ancestors()
+        .map(|dir| dir.join("examples").join("showcase"))
+        .find(|dir| dir.is_dir())
 }
 
 type HighlightedLine = Vec<(syntect::highlighting::Style, String)>;
@@ -1259,6 +1601,90 @@ fn draw_code_text(
     }
 }
 
+/// Paints the CST of one file as tinted rectangles: fill at the level's base
+/// alpha times the type's fill alpha, and the type's border. Nodes the level
+/// culls (`depth >= {2,2,2,3,3}` and fewer than `{1,1,1,100,100}` lines) and
+/// hidden types are skipped.
+#[allow(clippy::too_many_arguments)]
+fn paint_cst_tint(
+    painter: &egui::Painter,
+    items: &[crate::ui::cst_panel::TintItem],
+    settings: &crate::state::CstSettings,
+    lod: LodLevel,
+    origin: egui::Pos2,
+    line_h: f32,
+    char_w: f32,
+) {
+    let clip = painter.clip_rect();
+    let mut styles: HashMap<&str, crate::analysis::cst_style::CstTypeStyle> = HashMap::new();
+    for item in items {
+        let lines = item.end_line + 1 - item.start_line;
+        if lod.culls_cst(item.depth, lines) {
+            continue;
+        }
+        let rect = egui::Rect::from_min_max(
+            origin + egui::vec2(item.x0 as f32 * char_w, item.start_line as f32 * line_h),
+            origin + egui::vec2(item.x1 as f32 * char_w, (item.end_line + 1) as f32 * line_h),
+        );
+        if !rect.intersects(clip) || rect.width() < 0.5 || rect.height() < 0.5 {
+            continue;
+        }
+        let style = styles.entry(item.kind.as_str()).or_insert_with(|| settings.style_for(&item.kind));
+        if !style.visible {
+            continue;
+        }
+        let [r, g, b] = style.color;
+        let alpha = (lod.cst_base_alpha() * style.fill_alpha).clamp(0.0, 1.0);
+        let to_u8 = |a: f32| (a * 255.0).round() as u8;
+        match style.fill {
+            crate::analysis::cst_style::FillMode::Solid => {
+                painter.rect_filled(rect, 0.0, egui::Color32::from_rgba_unmultiplied(r, g, b, to_u8(alpha)));
+            }
+            crate::analysis::cst_style::FillMode::Gradient => {
+                let [r2, g2, b2] = style.color_end;
+                let left = egui::Color32::from_rgba_unmultiplied(r, g, b, to_u8(alpha));
+                let right = egui::Color32::from_rgba_unmultiplied(r2, g2, b2, to_u8(alpha));
+                let mut mesh = egui::Mesh::default();
+                let i = mesh.vertices.len() as u32;
+                for (pos, color) in [
+                    (rect.left_top(), left),
+                    (rect.right_top(), right),
+                    (rect.right_bottom(), right),
+                    (rect.left_bottom(), left),
+                ] {
+                    mesh.vertices.push(egui::epaint::Vertex { pos, uv: egui::epaint::WHITE_UV, color });
+                }
+                mesh.indices.extend([i, i + 1, i + 2, i, i + 2, i + 3]);
+                painter.add(egui::Shape::mesh(mesh));
+            }
+        }
+        let stroke_alpha = to_u8(style.stroke_alpha(alpha));
+        if stroke_alpha > 0 && style.border_width > 0.0 {
+            let [br, bg, bb] = style.border_color;
+            let stroke = egui::Stroke::new(
+                style.border_width.max(0.5),
+                egui::Color32::from_rgba_unmultiplied(br, bg, bb, stroke_alpha),
+            );
+            let s = style.sides;
+            if s.top { painter.line_segment([rect.left_top(), rect.right_top()], stroke); }
+            if s.right { painter.line_segment([rect.right_top(), rect.right_bottom()], stroke); }
+            if s.bottom { painter.line_segment([rect.left_bottom(), rect.right_bottom()], stroke); }
+            if s.left { painter.line_segment([rect.left_top(), rect.left_bottom()], stroke); }
+        }
+    }
+}
+
+/// Alpha of the minimap rectangles (`globalAlpha .4` in the reference).
+const MINIMAP_ALPHA: f32 = 0.4;
+/// L5 fill of a selected node (`#AED6FF`, the selected edge color).
+fn semantic_selected() -> egui::Color32 {
+    egui::Color32::from_rgba_unmultiplied(0xAE, 0xD6, 0xFF, 90)
+}
+/// L5 fill of a node with working-tree changes (added green `#4CD964`).
+fn semantic_diff() -> egui::Color32 {
+    egui::Color32::from_rgba_unmultiplied(0x4C, 0xD9, 0x64, 80)
+}
+
 /// Minified LOD: each token drawn as a colored bar (minimap style). When lines
 /// get very thin, collapses to one bar per line to keep the shape count low.
 fn draw_code_bars(
@@ -1269,7 +1695,7 @@ fn draw_code_bars(
     font_px: f32,
 ) {
     let char_w = code_char_width(font_px);
-    let bar_h = (line_h * 0.6).max(1.0);
+    let bar_h = (line_h - 2.0).max(1.0);
     let per_token = line_h >= 4.0;
     let rows = visible_code_rows(origin.y, line_h, lines.len(), painter.clip_rect());
     for (i, spans) in lines.iter().enumerate().take(rows.end).skip(rows.start) {
@@ -1286,7 +1712,8 @@ fn draw_code_bars(
             if end <= start {
                 continue;
             }
-            let color = Highlighter::style_to_egui_color(style).gamma_multiply(0.75);
+            let color = Highlighter::style_to_egui_color(style)
+                .gamma_multiply(MINIMAP_ALPHA);
             if per_token {
                 bar(painter, origin.x, y, start, end, char_w, bar_h, color);
             } else {
@@ -1361,8 +1788,8 @@ fn name_x_range(
         if s.is_empty() {
             return 0.0;
         }
-        match lod {
-            LodLevel::Full => painter
+        match lod.render_mode() {
+            RenderMode::Text => painter
                 .layout_no_wrap(s.to_string(), code_font(font_px), egui::Color32::PLACEHOLDER)
                 .size()
                 .x,
@@ -1457,7 +1884,7 @@ mod tests {
         let ctx = egui::Context::default();
         let _ = ctx.run(egui::RawInput::default(), |ctx| {
             let painter = egui::Painter::new(ctx.clone(), egui::LayerId::background(), egui::Rect::EVERYTHING);
-            let (x0, x1) = name_x_range(&painter, LodLevel::Full, &line, start, end, font_px).unwrap();
+            let (x0, x1) = name_x_range(&painter, LodLevel::L1, &line, start, end, font_px).unwrap();
             let galley = painter.layout_no_wrap(text.trim_end().to_string(), code_font(font_px), egui::Color32::WHITE);
             // Whole-line glyphs snap to pixels while the drawn spans are
             // summed, so allow 1 px; the old 0.6-advance guess was ~40 px off.

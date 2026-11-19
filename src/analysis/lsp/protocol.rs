@@ -93,7 +93,7 @@ fn parse_position(v: &Value) -> Option<Position> {
     })
 }
 
-fn parse_range(v: &Value) -> Option<Range> {
+pub(crate) fn parse_range(v: &Value) -> Option<Range> {
     Some(Range {
         start: parse_position(v.get("start")?)?,
         end: parse_position(v.get("end")?)?,

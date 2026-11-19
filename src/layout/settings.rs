@@ -38,6 +38,12 @@ pub struct LayoutSettings {
     pub file_spacing: f32,
     pub folder_spacing: f32,
     pub folder_padding: f32,
+    /// Geometry of a file node, set from the canvas settings
+    /// ([`AppState::layout_input`]); never persisted with the layout.
+    #[serde(skip)]
+    pub node_width: f32,
+    #[serde(skip)]
+    pub font_size: f32,
 }
 
 impl Default for LayoutSettings {
@@ -52,6 +58,8 @@ impl Default for LayoutSettings {
             file_spacing: 500.0,
             folder_spacing: 500.0,
             folder_padding: 80.0,
+            node_width: 700.0,
+            font_size: 12.0,
         }
     }
 }

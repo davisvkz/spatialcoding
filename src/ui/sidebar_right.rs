@@ -25,6 +25,7 @@ const PANELS: &[(&str, &str, RightPanel)] = &[
 ];
 
 pub fn draw_sidebar_right(ctx: &egui::Context, state: &mut AppState) {
+    state.panel_rect_right = None;
     lsp_panel::draw_advanced_card(ctx, state);
     lsp_panel::draw_language_servers(ctx, state);
     // Cross-panel housekeeping: these highlight-caches only live while their
@@ -66,7 +67,7 @@ pub fn draw_sidebar_right(ctx: &egui::Context, state: &mut AppState) {
         .expect("PANELS covers every RightPanel variant");
     let theme = state.theme.clone();
 
-    egui::SidePanel::right("sidebar_right_panel")
+    let shown = egui::SidePanel::right("sidebar_right_panel")
         .exact_width(PANEL_WIDTH)
         .resizable(false)
         .show_separator_line(false)
@@ -107,6 +108,7 @@ pub fn draw_sidebar_right(ctx: &egui::Context, state: &mut AppState) {
                     });
             });
         });
+    state.panel_rect_right = Some(shown.response.rect);
 }
 
 #[cfg(test)]

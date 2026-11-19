@@ -5,6 +5,7 @@ edition = "2024"
 description = "Spatial code visualization — a desktop CodeCanvas clone built with Rust and egui"
 
 [dependencies]
+regex = "1"
 eframe = "0.31"
 egui = "0.31"
 egui_extras = { version = "0.31", features = ["image"] }
@@ -26,7 +27,6 @@ similar = "3.2.1"
 
 [dev-dependencies]
 tempfile = "3"
-regex = "1"
 egui_kittest = { version = "0.31.1", features = ["eframe"] }
 
 [profile.release]

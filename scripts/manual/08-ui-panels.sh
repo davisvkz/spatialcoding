@@ -6,7 +6,15 @@ dir=$(fixture rust)
 checklist "08 · Toolbar, painéis e diálogos" \
   "Em build de desenvolvimento, passar o mouse sobre os controles|não aparece o inspetor de debug do egui com IDs, retângulos e pilha de widgets; tooltips normais continuam funcionando" \
   "Barra superior (só ícones): pílula com o nome da pasta, ponteiro (Select tool), mão (Move tool), × (Clear all nodes) e lixeira (Clear selected nodes)|a ferramenta ativa fica preenchida; a lixeira fica desabilitada sem seleção" \
-  "Clicar na mão (Move tool) e tentar arrastar um nó selecionado|o nó não se move; voltar ao ponteiro reativa o arraste" \
+  "Clicar na mão (Move tool) e arrastar com o botão esquerdo|a vista se move (pan) e nenhum nó se move; voltar ao ponteiro reativa o arraste de nós" \
+  "Clicar na pílula da pasta|abre um menu com Open folder…, as pastas recentes e Clear repository" \
+  "Settings → desligar Controls Bar|somem Select, Move e os botões de limpar; Reset all os traz de volta" \
+  "Settings → ligar Viewport Details e Activity Indicator|aparece zoom/nível/posição no canto do canvas e, enquanto analisa, uma linha embaixo" \
+  "Ctrl+Shift+/ , Shift+V e M|abrem o Docs, o painel Zoom Levels (barra L5…L1 com marcador) e ocultam o minimap" \
+  "Ctrl+. e Ctrl+S|Ctrl+. esconde trilhos e painéis; Ctrl+S esconde os painéis abertos e, de novo, restaura os mesmos" \
+  "Ctrl+K, passar o mouse sobre 'Collapse all folders' e clicar em Go to UI|abre o painel Folders com um contorno pulsando, sem colapsar nada" \
+  "Clicar ou arrastar dentro do minimap|a vista centraliza no ponto clicado" \
+  "Arrastar uma pasta ou arquivo da árvore Workspace para o canvas|o item abre no canvas; menu de contexto de arquivo: Open on canvas, Remove from canvas, Open in editor" \
   "Clicar na engrenagem Settings do rodapé da rail esquerda|abre o diálogo com Viewport, UI, Canvas File Nodes e Repository; Close ou Esc fecha" \
   "Settings → Font Size / Node Width|os nós mudam de tamanho na hora" \
   "Ctrl+/|abre a janela de atalhos; Esc ou Close fecha" \

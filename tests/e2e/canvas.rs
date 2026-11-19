@@ -258,7 +258,9 @@ fn f_centers_the_view_on_the_point_under_the_mouse() {
     app.press_key(egui::Key::F);
     app.run();
 
-    let center = Pos2::new(700.0, 450.0); // window is 1400x900
+    // The point under the mouse lands at the middle of the canvas, which
+    // excludes the side panels.
+    let center = app.app_state().canvas_rect.center();
     assert_close(app.app_state().viewport.world_to_screen(target), center);
 }
 
@@ -318,10 +320,9 @@ fn selecting_a_node_lifts_its_edges_without_adding_symbol_badges() {
 
     let idle = frame_shapes(&app);
     let idle_alpha = max_bezier_alpha(&idle);
-    assert!(
-        idle_alpha > 0 && idle_alpha < 100,
-        "faint idle web, got alpha {idle_alpha}"
-    );
+    // Depth opacity: both files share `src/`, so the idle edge is fully
+    // opaque (folder distance 0). Far-apart folders fade (geometry tests).
+    assert_eq!(idle_alpha, 255, "same-folder idle edge");
 
     app.app_state_mut().selection.select(main);
     app.run();
@@ -638,7 +639,7 @@ fn minified_edges_touch_identifier_bars_and_collapsed_nodes_use_header_fallbacks
 }
 
 /// Locate a real painted token, not an approximation of the monospace advance.
-fn token_center(app: &App, token: &str) -> Pos2 {
+pub fn token_center(app: &App, token: &str) -> Pos2 {
     fn in_shape(shape: &egui::Shape, token: &str, clip: egui::Rect) -> Option<Pos2> {
         if let egui::Shape::Vec(shapes) = shape {
             return shapes.iter().find_map(|s| in_shape(s, token, clip));
@@ -664,7 +665,7 @@ fn token_center(app: &App, token: &str) -> Pos2 {
         .unwrap_or_else(|| panic!("token not painted: {token}"))
 }
 
-fn symbol_canvas() -> (App, Fixture, u64, u64) {
+pub fn symbol_canvas() -> (App, Fixture, u64, u64) {
     let fx = fixture();
     std::fs::write(
         fx.path("web/a.ts"),

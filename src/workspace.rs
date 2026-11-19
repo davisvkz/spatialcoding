@@ -5,7 +5,7 @@
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
-use crate::fs::loader::{load_directory, read_file_content};
+use crate::fs::loader::{load_directory_filtered, read_file_content};
 use crate::fs::tree::TreeNode;
 use crate::analysis::dependencies::OpenFiles;
 use crate::state::AppState;
@@ -84,7 +84,7 @@ pub fn open_all_files(state: &mut AppState) -> Vec<u64> {
     let Some(dir) = state.loaded_dir.clone() else {
         return Vec::new();
     };
-    let tree = match load_directory(&dir, state.settings.show_dot_folders) {
+    let tree = match load_directory_filtered(&dir, &dir, state.settings.show_dot_folders, &state.ignore_set()) {
         Ok(tree) => tree,
         Err(e) => {
             log::error!("Failed to load {}: {e}", dir.display());
@@ -173,6 +173,97 @@ fn find_or_create_folder(state: &mut AppState, dir: &Path) -> u64 {
 }
 
 /// Removes every node, folder, edge and the selection from the canvas.
+/// The editor command to open files with: Settings, else `$VISUAL`, else
+/// `$EDITOR`, split into program and arguments.
+pub fn editor_command(state: &AppState) -> Option<Vec<String>> {
+    let command = if state.settings.editor_command.trim().is_empty() {
+        std::env::var("VISUAL").ok().filter(|v| !v.trim().is_empty()).or_else(|| std::env::var("EDITOR").ok())?
+    } else {
+        state.settings.editor_command.clone()
+    };
+    let parts: Vec<String> = command.split_whitespace().map(str::to_owned).collect();
+    (!parts.is_empty()).then_some(parts)
+}
+
+/// Opens `path` in the editor (Workspace → Open in editor). The editor runs
+/// detached; an error says why it could not start.
+pub fn open_in_editor(state: &AppState, path: &Path) -> Result<(), String> {
+    let parts = editor_command(state).ok_or("No editor: set one in Settings or $EDITOR")?;
+    std::process::Command::new(&parts[0])
+        .args(&parts[1..])
+        .arg(path)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .map(|_| ())
+        .map_err(|e| format!("could not start {}: {e}", parts[0]))
+}
+
+/// Follows a `cc://` link of an Agent note: opens the file or folder on the
+/// canvas and jumps to the line; a symbol link also pins the symbol.
+pub fn follow_link(state: &mut AppState, link: &crate::agent_notes::CcLink) {
+    use crate::agent_notes::CcLink;
+    match link {
+        CcLink::File(path) => {
+            focus_location(state, path, 0);
+        }
+        CcLink::Folder(dir) => {
+            open_folder_on_canvas(state, dir);
+        }
+        CcLink::Symbol { path, line, column } => {
+            let id = focus_location(state, path, *line);
+            let byte = state
+                .node_store
+                .get_file(id)
+                .and_then(|n| n.content.lines().nth(*line))
+                .map_or(*column, |text| text.char_indices().nth(*column).map_or(text.len(), |(i, _)| i));
+            crate::ui::symbol_pins::pin(None, state, id, *line, byte, false);
+        }
+        CcLink::Range { path, start, .. } => {
+            focus_location(state, path, start.0);
+        }
+    }
+}
+
+/// The links of one note (or of every note) as canvas targets, in order.
+pub fn note_links(state: &AppState, note: Option<u64>) -> Vec<crate::agent_notes::CcLink> {
+    let root = state.loaded_dir.as_deref();
+    let notes: Vec<&crate::agent_notes::AgentNote> = match note {
+        Some(id) => state.notes.get(id).into_iter().collect(),
+        None => state.notes.all().iter().collect(),
+    };
+    notes
+        .into_iter()
+        .flat_map(|n| crate::agent_notes::links_in(&n.markdown))
+        .filter_map(|url| crate::agent_notes::parse_link(&url, root))
+        .collect()
+}
+
+/// Opens every file and folder the notes link to.
+pub fn open_note_targets(state: &mut AppState, note: Option<u64>) -> usize {
+    let links = note_links(state, note);
+    let mut seen = std::collections::HashSet::new();
+    let mut opened = 0;
+    for link in links {
+        let path = link.path().to_path_buf();
+        if !seen.insert(path.clone()) {
+            continue;
+        }
+        match &link {
+            crate::agent_notes::CcLink::Folder(dir) => {
+                opened += open_folder_on_canvas(state, dir).len();
+            }
+            _ if path.is_file() => {
+                open_file(state, &path);
+                opened += 1;
+            }
+            _ => {}
+        }
+    }
+    opened
+}
+
 pub fn clear_canvas(state: &mut AppState) {
     state.git_comparison.invalidate();
     state.top_level_highlights.clear();
@@ -221,10 +312,11 @@ pub fn remove_nodes(state: &mut AppState, ids: &[u64]) {
 pub fn apply_layout_keeping_selection(state: &mut AppState) {
     let anchor = state.selection.primary;
     let before = anchor.and_then(|id| state.node_store.get_file(id)).map(|n| n.position);
+    let input = state.layout_input();
     crate::layout::hierarchical::apply_layout(
         &mut state.node_store,
         &state.edge_store,
-        &state.layout_settings,
+        &input,
     );
     state.layout_dirty = false;
     let after = anchor.and_then(|id| state.node_store.get_file(id)).map(|n| n.position);
@@ -531,11 +623,11 @@ mod tests {
         let mut state = state_in(dir.path());
         let id = open_files(&mut state, &[f])[0];
         state.selection.select(id);
-        toggle_top_level_highlights(&mut state);
+        toggle_top_level_highlights(&mut state, None);
         assert_eq!(state.top_level_highlights[&id], vec![(0, 0), (1, 1)]);
-        toggle_top_level_highlights(&mut state);
+        toggle_top_level_highlights(&mut state, None);
         assert!(state.top_level_highlights.is_empty());
-        toggle_top_level_highlights(&mut state);
+        toggle_top_level_highlights(&mut state, None);
         remove_nodes(&mut state, &[id]);
         assert!(state.top_level_highlights.is_empty());
     }
@@ -860,7 +952,7 @@ pub fn folder_text_files(state: &AppState) -> std::rc::Rc<Vec<PathBuf>> {
     }
     let mut paths = Vec::new();
     if let Some(dir) = state.loaded_dir.as_deref()
-        && let Ok(tree) = load_directory(dir, state.settings.show_dot_folders)
+        && let Ok(tree) = load_directory_filtered(dir, dir, state.settings.show_dot_folders, &state.ignore_set())
     {
         collect_files(&tree, &mut paths);
     }
@@ -956,13 +1048,14 @@ fn is_import_kind(kind: &str) -> bool {
 /// File nodes › "Highlight top-level symbols": marks the top-level
 /// declarations of the selected files, or clears the marks when they are
 /// already shown for exactly this selection.
-pub fn toggle_top_level_highlights(state: &mut AppState) {
+pub fn toggle_top_level_highlights(state: &mut AppState, ctx: Option<&egui::Context>) {
     let mut ids: Vec<u64> = state.selection.selected_ids().collect();
     ids.sort();
     let mut shown: Vec<u64> = state.top_level_highlights.keys().copied().collect();
     shown.sort();
     if !ids.is_empty() && ids == shown {
         state.top_level_highlights.clear();
+        state.lsp.pins.clear();
         return;
     }
     state.top_level_highlights.clear();
@@ -973,6 +1066,32 @@ pub fn toggle_top_level_highlights(state: &mut AppState) {
             state.top_level_highlights.insert(id, ranges);
         }
     }
+    pin_top_level_symbols(state, ctx, skip_imports);
+}
+
+/// Pins the top-level symbols of the selected files, one after the other
+/// (the reference's Highlight top-level symbols fixes them all).
+pub fn pin_top_level_symbols(state: &mut AppState, ctx: Option<&egui::Context>, skip_imports: bool) {
+    let mut ids: Vec<u64> = state.selection.selected_ids().collect();
+    ids.sort();
+    state.lsp.pins.clear();
+    for id in ids {
+        let Some(node) = state.node_store.get_file(id) else { continue };
+        let tokens = crate::analysis::symbol_mapping::top_level_tokens(&node.path, &node.content, skip_imports);
+        for token in tokens {
+            crate::ui::symbol_pins::pin(ctx, state, id, token.line, token.start, true);
+        }
+    }
+}
+
+/// How many top-level symbols the selected files have.
+pub fn top_level_symbol_count(state: &AppState) -> usize {
+    state
+        .selection
+        .selected_ids()
+        .filter_map(|id| state.node_store.get_file(id))
+        .map(|n| crate::analysis::symbol_mapping::top_level_tokens(&n.path, &n.content, state.settings.files.skip_imports).len())
+        .sum()
 }
 
 /// File nodes collapsed by "Collapse long files" (or by hand).

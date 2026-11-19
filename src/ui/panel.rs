@@ -88,6 +88,11 @@ impl MenuItem {
     }
 
     /// A menu entry that cannot work here, with the reason as its tooltip.
+    /// Disabled with `reason` when `condition` holds.
+    pub fn disabled_if(self, condition: bool, reason: &'static str) -> Self {
+        if condition { self.disabled(reason) } else { self }
+    }
+
     pub fn disabled(mut self, reason: &'static str) -> Self {
         self.enabled = false;
         self.disabled_reason = Some(reason);

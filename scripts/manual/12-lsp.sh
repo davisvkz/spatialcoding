@@ -27,6 +27,13 @@ checklist "12 · Aba LSP: símbolos e referências" \
   "Mover o mouse para espaços, arrastar o canvas ou desligar Query On Hover|a camada temporária some imediatamente; respostas atrasadas não fazem os blocos reaparecer" \
   "Editar ou fechar um arquivo enquanto o grafo temporário está visível|a camada é invalidada; referências em arquivos fechados não são desenhadas nem abrem arquivos automaticamente" \
   "Dar zoom com um grafo local ativo|marcas seguem os nomes e blocos do código; arquivos recolhidos ou em zoom de título não recebem setas flutuantes" \
+  "Zoom 1x; clicar no nome parse_port em util.rs|o símbolo é fixado (pin): referências em âmbar, definição em rosa, chamadores em roxo, chamadas em laranja; um toast diz \"Shift+click to pin multiple symbols. Shift+C to clear all.\"; o token clicado fica com fundo branco claro" \
+  "Clicar no corpo de uma função (num espaço vazio dentro das chaves)|o nome da função é fixado (Symbol Mapping); em arrow functions o alvo é o =>; em um inicializador, o nome da variável" \
+  "Shift+clicar em outro símbolo|os grafos se somam e o painel mostra Pinned Symbols (2), Files, Results/Edges e os grupos; o botão vira \"Clear 2 Symbols\"" \
+  "No painel, ✕ ao lado de um pin; depois Shift+C|o ✕ remove só aquele pin; Shift+C limpa todos; as arestas de dependência voltam ao normal após ~0,5 s" \
+  "Zoom abaixo de 0,30x com pins ativos|cada token fixado ganha uma pílula com o nome do símbolo" \
+  "Ligar Out of View e afastar a vista de um arquivo que tem referências|aparece uma etiqueta com o nome do arquivo na borda; clicar nela leva a vista até lá" \
+  "Selecionar um arquivo e clicar em Highlight top-level symbols (painel File nodes)|todas as declarações de topo são fixadas em sequência; o tooltip diz \"Highlight all N top-level symbols in the selected file (imports skipped)\"; clicar de novo limpa" \
   "Keep Zoom ligado e Smooth Transition ligado/desligado; clicar numa referência com zoom baixo|o zoom não muda; com Smooth Transition a vista desliza, sem ela pula" \
   "Dim Dependency Edges e Dim %|com um símbolo ativo, as arestas que não são dele ficam mais fracas conforme o Dim %" \
   "Out of View ligado; afastar a vista dos arquivos das referências|bolinhas com a contagem aparecem na borda do canvas apontando para eles" \
