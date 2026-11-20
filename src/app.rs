@@ -401,6 +401,7 @@ impl SpatialCodingApp {
         self.update_folder_bounds();
         let zoom_collapsed = crate::folder_actions::zoom_collapsed(&self.state, self.state.viewport.zoom);
         self.state.node_store.view.zoom_collapsed = zoom_collapsed;
+        self.state.node_store.refresh_hidden();
         self.update_canvas_symbol_hover(ui, &response);
         self.draw_folder_nodes(&painter);
         let ports = self.collect_ports();
@@ -636,7 +637,7 @@ impl SpatialCodingApp {
         let theme = &self.state.theme;
         let store = &self.state.node_store;
         let settings = &self.state.settings.folders;
-        let hidden = store.hidden_folders();
+        let hidden = &store.view.hidden_folders;
         let zoom = self.state.viewport.zoom;
         let root = self.state.loaded_dir.clone().unwrap_or_default();
         let diff_color = egui::Color32::from_rgb(0xe2, 0xb3, 0x4a);
@@ -837,7 +838,7 @@ impl SpatialCodingApp {
             state.settings.font_size,
         );
         // Files hidden in a collapsed folder show no ports.
-        ports.retain(|&id, _| !state.node_store.is_file_hidden(id));
+        ports.retain(|&id, _| !state.node_store.view.hidden_files.contains(&id));
         ports
     }
 
@@ -895,8 +896,7 @@ impl SpatialCodingApp {
         let edge_spans = self.state.edge_store.focused_spans(&self.state.selection, &self.state.edge_style);
 
         let store = &self.state.node_store;
-        let hidden_files: std::collections::HashSet<u64> =
-            store.file_nodes.keys().copied().filter(|&id| store.is_file_hidden(id)).collect();
+        let hidden_files = &store.view.hidden_files;
         for node in self.state.node_store.file_nodes.values() {
             let world_rect = node.world_rect(node_width, font_size);
             if hidden_files.contains(&node.id) {
@@ -1277,6 +1277,12 @@ impl SpatialCodingApp {
             if !lod.draws_code() || name.line >= node.code_lines() {
                 return None;
             }
+            // A node off screen is neither highlighted nor measured: the edge
+            // meets it at its port, out of sight anyway.
+            let node_screen = viewport.world_to_screen_rect(node.world_rect(node_width, font_size));
+            if !painter.clip_rect().intersects(node_screen) {
+                return None;
+            }
             let spans = highlighter.highlight_file(&node.path, &node.content).get(name.line)?;
             let (x0, x1) = name_x_range(painter, lod, spans, name.start_byte, name.end_byte, font_size * zoom)?;
             let origin = viewport.world_to_screen(node.position);
@@ -1294,7 +1300,7 @@ impl SpatialCodingApp {
                 egui::pos2(origin.x + CODE_PAD_X * zoom + x0, top),
                 egui::pos2(origin.x + CODE_PAD_X * zoom + x1, top + height),
             );
-            viewport.world_to_screen_rect(node.world_rect(node_width, font_size)).contains_rect(rect).then_some(rect)
+            node_screen.contains_rect(rect).then_some(rect)
         };
         edge_renderer::draw_edges(
             painter,
@@ -1348,7 +1354,7 @@ impl SpatialCodingApp {
     }
 
     fn collect_node_rects(&self) -> Vec<egui::Rect> {
-        input::shown_node_rects(&self.state)
+        input::frame_node_rects(&self.state)
     }
 }
 

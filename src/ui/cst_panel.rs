@@ -89,10 +89,7 @@ struct CachedCst {
 }
 
 fn source_hash(node: &crate::nodes::file_node::FileNode) -> u64 {
-    let mut hasher = DefaultHasher::new();
-    node.path.hash(&mut hasher);
-    node.content.hash(&mut hasher);
-    hasher.finish()
+    node.content_hash
 }
 
 impl CstPanelState {
@@ -872,7 +869,7 @@ mod tests {
                 .selected,
             2
         );
-        store.get_file_mut(b).unwrap().content = "struct B;\n".into();
+        store.replace_content(b, "struct B;\n".into());
         cst.sync_mapping(&store, &selected, &settings);
         assert_eq!(cst.parses, 3);
         assert_eq!(
@@ -999,7 +996,7 @@ mod tests {
         assert_eq!(cst.parses, 1);
         assert_eq!(cst.tree().unwrap().root.kind, "source_file");
 
-        store.get_file_mut(id).unwrap().content = "struct S;\n".into();
+        store.replace_content(id, "struct S;\n".into());
         cst.sync(&store, id);
         assert_eq!(cst.parses, 2);
         let root = &cst.tree().unwrap().root;

@@ -22,6 +22,7 @@ mod lsp_panel;
 mod manual_fixtures;
 mod mcp;
 mod panel_chrome;
+mod perf;
 mod performance_panel;
 mod pins;
 mod search_panel;
