@@ -54,3 +54,33 @@ fn the_local_server_icon_has_an_orange_dot_until_an_agent_connects() {
     app.run();
     assert!(!app.app_state().agents.is_empty(), "with an agent the dot is gone");
 }
+
+/// Screen rectangle of a node, from its accessibility bounds.
+fn rect_of(node: &egui_kittest::kittest::Node<'_>) -> egui::Rect {
+    let b = node.bounding_box().expect("the node has bounds");
+    egui::Rect::from_min_max(egui::pos2(b.x0 as f32, b.y0 as f32), egui::pos2(b.x1 as f32, b.y1 as f32))
+}
+
+/// Every welcome widget stays inside a window of `size`, and the Local Server
+/// text wraps instead of running on as one line (TASK-57).
+fn assert_welcome_fits(size: egui::Vec2) {
+    let app = app_sized(size, DEFAULT_STEP_DT);
+    let window = egui::Rect::from_min_size(egui::Pos2::ZERO, size);
+    let paragraph = rect_of(&app.get_by_label_contains("Language servers run on this machine"));
+    assert!(paragraph.width() <= 280.0, "the paragraph wraps inside its 270 px card, got {paragraph:?}");
+    for label in ["Repository", "Open folder...", "Shortcuts", "Command Palette", "Docs"] {
+        let rect = rect_of(&app.get_by_label(label));
+        assert!(window.contains_rect(rect), "{label} at {rect:?} is outside the {size:?} window");
+    }
+}
+
+#[test]
+fn the_welcome_cards_stay_inside_the_window() {
+    assert_welcome_fits(egui::vec2(1400.0, 900.0));
+}
+
+#[test]
+fn the_welcome_cards_stack_and_stay_inside_a_narrow_window() {
+    assert_welcome_fits(egui::vec2(700.0, 700.0));
+    assert_welcome_fits(egui::vec2(480.0, 700.0));
+}

@@ -72,8 +72,13 @@ pub fn app() -> App {
 /// Like [`app`], but each frame advances `step_dt` seconds (use 1/60 to watch
 /// an animation frame by frame).
 pub fn app_stepping(step_dt: f32) -> App {
+    app_sized(Vec2::new(1400.0, 900.0), step_dt)
+}
+
+/// Like [`app_stepping`], in a window of `size`.
+pub fn app_sized(size: Vec2, step_dt: f32) -> App {
     let mut harness = Harness::builder()
-        .with_size(Vec2::new(1400.0, 900.0))
+        .with_size(size)
         .with_step_dt(step_dt)
         .build_eframe(|cc| SpatialCodingApp::new(cc));
     harness.state_mut().state_mut().lsp.manager.set_launcher(fake_lsp::launcher());

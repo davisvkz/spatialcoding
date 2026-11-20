@@ -1449,6 +1449,9 @@ impl eframe::App for SpatialCodingApp {
     }
 }
 
+/// Width of the text inside a welcome card.
+const CARD_WIDTH: f32 = 270.0;
+
 impl SpatialCodingApp {
     fn draw_welcome_screen(&mut self, ctx: &egui::Context) {
         let theme = self.state.theme.clone();
@@ -1459,18 +1462,36 @@ impl SpatialCodingApp {
         egui::Area::new(egui::Id::new("welcome"))
             .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
             .show(ctx, |ui| {
+                // Two cards side by side, as wide as 270 px, or one over the
+                // other when the window cannot hold both.
+                let screen = ctx.screen_rect().width();
+                let margin = 16.0;
+                let side_by_side = screen >= 2.0 * (CARD_WIDTH + 2.0 * margin) + 40.0;
+                let inner_width = if side_by_side {
+                    CARD_WIDTH
+                } else {
+                    (screen - 2.0 * margin - 40.0).clamp(120.0, CARD_WIDTH)
+                };
                 let card = |ui: &mut egui::Ui, title: &str, add: &mut dyn FnMut(&mut egui::Ui)| {
                     egui::Frame::NONE
                         .fill(theme.panel_bg)
                         .stroke(egui::Stroke::new(1.0_f32, theme.panel_border))
                         .corner_radius(10.0)
-                        .inner_margin(14.0)
+                        .inner_margin(margin)
                         .show(ui, |ui| {
-                            ui.set_width(270.0);
-                            ui.set_min_height(150.0);
-                            ui.label(egui::RichText::new(title).strong().size(15.0));
-                            ui.add_space(6.0);
-                            add(ui);
+                            // A card inherits its row's horizontal layout, in
+                            // which labels never wrap: lay its body out top-down.
+                            ui.allocate_ui_with_layout(
+                                egui::vec2(inner_width, 0.0),
+                                egui::Layout::top_down(egui::Align::LEFT),
+                                |ui| {
+                                    ui.set_width(inner_width);
+                                    ui.set_min_height(150.0);
+                                    ui.label(egui::RichText::new(title).strong().size(15.0));
+                                    ui.add_space(6.0);
+                                    add(ui);
+                                },
+                            );
                         });
                 };
                 ui.vertical_centered(|ui| {
@@ -1478,7 +1499,7 @@ impl SpatialCodingApp {
                     ui.label(egui::RichText::new("Spatial code visualization").color(theme.text_muted));
                     ui.add_space(12.0);
                 });
-                ui.horizontal_top(|ui| {
+                let cards = |ui: &mut egui::Ui| {
                     card(ui, "Local Server", &mut |ui| {
                         ui.label("Language servers run on this machine, one per workspace, started as child processes: rust-analyzer, typescript-language-server, pyright and gopls.");
                         ui.add_space(4.0);
@@ -1506,7 +1527,12 @@ impl SpatialCodingApp {
                             }
                         }
                     });
-                });
+                };
+                if side_by_side {
+                    ui.horizontal_top(cards);
+                } else {
+                    ui.vertical_centered(cards);
+                }
                 ui.add_space(10.0);
                 ui.vertical_centered(|ui| {
                     ui.horizontal(|ui| {
@@ -1588,6 +1614,16 @@ pub(crate) fn min_label_px(min_size_pct: f32) -> f32 {
     min_size_pct.clamp(0.0, 1.0) * 10.0
 }
 
+/// Like `f32::clamp`, but returns the middle of the range instead of
+/// panicking when `lo > hi` (a node or canvas too narrow for its margins).
+pub(crate) fn clamp_or_mid(v: f32, lo: f32, hi: f32) -> f32 {
+    if lo <= hi {
+        v.clamp(lo, hi)
+    } else {
+        (lo + hi) * 0.5
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn draw_fitted_label(
     painter: &egui::Painter,
@@ -1614,16 +1650,6 @@ fn draw_line_numbers(
     painter: &egui::Painter,
     count: usize,
     right_top: egui::Pos2,
-/// Like `f32::clamp`, but returns the middle of the range instead of
-/// panicking when `lo > hi` (a node or canvas too narrow for its margins).
-pub(crate) fn clamp_or_mid(v: f32, lo: f32, hi: f32) -> f32 {
-    if lo <= hi {
-        v.clamp(lo, hi)
-    } else {
-        (lo + hi) * 0.5
-    }
-}
-
     line_h: f32,
     font_px: f32,
     color: egui::Color32,
@@ -1935,6 +1961,16 @@ mod tests {
     use super::*;
 
     #[test]
+    fn clamp_or_mid_never_panics_on_inverted_bounds() {
+        assert_eq!(clamp_or_mid(5.0, 0.0, 10.0), 5.0);
+        assert_eq!(clamp_or_mid(-3.0, 0.0, 10.0), 0.0);
+        assert_eq!(clamp_or_mid(99.0, 0.0, 10.0), 10.0);
+        // Bounds from the reported panic: a ~15 px wide node, zoomed out.
+        let x = clamp_or_mid(1396.0, 1418.4248, 1374.0844);
+        assert!((x - 1396.2546).abs() < 0.01, "got {x}");
+    }
+
+    #[test]
     fn only_viewport_rows_are_painted_without_truncating_the_file() {
         let clip = egui::Rect::from_min_max(egui::pos2(0.0, 1000.0), egui::pos2(700.0, 1100.0));
         assert_eq!(visible_code_rows(0.0, 10.0, 10000, clip), 100..110);
@@ -1960,16 +1996,6 @@ mod tests {
         ];
         let cols = |s: &str| visual_width(s.trim_end_matches(['\n', '\r'])) as f32;
         assert_eq!(x_at_byte(&line, 0, &cols), Some(0.0));
-    #[test]
-    fn clamp_or_mid_never_panics_on_inverted_bounds() {
-        assert_eq!(clamp_or_mid(5.0, 0.0, 10.0), 5.0);
-        assert_eq!(clamp_or_mid(-3.0, 0.0, 10.0), 0.0);
-        assert_eq!(clamp_or_mid(99.0, 0.0, 10.0), 10.0);
-        // Bounds from the reported panic: a ~15 px wide node, zoomed out.
-        let x = clamp_or_mid(1396.0, 1418.4248, 1374.0844);
-        assert!((x - 1396.2546).abs() < 0.01, "got {x}");
-    }
-
         assert_eq!(x_at_byte(&line, 4, &cols), Some(4.0), "span boundary");
         assert_eq!(x_at_byte(&line, 6, &cols), Some(6.0), "inside a span");
         assert_eq!(x_at_byte(&line, 11, &cols), Some(11.0));
