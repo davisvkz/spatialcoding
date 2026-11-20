@@ -269,6 +269,7 @@ pub fn clear_canvas(state: &mut AppState) {
     state.git_comparison.invalidate();
     state.top_level_highlights.clear();
     state.node_store.clear();
+    state.deps.refresh_open_paths(std::iter::empty());
     state.edge_store.clear();
     state.selection.clear();
 }
@@ -303,6 +304,7 @@ pub fn remove_nodes(state: &mut AppState, ids: &[u64]) {
     }
     if !ids.is_empty() {
         state.layout_dirty = true;
+        state.deps.refresh_open_paths(state.node_store.file_nodes.values().map(|node| node.path.as_path()));
     }
     apply_dependency_edges(state);
 }
@@ -410,9 +412,6 @@ pub fn poll_lsp(state: &mut AppState) {
     state.deps.tick(&mut state.lsp.manager);
     auto_open_matches(state);
     crate::importers::finish(state);
-    if state.deps.take_changed() {
-        apply_dependency_edges(state);
-    }
     let refreshed = state.changes.poll();
     if let Some(diff) = &mut state.diff {
         diff.poll();
@@ -421,12 +420,15 @@ pub fn poll_lsp(state: &mut AppState) {
             diff.loader.request();
         }
     }
-    if state.git_comparison.poll() {
+    let comparison_changed = state.git_comparison.poll();
+    if comparison_changed {
         // Also reject direct in-memory content changes made without a rebuild.
         let signature = comparison_input(state).map(|input| input.signature());
         if signature != state.git_comparison.requested_signature {
             state.git_comparison.invalidate();
         }
+    }
+    if comparison_changed || state.deps.take_changed() {
         apply_dependency_edges(state);
     }
 }
@@ -480,21 +482,19 @@ fn apply_dependency_edges(state: &mut AppState) {
     use crate::analysis::dependencies::classify::{classify_link, promote_barrels};
     use crate::edges::edge_store::NameSpan;
 
+    // Explicit and polled refreshes both publish the latest indexer state.
+    state.deps.take_changed();
     let nodes = &state.node_store.file_nodes;
-    let open = OpenFiles::new(nodes.values().map(|n| (n.path.as_path(), n.content.as_str())));
+    let open = state.deps.open_files(nodes.values().map(|n| (n.path.as_path(), n.content.as_str())));
     let ids: HashMap<&Path, u64> = nodes.values().map(|n| (n.path.as_path(), n.id)).collect();
-    let texts: HashMap<&Path, &str> = nodes
-        .values()
-        .map(|n| (n.path.as_path(), n.content.as_str()))
-        .collect();
 
     let mut links = state.deps.links(&open);
     let mut changes: Vec<_> = links.iter().map(|l| state.git_comparison.diff.as_ref().map(|d| d.state_for(l)).unwrap_or_default()).collect();
     // Per-link classification, then a barrel promotion pass.
     let mut kinds: Vec<_> = links
         .iter()
-        .map(|link| match texts.get(link.source.as_path()) {
-            Some(text) => classify_link(link, text),
+        .map(|link| match open.get(&link.source) {
+            Some((_, text)) => classify_link(link, text),
             None => crate::edges::edge_store::EdgeKind::Direct,
         })
         .collect();

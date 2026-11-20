@@ -14,7 +14,7 @@ use std::collections::{HashMap, VecDeque};
 use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
 
-use super::{DependencyLink, LineSpan, OpenFiles, StatementFinder, byte_offset, pick_symbols, usage_occurrences};
+use super::{DependencyLink, LineSpan, OpenFilePaths, OpenFiles, StatementFinder, byte_offset, pick_symbols, usage_occurrences};
 use crate::analysis::lsp::manager::{LspManager, LspRequest, LspResponse, RequestId, ServerStatus};
 use crate::analysis::lsp::{Location, LspSymbol, Position, ServerId, server_for};
 
@@ -51,6 +51,13 @@ impl FileEntry {
             Some(Err(_)) => true,
             Some(Ok(symbols)) => symbols.iter().all(|s| s.references.is_some()),
         }
+    }
+
+    fn symbols(&self) -> &[SymbolEntry] {
+        self.symbols
+            .as_ref()
+            .and_then(|result| result.as_deref().ok())
+            .unwrap_or_default()
     }
 }
 
@@ -91,6 +98,7 @@ pub struct SymbolOccurrence<'a> {
 #[derive(Default)]
 pub struct DependencyIndexer {
     local_links: Vec<DependencyLink>,
+    open_paths: OpenFilePaths,
     root: Option<PathBuf>,
     files: HashMap<PathBuf, FileEntry>,
     queue: VecDeque<Job>,
@@ -114,7 +122,8 @@ impl DependencyIndexer {
                 ..Self::default()
             };
         }
-        self.local_links = super::local::links(root, &OpenFiles::new(files.iter().copied()));
+        self.refresh_open_paths(files.iter().map(|&(path, _)| path));
+        self.local_links = super::local::links(root, &self.open_files(files.iter().copied()));
         self.files
             .retain(|path, entry| files.iter().any(|(p, text)| *p == path && hash_text(text) == entry.hash));
         for (path, text) in files {
@@ -146,6 +155,14 @@ impl DependencyIndexer {
         self.pump(manager);
     }
 
+    pub(crate) fn refresh_open_paths<'a>(&mut self, paths: impl IntoIterator<Item = &'a Path>) {
+        self.open_paths = OpenFilePaths::new(paths);
+    }
+
+    pub(crate) fn open_files<'a>(&'a self, files: impl IntoIterator<Item = (&'a Path, &'a str)>) -> OpenFiles<'a> {
+        OpenFiles::using_paths(files, &self.open_paths)
+    }
+
     /// Takes an answer of the language servers if it belongs to the
     /// indexer; other answers are handed back.
     pub fn receive(
@@ -159,6 +176,7 @@ impl DependencyIndexer {
         };
         let (path, hash) = job.file();
         let root = self.root.clone().unwrap_or_default();
+        let mut source_labels_changed = false;
         if let Some(entry) = self.files.get_mut(path).filter(|e| e.hash == hash) {
             if matches!(
                 manager.status(entry.server, &root),
@@ -186,24 +204,42 @@ impl DependencyIndexer {
                             index,
                         });
                     }
+                    source_labels_changed = !entry.symbols().iter().map(label_span)
+                        .eq(picked.iter().map(label_span));
+                    self.changed |= has_open_references(&self.open_paths, path, entry.symbols());
                     entry.symbols = Some(Ok(picked));
                 }
                 (Job::Symbols { .. }, LspResponse::Symbols(Err(err))) => {
+                    source_labels_changed = !entry.symbols().is_empty();
+                    self.changed |= has_open_references(&self.open_paths, path, entry.symbols());
                     entry.symbols = Some(Err(err));
                 }
                 (Job::References { index, .. }, LspResponse::References(result)) => {
                     if let Some(Ok(symbols)) = &mut entry.symbols
                         && let Some(symbol) = symbols.get_mut(*index)
                     {
-                        symbol.references = Some(result.unwrap_or_else(|err| {
+                        let mut references = result.unwrap_or_else(|err| {
                             log::debug!("references failed: {err}");
                             Vec::new()
-                        }));
+                        });
+                        references.sort_unstable();
+                        if is_open_target(&self.open_paths, path) {
+                            let is_cross_file = |location: &&Location| {
+                                is_open_reference(&self.open_paths, path, location)
+                            };
+                            self.changed |= !references
+                                .iter()
+                                .filter(is_cross_file)
+                                .eq(symbol.references.iter().flatten().filter(is_cross_file));
+                        }
+                        symbol.references = Some(references);
                     }
                 }
                 _ => {}
             }
-            self.changed = true;
+        }
+        if source_labels_changed && !self.changed {
+            self.changed = self.is_reference_source(path);
         }
         self.pump(manager);
         None
@@ -215,6 +251,7 @@ impl DependencyIndexer {
         let Some(root) = self.root.clone() else {
             return;
         };
+        let mut cleared = Vec::new();
         for (path, entry) in &mut self.files {
             if !entry.stale || entry.retried || !entry.answered() {
                 continue;
@@ -225,6 +262,10 @@ impl DependencyIndexer {
             } else if status == Some(ServerStatus::Ready) {
                 entry.stale = false;
                 entry.retried = true;
+                self.changed |= has_open_references(&self.open_paths, path, entry.symbols());
+                if !entry.symbols().is_empty() {
+                    cleared.push(path.clone());
+                }
                 entry.symbols = None;
                 self.queue.push_back(Job::Symbols {
                     path: path.clone(),
@@ -232,7 +273,27 @@ impl DependencyIndexer {
                 });
             }
         }
+        if !self.changed {
+            self.changed = cleared.iter().any(|path| self.is_reference_source(path));
+        }
         self.pump(manager);
+    }
+
+    // A file's symbols also provide the source label for edges produced by
+    // other files' reference answers.
+    fn is_reference_source(&self, path: &Path) -> bool {
+        if !is_open_target(&self.open_paths, path) {
+            return false;
+        }
+        self.files.iter().any(|(target, entry)| {
+            target != path
+                && is_open_target(&self.open_paths, target)
+                && entry.symbols().iter().any(|symbol| {
+                    symbol.references.iter().flatten().any(|location| {
+                        self.open_paths.get(&location.path) == Some(path)
+                    })
+                })
+        })
     }
 
     /// Sends queued requests while their server has room.
@@ -289,7 +350,7 @@ impl DependencyIndexer {
             || self.files.values().any(|e| e.stale && !e.retried)
     }
 
-    /// True once after the analysis changed (new answers, new files).
+    /// True once after the open-file graph may have changed.
     pub fn take_changed(&mut self) -> bool {
         std::mem::take(&mut self.changed)
     }
@@ -344,7 +405,7 @@ impl DependencyIndexer {
         let mut out: Vec<_> = self.local_links.iter().filter(|l| open.get(&l.source).is_some() && open.get(&l.target).is_some()).cloned().collect();
         for (target, entry) in targets {
             let Some(Ok(symbols)) = &entry.symbols else { continue };
-            if open.get(target).is_none() {
+            if !open.contains_path(target) {
                 continue;
             }
             for symbol in symbols {
@@ -453,6 +514,24 @@ impl DependencyIndexer {
     }
 }
 
+fn label_span(symbol: &SymbolEntry) -> (LineSpan, &str) {
+    (symbol.definition, &symbol.label)
+}
+
+fn is_open_target(paths: &OpenFilePaths, path: &Path) -> bool {
+    paths.get(path) == Some(path)
+}
+
+fn is_open_reference(paths: &OpenFilePaths, target: &Path, location: &Location) -> bool {
+    paths.get(&location.path).is_some_and(|source| source != target)
+}
+
+fn has_open_references(paths: &OpenFilePaths, target: &Path, symbols: &[SymbolEntry]) -> bool {
+    is_open_target(paths, target)
+        && symbols.iter().flat_map(|symbol| symbol.references.iter().flatten())
+            .any(|location| is_open_reference(paths, target, location))
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
@@ -533,6 +612,86 @@ mod tests {
         assert_eq!(indexer.queue.len(), 10 - MAX_IN_FLIGHT);
         drain(&mut indexer, &mut manager);
         assert_eq!(indexer.progress(&manager)[0].done, 10);
+    }
+
+    /// Deliver a particular answer without relying on a worker's timing.
+    fn answer(indexer: &mut DependencyIndexer, manager: &mut LspManager, job: Job, response: LspResponse) {
+        let id = u64::MAX;
+        indexer.in_flight.insert(id, job);
+        assert!(indexer.receive(manager, id, response).is_none());
+    }
+
+    fn function(name: &str) -> LspSymbol {
+        use crate::analysis::lsp::{Range, SymbolKind};
+        let at = |character| Position { line: 0, character };
+        LspSymbol {
+            name: name.into(),
+            detail: None,
+            kind: SymbolKind::Function,
+            range: Range { start: at(0), end: at(13) },
+            selection_range: Range { start: at(3), end: at(4) },
+            children: vec![],
+        }
+    }
+
+    #[test]
+    fn progress_and_references_outside_the_canvas_do_not_dirty_the_graph() {
+        let mut manager = failing_manager();
+        let mut indexer = DependencyIndexer::default();
+        let target = PathBuf::from("/p/a.rs");
+        let other = PathBuf::from("/p/b.rs");
+        let text = "fn a() {}";
+        indexer.rebuild(&mut manager, Path::new("/p"), &[(&target, text), (&other, text)]);
+        indexer.take_changed();
+        let hash = hash_text(text);
+        answer(&mut indexer, &mut manager, Job::Symbols { path: other, hash }, LspResponse::Symbols(Err("no server".into())));
+        assert!(!indexer.take_changed(), "a failed symbol request only updates progress");
+        answer(&mut indexer, &mut manager, Job::Symbols { path: target.clone(), hash }, LspResponse::Symbols(Ok(vec![function("a")])));
+        assert!(!indexer.take_changed(), "a declaration alone does not make an edge");
+
+        let location = |path| Location { path, range: Default::default() };
+        for result in [Err("failed".into()), Ok(vec![]), Ok(vec![location(target.clone()), location("/p/closed.rs".into())])] {
+            answer(&mut indexer, &mut manager, Job::References { path: target.clone(), hash, index: 0 }, LspResponse::References(result));
+            assert!(!indexer.take_changed(), "empty, failed, self and closed-file references do not make edges");
+        }
+        assert!(indexer.files[&target].answered(), "progress still settles");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn canonical_references_and_late_source_symbols_dirty_the_graph() {
+        use crate::analysis::lsp::Range;
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        let target = root.join("a.rs");
+        let source = root.join("b.rs");
+        let alias = root.join("alias.rs");
+        let target_text = "fn a() {}";
+        let source_text = "fn b() { a(); }";
+        std::fs::write(&target, target_text).unwrap();
+        std::fs::write(&source, source_text).unwrap();
+        std::os::unix::fs::symlink(&source, &alias).unwrap();
+        let mut manager = failing_manager();
+        let mut indexer = DependencyIndexer::default();
+        let files = [(target.as_path(), target_text), (alias.as_path(), source_text)];
+        indexer.rebuild(&mut manager, &root, &files);
+        indexer.take_changed();
+        let hash = hash_text(target_text);
+        answer(&mut indexer, &mut manager, Job::Symbols { path: target.clone(), hash }, LspResponse::Symbols(Ok(vec![function("a")])));
+        indexer.take_changed();
+        let at = |character| Position { line: 0, character };
+        let references = LspResponse::References(Ok(vec![Location { path: source, range: Range { start: at(9), end: at(10) } }]));
+        let reference_job = Job::References { path: target.clone(), hash, index: 0 };
+        answer(&mut indexer, &mut manager, reference_job.clone(), references.clone());
+        assert!(indexer.take_changed(), "canonical path refers to the open alias");
+        assert_eq!(indexer.links(&OpenFiles::new(files))[0].source, alias);
+        answer(&mut indexer, &mut manager, reference_job, references);
+        assert!(!indexer.take_changed(), "an identical answer does not change the graph");
+
+        let job = Job::Symbols { path: alias.clone(), hash: hash_text(source_text) };
+        answer(&mut indexer, &mut manager, job, LspResponse::Symbols(Ok(vec![function("b")])));
+        assert!(indexer.take_changed(), "symbols color the existing edge at its source");
+        assert_eq!(indexer.links(&OpenFiles::new(files))[0].source_label.as_deref(), Some("fn"));
     }
 
     #[test]

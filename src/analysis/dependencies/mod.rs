@@ -10,6 +10,7 @@ pub mod indexer;
 pub mod local;
 mod statements;
 
+use std::borrow::Cow;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
@@ -102,33 +103,67 @@ pub fn pick_symbols(symbols: &[LspSymbol]) -> Vec<&LspSymbol> {
     out
 }
 
-/// The open files, looked up by the paths language servers report (which may
-/// differ from the nodes' paths through symlinks).
+/// Resolves server-reported paths to open node paths without filesystem I/O.
+#[derive(Clone, Default)]
+pub(crate) struct OpenFilePaths(HashMap<PathBuf, PathBuf>);
+
+impl OpenFilePaths {
+    pub(crate) fn new<'a>(paths: impl IntoIterator<Item = &'a Path>) -> Self {
+        let mut by_path = HashMap::new();
+        for path in paths {
+            if let Ok(canonical) = path.canonicalize()
+                && canonical != path
+                && by_path.get(&canonical).is_none_or(|alias: &PathBuf| {
+                    alias != &canonical && path < alias.as_path()
+                })
+            {
+                by_path.insert(canonical, path.to_path_buf());
+            }
+            // An exact path always wins over an alias for that path.
+            by_path.insert(path.to_path_buf(), path.to_path_buf());
+        }
+        Self(by_path)
+    }
+
+    pub(crate) fn get(&self, path: &Path) -> Option<&Path> {
+        self.0.get(path).map(PathBuf::as_path)
+    }
+}
+
+/// The open paths and current content, including canonical-path aliases.
 pub struct OpenFiles<'a> {
-    by_path: HashMap<PathBuf, (&'a Path, &'a str)>,
+    texts: HashMap<&'a Path, &'a str>,
+    paths: Cow<'a, OpenFilePaths>,
 }
 
 impl<'a> OpenFiles<'a> {
     /// `files` are `(node path, content)` pairs.
     pub fn new(files: impl IntoIterator<Item = (&'a Path, &'a str)>) -> Self {
-        let mut by_path = HashMap::new();
-        for (path, content) in files {
-            if let Ok(canonical) = std::fs::canonicalize(path) {
-                by_path.insert(canonical, (path, content));
-            }
-            by_path.insert(path.to_path_buf(), (path, content));
-        }
-        Self { by_path }
+        let texts: HashMap<_, _> = files.into_iter().collect();
+        let paths = OpenFilePaths::new(texts.keys().copied());
+        Self { texts, paths: Cow::Owned(paths) }
+    }
+
+    pub(crate) fn using_paths(
+        files: impl IntoIterator<Item = (&'a Path, &'a str)>,
+        paths: &'a OpenFilePaths,
+    ) -> Self {
+        Self { texts: files.into_iter().collect(), paths: Cow::Borrowed(paths) }
     }
 
     /// The node path and content of the open file at `path`.
     pub fn get(&self, path: &Path) -> Option<(&'a Path, &'a str)> {
-        self.by_path.get(path).copied()
+        let (path, text) = self.texts.get_key_value(self.paths.get(path)?)?;
+        Some((*path, *text))
+    }
+
+    pub(crate) fn contains_path(&self, path: &Path) -> bool {
+        self.texts.contains_key(path)
     }
 
     /// Node paths once each, excluding canonical-path aliases.
     pub fn iter(&self) -> impl Iterator<Item = (&'a Path, &'a str)> + '_ {
-        self.by_path.iter().filter(|(key, (path, _))| key.as_path() == *path).map(|(_, value)| *value)
+        self.texts.iter().map(|(&path, &text)| (path, text))
     }
 }
 
