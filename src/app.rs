@@ -899,7 +899,28 @@ impl SpatialCodingApp {
             store.file_nodes.keys().copied().filter(|&id| store.is_file_hidden(id)).collect();
         for node in self.state.node_store.file_nodes.values() {
             let world_rect = node.world_rect(node_width, font_size);
-            if !world_rect.intersects(visible_world) || hidden_files.contains(&node.id) {
+            if hidden_files.contains(&node.id) {
+                continue;
+            }
+            if !world_rect.intersects(visible_world) {
+                // Off screen: no painting, but its pinned tokens still anchor
+                // the edges that reach them from the visible ones.
+                if !self.state.lsp.pins.is_empty() && lod.draws_code() && !node.content.is_empty() {
+                    let screen_rect = self.state.viewport.world_to_screen_rect(world_rect);
+                    let area = ui::pin_overlay::CodeArea {
+                        origin: egui::pos2(
+                            screen_rect.left() + CODE_PAD_X * zoom,
+                            screen_rect.top() + (HEADER_HEIGHT + CODE_PADDING) * zoom,
+                        ),
+                        right: screen_rect.right(),
+                        line_h: line_height(font_size) * zoom,
+                        char_w: code_char_width(font_size * zoom),
+                        visible_lines: node.code_lines(),
+                    };
+                    ui::pin_overlay::paint_node(
+                        None, self.state.lsp.pins.pins(), &node.path, &node.content, area, &mut pin_marks,
+                    );
+                }
                 continue;
             }
 
@@ -1164,7 +1185,7 @@ impl SpatialCodingApp {
                     visible_lines: node.code_lines(),
                 };
                 ui::pin_overlay::paint_node(
-                    &code_clip, self.state.lsp.pins.pins(), &node.path, &node.content, area, &mut pin_marks,
+                    Some(&code_clip), self.state.lsp.pins.pins(), &node.path, &node.content, area, &mut pin_marks,
                 );
             }
 
