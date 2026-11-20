@@ -163,6 +163,17 @@ fn edge_alpha(role: Role, crowded: bool) -> f32 {
     }
 }
 
+/// Length and half-width, in screen pixels, of the arrowhead on a token edge.
+const ARROW_LEN: f32 = 7.0;
+const ARROW_HALF_WIDTH: f32 = 4.0;
+
+/// The triangle (`|>`) whose tip is `tip`, pointing right when `rightwards`
+/// and left otherwise: the way an edge arrives on its target token.
+fn arrow_head(tip: Pos2, rightwards: bool) -> [Pos2; 3] {
+    let back = if rightwards { -ARROW_LEN } else { ARROW_LEN };
+    [tip, Pos2::new(tip.x + back, tip.y - ARROW_HALF_WIDTH), Pos2::new(tip.x + back, tip.y + ARROW_HALF_WIDTH)]
+}
+
 /// Bezier edges from each pin's source token to its token entries, a label
 /// pill on every token when `pills` (zoomed out). Needs the marks `paint_node`
 /// recorded for all nodes.
@@ -191,6 +202,8 @@ pub fn paint_connections(painter: &egui::Painter, pins: &[Pin], marks: &[PinMark
                 Color32::TRANSPARENT,
                 stroke,
             ));
+            // The pointed token gets the arrowhead; the source stays as it is.
+            painter.add(egui::Shape::convex_polygon(arrow_head(end, right).to_vec(), stroke.color, egui::Stroke::NONE));
         }
     }
     if pills {
@@ -260,6 +273,20 @@ mod tests {
         assert_eq!(line_byte("a🚀b", 3), 5, "an astral char is two UTF-16 units");
         assert_eq!(columns("\tfoo", 1), 4);
         assert_eq!(columns("abc", 2), 2);
+    }
+
+    #[test]
+    fn the_arrowhead_points_at_the_target_from_either_side() {
+        let tip = Pos2::new(100.0, 50.0);
+        let [t, a, b] = arrow_head(tip, true);
+        assert_eq!(t, tip);
+        assert!(a.x < tip.x && b.x < tip.x, "pointing right: the base is on the left");
+        assert_eq!(a.x, b.x, "the base is a vertical bar");
+        assert_eq!(a.y, 50.0 - ARROW_HALF_WIDTH);
+        assert_eq!(b.y, 50.0 + ARROW_HALF_WIDTH);
+        let [t, a, b] = arrow_head(tip, false);
+        assert_eq!(t, tip);
+        assert!(a.x > tip.x && b.x > tip.x, "pointing left: the base is on the right");
     }
 
     #[test]
