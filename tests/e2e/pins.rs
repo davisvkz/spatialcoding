@@ -211,3 +211,34 @@ fn dim_dependency_edges_outlasts_the_symbols_by_half_a_second() {
     assert!(app.app_state().lsp.dim_until >= held_until, "the hold is not shortened");
     assert_eq!(spatialcoding::ui::lsp_panel::DIM_RESTORE_DELAY, 0.5);
 }
+
+/// Token edges of pinned symbols: cubic Béziers with a translucent stroke.
+fn token_edges(app: &App) -> usize {
+    frame_shapes(app)
+        .iter()
+        .filter(|s| matches!(s, egui::Shape::CubicBezier(b)
+            if matches!(b.stroke.color, egui::epaint::ColorMode::Solid(c) if c.a() > 0 && c.a() < 200)))
+        .count()
+}
+
+#[test]
+fn edges_reach_pinned_tokens_in_files_outside_the_camera() {
+    let (mut app, _fx, uses, defs) = symbol_canvas();
+    pinned(&mut app, "greet", Modifiers::NONE, 1);
+    // Zoom in on the call until the definition's file leaves the camera.
+    app.app_state_mut().viewport.zoom = 2.0;
+    app.app_state_mut().viewport.target_zoom = 2.0;
+    let center = app.node_center(uses);
+    app.show_at(center, CANVAS_SPOT);
+    let s = app.app_state();
+    let defs_rect = s.node_store.get_file(defs).unwrap().world_rect(s.settings.node_width, s.settings.font_size);
+    assert!(
+        s.viewport.world_to_screen_rect(defs_rect).max.x < 0.0,
+        "the definition's file is off screen"
+    );
+    let with_pin = token_edges(&app);
+    app.app_state_mut().lsp.pins.clear();
+    app.run();
+    let without = token_edges(&app);
+    assert!(with_pin > without, "the pin's edge to the off-screen token is drawn: {with_pin} vs {without}");
+}

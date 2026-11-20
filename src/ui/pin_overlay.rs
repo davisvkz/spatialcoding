@@ -79,16 +79,26 @@ fn color(role: Role, alpha: f32) -> Color32 {
     Color32::from_rgba_unmultiplied(r, g, b, (alpha.clamp(0.0, 1.0) * 255.0).round() as u8)
 }
 
+/// Whether any pin has its source or an entry inside the file `path`.
+fn touches(pins: &[Pin], path: &Path) -> bool {
+    pins.iter().filter_map(Pin::graph).any(|g| g.source.path == path || g.entries.iter().any(|e| e.path == path))
+}
+
 /// Paints the overlays of every pin inside the file `path` (content
 /// `content`) under its code, and records the painted tokens in `marks`.
+/// With no `painter` it only records the marks: the file is off screen but
+/// the edges of its tokens still run to and from the visible ones.
 pub fn paint_node(
-    painter: &egui::Painter,
+    painter: Option<&egui::Painter>,
     pins: &[Pin],
     path: &Path,
     content: &str,
     area: CodeArea,
     marks: &mut Vec<PinMark>,
 ) {
+    if !touches(pins, path) {
+        return;
+    }
     let lines: Vec<&str> = content.lines().collect();
     let token_rect = |range: &crate::analysis::lsp::Range| -> Option<(Rect, String)> {
         let (a, b) = (range.start, range.end);
@@ -110,7 +120,9 @@ pub fn paint_node(
         if graph.source.path == path
             && let Some((rect, label)) = token_rect(&graph.source.range)
         {
-            painter.rect_filled(rect, 1.0, Color32::from_white_alpha((SOURCE_ALPHA * 255.0) as u8));
+            if let Some(painter) = painter {
+                painter.rect_filled(rect, 1.0, Color32::from_white_alpha((SOURCE_ALPHA * 255.0) as u8));
+            }
             marks.push(PinMark { pin: pin_index, entry: None, role: None, rect, label });
         }
         for (entry_index, entry) in graph.entries.iter().enumerate().filter(|(_, e)| e.path == path) {
@@ -122,10 +134,12 @@ pub fn paint_node(
             let alpha = fill_alpha(entry.role, crowded);
             if entry.role.is_token() {
                 if let Some((rect, label)) = token_rect(&entry.range) {
-                    painter.rect_filled(rect, 1.0, color(entry.role, alpha));
+                    if let Some(painter) = painter {
+                        painter.rect_filled(rect, 1.0, color(entry.role, alpha));
+                    }
                     marks.push(PinMark { pin: pin_index, entry: Some(entry_index), role: Some(entry.role), rect, label });
                 }
-            } else {
+            } else if let Some(painter) = painter {
                 // A context block: the lines of the range, across the node.
                 let (start, end) = (entry.range.start.line, entry.range.end.line);
                 if start >= area.visible_lines {
