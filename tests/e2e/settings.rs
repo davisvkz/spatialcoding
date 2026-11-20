@@ -2,6 +2,8 @@ use egui_kittest::kittest::Queryable;
 
 use crate::common::*;
 
+// `Style::debug` only exists with debug assertions (not in --release).
+#[cfg(debug_assertions)]
 #[test]
 fn egui_debug_inspection_is_disabled_on_startup() {
     let app = app();

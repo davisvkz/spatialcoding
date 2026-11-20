@@ -393,7 +393,7 @@ pub fn folder_view(state: &AppState) -> FolderView {
         revealed_files,
         revealed_folders,
         edges_only: folders.collapse_edges_only,
-        zoom_collapsed: Default::default(),
+        ..Default::default()
     }
 }
 
@@ -415,8 +415,9 @@ pub fn zoom_collapsed(state: &AppState, zoom: f32) -> std::collections::HashSet<
         })
     };
     let mut out = std::collections::HashSet::new();
+    let layout_hidden = store.layout_hidden_folders();
     for &id in store.folder_nodes.keys() {
-        if !small(id) || store.layout_hidden_folders().contains(&id) {
+        if !small(id) || layout_hidden.contains(&id) {
             continue;
         }
         // Outermost only: a small folder inside a small folder stays hidden.

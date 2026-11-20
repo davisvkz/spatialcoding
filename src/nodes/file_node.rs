@@ -21,6 +21,9 @@ pub struct FileNode {
     pub path: PathBuf,
     pub position: egui::Pos2,
     pub content: String,
+    /// Hash of the path and text, set when the node is created or its text
+    /// replaced, so caches keyed on the source need not hash it every frame.
+    pub content_hash: u64,
     pub line_count: usize,
     pub language: String,
     /// A long file shown cut: only its first [`Self::shown_lines`] lines and a
@@ -36,6 +39,7 @@ impl FileNode {
         let language = detect_language(&path);
         Self {
             id,
+            content_hash: source_hash(&path, &content),
             path,
             position,
             content,
@@ -103,6 +107,15 @@ impl FileNode {
     }
 }
 
+/// Hash of a file's path and text: the key of the caches built from its source.
+pub fn source_hash(path: &Path, content: &str) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    path.hash(&mut hasher);
+    content.hash(&mut hasher);
+    hasher.finish()
+}
+
 pub fn detect_language(path: &Path) -> String {
     let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
     match ext {
@@ -157,6 +170,14 @@ mod tests {
         assert_eq!(n.line_count, 3);
         assert_eq!(n.language, "Rust");
         assert!(!n.collapsed);
+    }
+
+    #[test]
+    fn content_hash_follows_path_and_text() {
+        let a = node("a.rs", "x");
+        assert_eq!(a.content_hash, node("a.rs", "x").content_hash);
+        assert_ne!(a.content_hash, node("a.rs", "y").content_hash);
+        assert_ne!(a.content_hash, node("b.rs", "x").content_hash);
     }
 
     #[test]

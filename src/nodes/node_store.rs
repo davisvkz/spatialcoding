@@ -9,6 +9,10 @@ pub struct NodeStore {
     pub folder_nodes: HashMap<u64, FolderNode>,
     /// How collapsed folders show this frame (Folders panel options).
     pub view: FolderView,
+    /// Folder id by path (the lowest id when two folders share a path), so
+    /// the hierarchy is found by walking a path's ancestors instead of
+    /// scanning every folder. Kept by `add_folder`, `remove_node` and `clear`.
+    folder_by_path: HashMap<PathBuf, u64>,
     next_id: u64,
 }
 
@@ -27,6 +31,11 @@ pub struct FolderView {
     /// Folders drawn as solid blocks because they are too small on screen
     /// ("Auto-Collapse on Zoom"); layout and boxes ignore this.
     pub zoom_collapsed: HashSet<u64>,
+    /// Folders not drawn this frame (`NodeStore::hidden_folders`), computed
+    /// once by the canvas so drawing, ports and the minimap share them.
+    pub hidden_folders: HashSet<u64>,
+    /// Files hidden by a collapsed folder this frame (`NodeStore::hidden_files`).
+    pub hidden_files: HashSet<u64>,
 }
 
 impl Default for NodeStore {
@@ -35,6 +44,7 @@ impl Default for NodeStore {
             file_nodes: HashMap::new(),
             folder_nodes: HashMap::new(),
             view: FolderView::default(),
+            folder_by_path: HashMap::new(),
             next_id: 1,
         }
     }
@@ -53,6 +63,8 @@ impl NodeStore {
         let id = self.next_id;
         self.next_id += 1;
         let node = FolderNode::new(id, path, file_count);
+        let slot = self.folder_by_path.entry(node.path.clone()).or_insert(id);
+        *slot = (*slot).min(id);
         self.folder_nodes.insert(id, node);
         id
     }
@@ -65,13 +77,21 @@ impl NodeStore {
             return false;
         }
         node.line_count = content.lines().count().max(1);
+        node.content_hash = super::file_node::source_hash(&node.path, &content);
         node.content = content;
         true
     }
 
     pub fn remove_node(&mut self, id: u64) {
-        if self.file_nodes.remove(&id).is_none() {
-            self.folder_nodes.remove(&id);
+        if self.file_nodes.remove(&id).is_none()
+            && let Some(folder) = self.folder_nodes.remove(&id)
+            && self.folder_by_path.get(&folder.path) == Some(&id)
+        {
+            self.folder_by_path.remove(&folder.path);
+            // Another folder may share the path: it takes the slot over.
+            if let Some(other) = self.folder_nodes.values().filter(|f| f.path == folder.path).map(|f| f.id).min() {
+                self.folder_by_path.insert(folder.path, other);
+            }
         }
     }
 
@@ -145,11 +165,7 @@ impl NodeStore {
 
     /// Deepest folder whose path contains `dir` (`dir` itself included).
     pub fn folder_containing(&self, dir: &Path) -> Option<u64> {
-        self.folder_nodes
-            .values()
-            .filter(|f| dir.starts_with(&f.path))
-            .max_by_key(|f| (f.path.components().count(), std::cmp::Reverse(f.id)))
-            .map(|f| f.id)
+        dir.ancestors().find_map(|ancestor| self.folder_by_path.get(ancestor).copied())
     }
 
     /// Folder a file node is drawn inside: the deepest folder holding its
@@ -162,11 +178,7 @@ impl NodeStore {
     /// Folder each folder is nested in: the deepest strict ancestor folder.
     pub fn folder_parent(&self, folder_id: u64) -> Option<u64> {
         let path = &self.folder_nodes.get(&folder_id)?.path;
-        self.folder_nodes
-            .values()
-            .filter(|f| f.id != folder_id && f.path != *path && path.starts_with(&f.path))
-            .max_by_key(|f| (f.path.components().count(), std::cmp::Reverse(f.id)))
-            .map(|f| f.id)
+        path.ancestors().skip(1).find_map(|ancestor| self.folder_by_path.get(ancestor).copied())
     }
 
     /// Recomputes every folder's box so nested folders sit inside their
@@ -302,6 +314,18 @@ impl NodeStore {
         self.hiding_folder(file_id).is_some()
     }
 
+    /// Every file `is_file_hidden` is true for, in one pass.
+    pub fn hidden_files(&self) -> HashSet<u64> {
+        self.file_nodes.keys().copied().filter(|&id| self.is_file_hidden(id)).collect()
+    }
+
+    /// Computes this frame's `view.hidden_folders` and `view.hidden_files`;
+    /// call after the rest of `view` is set.
+    pub fn refresh_hidden(&mut self) {
+        self.view.hidden_folders = self.hidden_folders();
+        self.view.hidden_files = self.hidden_files();
+    }
+
     /// For each file whose edges gather on a collapsed folder, that folder
     /// and the box its edges end on: the card, the zoom block, or with
     /// "Collapse: Edges Only" the folder's frame. Revealed files keep their
@@ -390,6 +414,7 @@ impl NodeStore {
     pub fn clear(&mut self) {
         self.file_nodes.clear();
         self.folder_nodes.clear();
+        self.folder_by_path.clear();
         self.next_id = 1;
     }
 
@@ -431,6 +456,49 @@ mod tests {
         assert_eq!(store.folder_parent(srcx), None, "a shared name prefix is not nesting");
         assert_eq!(store.file_folder(f), Some(utils));
         assert_eq!(store.file_folder(g), Some(src));
+    }
+
+    #[test]
+    fn the_path_index_follows_added_and_removed_folders() {
+        let mut store = NodeStore::default();
+        let src = store.add_folder(PathBuf::from("r/src"), 0);
+        let utils = store.add_folder(PathBuf::from("r/src/utils"), 0);
+        assert_eq!(store.folder_containing(Path::new("r/src/utils/deep/dir")), Some(utils));
+        assert_eq!(store.folder_containing(Path::new("r/other")), None);
+
+        store.remove_node(utils);
+        assert_eq!(store.folder_containing(Path::new("r/src/utils")), Some(src), "falls back to the parent");
+
+        // Two folders on one path: the lower id answers, and takes over again
+        // when the other goes.
+        let twin = store.add_folder(PathBuf::from("r/src"), 0);
+        let child = store.add_folder(PathBuf::from("r/src/child"), 0);
+        assert_eq!(store.folder_containing(Path::new("r/src")), Some(src));
+        assert_eq!(store.folder_parent(child), Some(src));
+        assert_eq!(store.folder_parent(twin), None);
+        store.remove_node(src);
+        assert_eq!(store.folder_containing(Path::new("r/src")), Some(twin));
+        assert_eq!(store.folder_parent(child), Some(twin));
+
+        store.clear();
+        assert_eq!(store.folder_containing(Path::new("r/src")), None);
+    }
+
+    #[test]
+    fn hidden_files_are_the_files_inside_a_collapsed_folder() {
+        let mut store = NodeStore::default();
+        let src = store.add_folder(PathBuf::from("r/src"), 0);
+        store.add_folder(PathBuf::from("r/web"), 0);
+        let inside = add_file(&mut store, "r/src/a.rs", egui::Pos2::ZERO);
+        let outside = add_file(&mut store, "r/web/b.ts", egui::Pos2::ZERO);
+        assert!(store.hidden_files().is_empty());
+
+        store.get_folder_mut(src).unwrap().collapsed = true;
+        assert_eq!(store.hidden_files(), HashSet::from([inside]));
+        assert!(!store.hidden_files().contains(&outside));
+        store.refresh_hidden();
+        assert_eq!(store.view.hidden_files, HashSet::from([inside]));
+        assert_eq!(store.view.hidden_folders, store.hidden_folders());
     }
 
     #[test]

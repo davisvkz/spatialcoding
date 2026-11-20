@@ -36,11 +36,26 @@ pub fn handle_shortcuts(ctx: &egui::Context, state: &mut AppState) -> bool {
 /// collapsed folders, and the collapsed folders' boxes.
 pub(crate) fn shown_node_rects(state: &AppState) -> Vec<egui::Rect> {
     let store = &state.node_store;
-    let hidden_folders = store.hidden_folders();
+    shown_node_rects_with(state, &store.hidden_folders(), &store.hidden_files())
+}
+
+/// Like [`shown_node_rects`], with the hidden sets of the frame in
+/// `node_store.view` instead of computing them again.
+pub(crate) fn frame_node_rects(state: &AppState) -> Vec<egui::Rect> {
+    let view = &state.node_store.view;
+    shown_node_rects_with(state, &view.hidden_folders, &view.hidden_files)
+}
+
+fn shown_node_rects_with(
+    state: &AppState,
+    hidden_folders: &std::collections::HashSet<u64>,
+    hidden_files: &std::collections::HashSet<u64>,
+) -> Vec<egui::Rect> {
+    let store = &state.node_store;
     let files = store
         .file_nodes
         .values()
-        .filter(|n| !store.is_file_hidden(n.id))
+        .filter(|n| !hidden_files.contains(&n.id))
         .map(|n| n.world_rect(state.settings.node_width, state.settings.font_size));
     let folders = store
         .folder_nodes
