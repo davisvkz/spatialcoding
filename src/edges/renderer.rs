@@ -1,9 +1,9 @@
 use egui::{Color32, Pos2, Rect, Stroke, Vec2};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 
 use crate::analysis::dependencies::LineSpan;
 use crate::canvas::viewport::Viewport;
-use crate::edges::edge_store::{EdgeChange, EdgeKind, EdgeStore, NameSpan};
+use crate::edges::edge_store::{EdgeChange, EdgeKind, EdgeStore, EdgeVisibility, NameSpan};
 use crate::edges::geometry::{self, bezier_points, cubic};
 use crate::edges::ports::{PortSide, SOURCE_SIDE, TARGET_SIDE};
 use crate::edges::style::{self, EdgeStyle, EdgeStyleConfig, OpacityMode};
@@ -12,12 +12,9 @@ use crate::nodes::lod::LodLevel;
 use crate::nodes::node_store::NodeStore;
 use crate::nodes::selection::Selection;
 
-/// Where edges of files hidden in collapsed folders go: each hidden file's
-/// collapsed folder and its box (`NodeStore::collapse_proxies`), and whether
-/// edges that end up between the same two boxes are drawn once.
+/// Presentation options for edges, apart from their shared visibility policy.
 #[derive(Default)]
 pub struct CollapseRouting {
-    pub proxies: HashMap<u64, (u64, Rect)>,
     pub merge: bool,
     /// LSP "Dim Dependency Edges": while a symbol is active, edges not
     /// linked to it keep only `1 - dim` of their opacity.
@@ -60,7 +57,7 @@ pub fn draw_edges(
     node_width: f32,
     font_size: f32,
     symbol_rect: &mut dyn FnMut(&FileNode, NameSpan) -> Option<Rect>,
-    workspace_root: Option<&std::path::Path>,
+    visibility: &EdgeVisibility,
     collapse: &CollapseRouting,
     layer: EdgeLayer,
 ) {
@@ -70,11 +67,11 @@ pub fn draw_edges(
     let lod = LodLevel::from_zoom(zoom);
     let min_len_px = config.hide_short_pct * MIN_VISIBLE_LEN_PX;
     let nothing_selected = selection.count() == 0 && selection.symbols().is_empty();
+    let emphasize_selection = config.emphasizes_selection();
     // With ports on, edges end at the port on the node border (its line's
     // y on the facing side), the point `anchor` returns; otherwise they
     // touch the identifier glyphs.
-    let glyph_ends =
-        !config.show_ports && LodLevel::from_zoom(viewport.zoom).draws_code();
+    let glyph_ends = !config.show_ports && LodLevel::from_zoom(viewport.zoom).draws_code();
 
     // Edges merged into one per pair of ends, when a collapsed folder is one.
     let mut merged: HashSet<(bool, (EndKey, EndKey))> = HashSet::new();
@@ -86,7 +83,9 @@ pub fn draw_edges(
             if (is_connected || changes_highlight) != connected_pass {
                 continue;
             }
-            if !edge.is_visible_for(config, selection) {
+            if !edge.is_visible(config)
+                || visibility.shares_proxy(edge.source_node, edge.target_node)
+            {
                 continue;
             }
             let (Some(src), Some(tgt)) = (
@@ -95,46 +94,34 @@ pub fn draw_edges(
             ) else {
                 continue;
             };
-            let src_proxy = collapse.proxies.get(&edge.source_node).copied();
-            let tgt_proxy = collapse.proxies.get(&edge.target_node).copied();
-            if src_proxy.is_some() || tgt_proxy.is_some() {
-                let key = |node: u64, proxy: Option<(u64, Rect)>| {
-                    proxy.map_or(EndKey::File(node), |(folder, _)| EndKey::Folder(folder))
-                };
-                let ends = (
-                    key(edge.source_node, src_proxy),
-                    key(edge.target_node, tgt_proxy),
-                );
-                // Both ends inside one collapsed folder: nothing to draw.
-                if ends.0 == ends.1 {
-                    continue;
-                }
-                if collapse.merge && !merged.insert((connected_pass, ends)) {
-                    continue;
-                }
+            let src_proxy = visibility.proxy(edge.source_node);
+            let tgt_proxy = visibility.proxy(edge.target_node);
+            let src_rect = visibility.endpoint_rect(src, node_width, font_size);
+            let tgt_rect = visibility.endpoint_rect(tgt, node_width, font_size);
+            let world_backwards = geometry::is_backwards(src_rect, tgt_rect);
+            if !visibility.includes(
+                edge,
+                config,
+                is_connected,
+                world_backwards,
+                (&src.path, &tgt.path),
+            ) {
+                continue;
             }
 
-            let src_rect = src_proxy.map_or_else(|| src.world_rect(node_width, font_size), |p| p.1);
-            let tgt_rect = tgt_proxy.map_or_else(|| tgt.world_rect(node_width, font_size), |p| p.1);
+            let selected_edge = (emphasize_selection && is_connected) || changes_highlight;
+            let backwards = config.highlight_reverse_layout && world_backwards;
+            if (selected_edge || backwards) != (layer == EdgeLayer::Above) {
+                continue;
+            }
+
             let (src_point, src_dir) = match src_proxy {
                 Some(_) => box_anchor(src_rect, SOURCE_SIDE),
-                None => anchor(
-                    src,
-                    src_rect,
-                    edge.source_span,
-                    SOURCE_SIDE,
-                    font_size,
-                ),
+                None => anchor(src, src_rect, edge.source_span, SOURCE_SIDE, font_size),
             };
             let (tgt_point, tgt_dir) = match tgt_proxy {
                 Some(_) => box_anchor(tgt_rect, TARGET_SIDE),
-                None => anchor(
-                    tgt,
-                    tgt_rect,
-                    edge.target_span,
-                    TARGET_SIDE,
-                    font_size,
-                ),
+                None => anchor(tgt, tgt_rect, edge.target_span, TARGET_SIDE, font_size),
             };
             let src_glyphs = glyph_ends && src_proxy.is_none();
             let tgt_glyphs = glyph_ends && tgt_proxy.is_none();
@@ -160,37 +147,14 @@ pub fn draw_edges(
                 continue;
             }
 
-            // Backwards edges run right to left on the canvas; they are red
-            // when highlighted and the reference draws them thicker.
-            let world_backwards = geometry::is_backwards(src_rect, tgt_rect);
-            let distance = geometry::folder_distance(&src.path, &tgt.path);
-            if !config.show_all
-                && !(is_connected
-                    || changes_highlight
-                    || (config.highlight_backwards && world_backwards)
-                    || geometry::stays_with_all_off(
-                        distance,
-                        config.folder_depth,
-                        config.show_external,
-                        config.external_nesting_max,
-                    ))
-            {
-                continue;
-            }
-            let selected_edge = (config.highlight_selected && is_connected && !nothing_selected)
-                || changes_highlight;
-            let backwards = config.highlight_reverse_layout && world_backwards;
-            // Selected and highlighted backwards edges are drawn above the
-            // nodes, the rest of the web below them.
-            if (selected_edge || backwards) != (layer == EdgeLayer::Above) {
-                continue;
-            }
-
-            let mut factor = geometry::depth_opacity(config.opacity_mode, distance);
+            let mut factor = geometry::depth_opacity(
+                config.opacity_mode,
+                geometry::folder_distance(&src.path, &tgt.path),
+            );
             if selected_edge {
                 factor = 1.0;
             } else if !nothing_selected
-                && config.highlight_selected
+                && emphasize_selection
                 && config.opacity_mode == OpacityMode::Depth
             {
                 factor *= UNCONNECTED_RATIO;
@@ -199,6 +163,19 @@ pub fn draw_edges(
             alpha = symbol_dimmed(alpha, is_connected, collapse.symbol_dim);
             if alpha < 2 {
                 continue;
+            }
+
+            if collapse.merge && (src_proxy.is_some() || tgt_proxy.is_some()) {
+                let key = |node, proxy: Option<(u64, Rect)>| {
+                    proxy.map_or(EndKey::File(node), |(folder, _)| EndKey::Folder(folder))
+                };
+                let ends = (
+                    key(edge.source_node, src_proxy),
+                    key(edge.target_node, tgt_proxy),
+                );
+                if !merged.insert((connected_pass, ends)) {
+                    continue;
+                }
             }
 
             // Highlight overrides pick a fixed color that must stay readable
@@ -227,14 +204,6 @@ pub fn draw_edges(
             } else {
                 None
             };
-            let folder_colors = workspace_root
-                .filter(|_| config.folder_levels)
-                .and_then(|root| {
-                    Some((
-                        rgb(config.folder_color(&src.path, root)?),
-                        rgb(config.folder_color(&tgt.path, root)?),
-                    ))
-                });
             let base_color = override_color.unwrap_or_else(|| {
                 if selected_edge {
                     rgb(config.selected_color)
@@ -242,9 +211,10 @@ pub fn draw_edges(
                     // Far out, thin edges turn into a quiet semantic tone.
                     rgb(style::SEMANTIC_FADE_COLOR)
                 } else {
-                    folder_colors.map(|(source, _)| source).unwrap_or_else(|| {
-                        lightness(rgb(config.relationships[edge.relationship.index()].color), config.base_lightness)
-                    })
+                    lightness(
+                        rgb(config.relationships[edge.relationship.index()].color),
+                        config.base_lightness,
+                    )
                 }
             });
             let color = base_color.gamma_multiply(alpha as f32 / 255.0);
@@ -276,11 +246,14 @@ pub fn draw_edges(
                     )
                 })
                 .flatten();
-            let arrow_len = geometry::arrow_length(zoom, config.min_size_pct, config.scale_arrow_heads);
+            let arrow_len =
+                geometry::arrow_length(zoom, config.min_size_pct, config.scale_arrow_heads);
 
             {
                 match gap_visible {
-                    Some(visible) => draw_gap_gradient(painter, &path, width, base_color, alpha, visible),
+                    Some(visible) => {
+                        draw_gap_gradient(painter, &path, width, base_color, alpha, visible)
+                    }
                     None if config.style == EdgeStyle::Bezier => {
                         // The solid curve is one bezier shape, flattened by egui.
                         let ctrl = bezier_points(src_screen, src_dir, tgt_screen, tgt_dir, k, zoom);
@@ -419,13 +392,25 @@ fn draw_path(painter: &egui::Painter, path: &[Pos2], stroke: Stroke) {
 /// Gradient gap: the stroke is full at both tips and fades to nothing toward
 /// the middle, leaving the `visible` share of each end drawn (see
 /// [`geometry::gradient_alpha`]).
-fn draw_gap_gradient(painter: &egui::Painter, path: &[Pos2], width: f32, base: Color32, alpha: u8, visible: f32) {
+fn draw_gap_gradient(
+    painter: &egui::Painter,
+    path: &[Pos2],
+    width: f32,
+    base: Color32,
+    alpha: u8,
+    visible: f32,
+) {
     for (a, b, t) in geometry::polyline_pieces(path, CURVE_SAMPLES) {
         let f = geometry::gradient_alpha(t, visible);
         if f <= 0.0 {
             continue;
         }
-        let c = Color32::from_rgba_unmultiplied(base.r(), base.g(), base.b(), (alpha as f32 * f).round() as u8);
+        let c = Color32::from_rgba_unmultiplied(
+            base.r(),
+            base.g(),
+            base.b(),
+            (alpha as f32 * f).round() as u8,
+        );
         painter.line_segment([a, b], Stroke::new(width, c));
     }
 }
@@ -547,5 +532,4 @@ mod tests {
         assert_eq!(symbol_dimmed(200, false, None), 200);
         assert_eq!(symbol_dimmed(200, false, Some(1.5)), 0, "clamped");
     }
-
 }

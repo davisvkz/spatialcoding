@@ -81,7 +81,6 @@ const MAX_TINT_ITEMS: usize = 6000;
 /// first line's start and the file's widest column.
 const BOX_SCAN_LINES: usize = 200;
 
-
 struct CachedCst {
     node_id: u64,
     source_hash: u64,
@@ -146,7 +145,12 @@ impl CstPanelState {
     /// The tinted nodes of file `node_id`: named nodes below the root,
     /// within the depth limit, with their bounding boxes. Cached by content
     /// and settings.
-    pub fn tint_items(&mut self, store: &NodeStore, node_id: u64, settings: &CstSettings) -> &[TintItem] {
+    pub fn tint_items(
+        &mut self,
+        store: &NodeStore,
+        node_id: u64,
+        settings: &CstSettings,
+    ) -> &[TintItem] {
         let Some(node) = store.get_file(node_id) else {
             self.tints.remove(&node_id);
             return &[];
@@ -164,7 +168,14 @@ impl CstPanelState {
                 Some(tree) => collect_tint(&tree.root, &node.content, settings),
                 None => Vec::new(),
             };
-            self.tints.insert(node_id, TintCache { source_hash, settings_hash, items });
+            self.tints.insert(
+                node_id,
+                TintCache {
+                    source_hash,
+                    settings_hash,
+                    items,
+                },
+            );
         }
         &self.tints[&node_id].items
     }
@@ -241,7 +252,10 @@ pub fn mapping_color(kind: &str, settings: &CstSettings) -> egui::Color32 {
 /// The nodes to tint: pre-order, named, below the root.
 fn collect_tint(root: &CstNode, content: &str, settings: &CstSettings) -> Vec<TintItem> {
     let lines: Vec<&str> = content.lines().collect();
-    let indent: Vec<usize> = lines.iter().map(|l| l.len() - l.trim_start().len()).collect();
+    let indent: Vec<usize> = lines
+        .iter()
+        .map(|l| l.len() - l.trim_start().len())
+        .collect();
     let widest = lines.iter().map(|l| l.len()).max().unwrap_or(0);
     let mut out = Vec::new();
     let mut stack: Vec<(&CstNode, usize)> = root.children.iter().rev().map(|c| (c, 1)).collect();
@@ -257,7 +271,11 @@ fn collect_tint(root: &CstNode, content: &str, settings: &CstSettings) -> Vec<Ti
             if node.end_line > node.start_line {
                 let scan = node.end_line - node.start_line <= BOX_SCAN_LINES;
                 x1 = if scan {
-                    (node.start_line..=node.end_line).filter_map(|l| lines.get(l)).map(|l| l.len()).max().unwrap_or(x1)
+                    (node.start_line..=node.end_line)
+                        .filter_map(|l| lines.get(l))
+                        .map(|l| l.len())
+                        .max()
+                        .unwrap_or(x1)
                 } else {
                     widest
                 };
@@ -390,15 +408,24 @@ fn draw_mapping(ui: &mut egui::Ui, state: &mut AppState) {
                                         egui::Layout::right_to_left(egui::Align::Center),
                                         |ui| {
                                             ui.label(egui::RichText::new(counts).size(10.0).weak());
-                                            let open = state.cst.editing_style.as_deref() == Some(row.kind.as_str());
+                                            let open = state.cst.editing_style.as_deref()
+                                                == Some(row.kind.as_str());
                                             let gear = ui
                                                 .small_button(if open { "▾" } else { "⚙" })
                                                 .on_hover_text(format!("Style of {name}"));
                                             gear.widget_info(|| {
-                                                egui::WidgetInfo::labeled(egui::WidgetType::Button, true, format!("Style {name}"))
+                                                egui::WidgetInfo::labeled(
+                                                    egui::WidgetType::Button,
+                                                    true,
+                                                    format!("Style {name}"),
+                                                )
                                             });
                                             if gear.clicked() {
-                                                state.cst.editing_style = if open { None } else { Some(row.kind.clone()) };
+                                                state.cst.editing_style = if open {
+                                                    None
+                                                } else {
+                                                    Some(row.kind.clone())
+                                                };
                                             }
                                         },
                                     );
@@ -460,7 +487,11 @@ fn draw_style_editor(ui: &mut egui::Ui, kind: &str, settings: &mut CstSettings) 
             ui.checkbox(&mut style.visible, "Visible");
             ui.horizontal(|ui| {
                 ui.label("Fill");
-                crate::ui::panel::segmented(ui, &mut style.fill, &[(FillMode::Solid, "Solid"), (FillMode::Gradient, "Gradient")]);
+                crate::ui::panel::segmented(
+                    ui,
+                    &mut style.fill,
+                    &[(FillMode::Solid, "Solid"), (FillMode::Gradient, "Gradient")],
+                );
             });
             ui.horizontal(|ui| {
                 ui.color_edit_button_srgb(&mut style.color);
@@ -473,9 +504,17 @@ fn draw_style_editor(ui: &mut egui::Ui, kind: &str, settings: &mut CstSettings) 
             ui.horizontal(|ui| {
                 ui.label("Border");
                 ui.color_edit_button_srgb(&mut style.border_color);
-                ui.add(egui::Slider::new(&mut style.border_width, 0.0..=4.0).text("Width").fixed_decimals(1));
+                ui.add(
+                    egui::Slider::new(&mut style.border_width, 0.0..=4.0)
+                        .text("Width")
+                        .fixed_decimals(1),
+                );
             });
-            ui.add(egui::Slider::new(&mut style.border_alpha, 0.0..=1.0).text("Border opacity").fixed_decimals(2));
+            ui.add(
+                egui::Slider::new(&mut style.border_alpha, 0.0..=1.0)
+                    .text("Border opacity")
+                    .fixed_decimals(2),
+            );
             ui.horizontal(|ui| {
                 ui.label("Sides");
                 ui.checkbox(&mut style.sides.top, "Top");
@@ -699,10 +738,25 @@ fn collect_edge_nodes(state: &mut AppState) {
         return;
     }
     let mut ends: Vec<(u64, usize)> = Vec::new();
+    let visibility =
+        crate::edges::edge_store::EdgeVisibility::new(&state.node_store, &state.edge_style);
     for edge in state.edge_store.all_edges() {
-        if !edge.is_selected(&state.selection)
-            || !edge.is_visible_for(&state.edge_style, &state.selection)
-        {
+        if !edge.is_selected(&state.selection) {
+            continue;
+        }
+        let (Some(source), Some(target)) = (
+            state.node_store.get_file(edge.source_node),
+            state.node_store.get_file(edge.target_node),
+        ) else {
+            continue;
+        };
+        if !visibility.allows_endpoints(
+            edge,
+            &state.edge_style,
+            true,
+            (source, target),
+            (state.settings.node_width, state.settings.font_size),
+        ) {
             continue;
         }
         if let Some(span) = edge.source_span {

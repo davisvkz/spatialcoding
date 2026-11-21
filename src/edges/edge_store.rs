@@ -1,7 +1,11 @@
 use std::collections::{HashMap, HashSet};
+use std::path::{Path, PathBuf};
 
 use crate::analysis::dependencies::LineSpan;
+use crate::edges::geometry;
 use crate::edges::style::{EdgeStyleConfig, RelationshipType};
+use crate::nodes::file_node::FileNode;
+use crate::nodes::node_store::NodeStore;
 use crate::nodes::selection::Selection;
 
 /// Column span of the symbol name inside a line, for inline highlight.
@@ -86,17 +90,13 @@ impl Edge {
     }
 
     pub fn is_visible(&self, config: &EdgeStyleConfig) -> bool {
-        config.relationships[self.relationship.index()].visible
+        (config.show_all || config.relationships[self.relationship.index()].visible)
             && (self.change != EdgeChange::Deleted || config.show_deleted)
             && match self.kind {
                 EdgeKind::Direct => true,
                 EdgeKind::ReExport => config.show_reexport_edges,
                 EdgeKind::Barrel => config.show_barrel_edges,
             }
-    }
-
-    pub fn is_visible_for(&self, config: &EdgeStyleConfig, selection: &Selection) -> bool {
-        self.is_visible(config) && (config.show_all || self.is_selected(selection))
     }
 
     pub fn is_incoming(&self, selection: &Selection) -> bool {
@@ -108,6 +108,125 @@ impl Edge {
             .symbols()
             .iter()
             .any(|s| s.node_id == self.target_node && Some(s.name_span) == self.name_span)
+    }
+}
+
+/// Canvas geometry shared by the edge layers and endpoint decorations.
+pub struct EdgeVisibility {
+    folder_levels: HashMap<PathBuf, i32>,
+    proxies: HashMap<u64, (u64, egui::Rect)>,
+}
+
+impl EdgeVisibility {
+    pub fn new(nodes: &NodeStore, config: &EdgeStyleConfig) -> Self {
+        let folder_levels = if !config.show_all && config.folder_levels && config.folder_depth >= 0
+        {
+            Self::folder_levels(nodes)
+        } else {
+            HashMap::new()
+        };
+        Self {
+            folder_levels,
+            proxies: nodes.collapse_proxies(),
+        }
+    }
+
+    fn folder_levels(nodes: &NodeStore) -> HashMap<PathBuf, i32> {
+        let mut levels = HashMap::new();
+        for folder in nodes.folder_nodes.values() {
+            let mut current = Some(folder.id);
+            let mut level = 0;
+            while let Some(node) = current.and_then(|id| nodes.get_folder(id)) {
+                if levels
+                    .get(&node.path)
+                    .is_some_and(|&previous| previous >= level)
+                {
+                    break;
+                }
+                levels.insert(node.path.clone(), level);
+                current = nodes.folder_parent(node.id);
+                level += 1;
+            }
+        }
+        levels
+    }
+
+    pub fn max_folder_level(nodes: &NodeStore) -> i32 {
+        Self::folder_levels(nodes).into_values().max().unwrap_or(0)
+    }
+
+    pub fn proxy(&self, id: u64) -> Option<(u64, egui::Rect)> {
+        self.proxies.get(&id).copied()
+    }
+
+    pub fn shares_proxy(&self, source: u64, target: u64) -> bool {
+        self.proxy(source)
+            .zip(self.proxy(target))
+            .is_some_and(|(a, b)| a.0 == b.0)
+    }
+
+    pub fn endpoint_rect(&self, file: &FileNode, width: f32, font: f32) -> egui::Rect {
+        self.proxy(file.id)
+            .map_or_else(|| file.world_rect(width, font), |(_, rect)| rect)
+    }
+
+    /// Scope check for endpoint consumers that have not projected the edge.
+    pub fn allows_endpoints(
+        &self,
+        edge: &Edge,
+        config: &EdgeStyleConfig,
+        connected: bool,
+        (source, target): (&FileNode, &FileNode),
+        (width, font): (f32, f32),
+    ) -> bool {
+        if !edge.is_visible(config) || self.shares_proxy(source.id, target.id) {
+            return false;
+        }
+        let backwards = config.highlight_backwards
+            && !config.show_all
+            && geometry::is_backwards(
+                self.endpoint_rect(source, width, font),
+                self.endpoint_rect(target, width, font),
+            );
+        self.includes(
+            edge,
+            config,
+            connected,
+            backwards,
+            (&source.path, &target.path),
+        )
+    }
+
+    /// The union of independently enabled scopes, after hard filters pass.
+    pub fn includes(
+        &self,
+        edge: &Edge,
+        config: &EdgeStyleConfig,
+        connected: bool,
+        backwards: bool,
+        (source, target): (&Path, &Path),
+    ) -> bool {
+        config.show_all
+            || (config.highlight_selected && connected)
+            || (config.highlight_changes && edge.change.is_changed())
+            || (config.highlight_backwards && backwards)
+            || self.in_folder_level(source, target, config.folder_depth)
+            || (config.show_external
+                && source.parent() != target.parent()
+                && (config.external_nesting_max >= 20
+                    || geometry::folder_distance(source, target) <= config.external_nesting_max))
+    }
+
+    fn in_folder_level(&self, source: &Path, target: &Path, cutoff: i32) -> bool {
+        if self.folder_levels.is_empty() {
+            return false;
+        }
+        source
+            .ancestors()
+            .skip(1)
+            .filter(|folder| target.starts_with(folder))
+            .find_map(|folder| self.folder_levels.get(folder))
+            .is_some_and(|&level| level <= cutoff)
     }
 }
 
@@ -227,19 +346,16 @@ impl EdgeStore {
         selection: &Selection,
         config: &EdgeStyleConfig,
     ) -> HashMap<u64, Vec<SpanHighlight>> {
-        if !config.highlight_selected && !config.highlight_changes {
+        let emphasize_selection = config.emphasizes_selection();
+        if !emphasize_selection && !config.highlight_changes {
             return HashMap::new();
         }
         let mut out = self.spans_matching(|e| {
-            ((config.highlight_selected && e.is_selected(selection))
+            ((emphasize_selection && e.is_selected(selection))
                 || (config.highlight_changes && e.change.is_changed()))
-                && e.is_visible_for(config, selection)
+                && e.is_visible(config)
         });
-        for symbol in selection
-            .symbols()
-            .iter()
-            .filter(|_| config.highlight_selected)
-        {
+        for symbol in selection.symbols().iter().filter(|_| emphasize_selection) {
             let highlight = SpanHighlight {
                 span: symbol.span,
                 label: symbol.label.clone(),
@@ -328,17 +444,9 @@ mod tests {
         let mut selection = Selection::default();
         selection.select(1);
         let mut config = EdgeStyleConfig::default();
-        assert!(!store
-            .all_edges()
-            .next()
-            .unwrap()
-            .is_visible_for(&config, &selection));
+        assert!(!store.all_edges().next().unwrap().is_visible(&config));
         config.show_deleted = true;
-        assert!(store
-            .all_edges()
-            .next()
-            .unwrap()
-            .is_visible_for(&config, &selection));
+        assert!(store.all_edges().next().unwrap().is_visible(&config));
         assert!(store.focused_spans(&selection, &config).is_empty());
         store.set_change(id, EdgeChange::Added);
         config.highlight_selected = false;
@@ -365,17 +473,15 @@ mod tests {
         let mut selection = Selection::default();
         selection.select(1);
         let mut config = EdgeStyleConfig::default();
-        assert!(edge.is_visible_for(&config, &selection));
-        config.relationships[RelationshipType::Renders.index()].visible = false;
-        assert!(!edge.is_visible_for(&config, &selection));
-        assert!(store.focused_spans(&selection, &config).is_empty());
-        config.relationships[RelationshipType::Renders.index()].visible = true;
+        assert!(edge.is_visible(&config));
         config.show_all = false;
-        assert!(edge.is_visible_for(&config, &selection));
-        selection.clear();
+        config.relationships[RelationshipType::Renders.index()].visible = false;
+        assert!(!edge.is_visible(&config));
+        assert!(store.focused_spans(&selection, &config).is_empty());
+        config.show_all = true;
         assert!(
-            !edge.is_visible_for(&config, &selection),
-            "All off with no selection hides the graph"
+            edge.is_visible(&config),
+            "All bypasses relationship filters"
         );
     }
 

@@ -4,6 +4,7 @@
 
 use crate::analysis::dependencies::indexer::ServerProgress;
 use crate::analysis::lsp::manager::ServerStatus;
+use crate::edges::edge_store::EdgeVisibility;
 use crate::edges::style::{EdgeStyle, GradientGapMode, OpacityMode, RelationshipType};
 use crate::state::AppState;
 use crate::ui::panel::{section, segmented, slider_row, switch, Section};
@@ -42,51 +43,11 @@ pub fn draw_edges_panel(ui: &mut egui::Ui, state: &mut AppState) {
     let comparison_ready = state.git_comparison.is_ready();
     section(ui, "Visibility", |ui| {
         switch(ui, &mut state.edge_style.show_all, "All").on_hover_text(
-            "Show all enabled relationship types; otherwise show only the current selection.",
+            "Show all dependency edges. Turn this off to filter relationship types, highlights and folder nesting levels.",
         );
-        egui::CollapsingHeader::new("Relationship types")
-            .default_open(true)
-            .show(ui, |ui| {
-                for kind in RelationshipType::ALL {
-                    let settings = &mut state.edge_style.relationships[kind.index()];
-                    ui.horizontal(|ui| {
-                        ui.checkbox(&mut settings.visible, kind.label());
-                        ui.color_edit_button_rgb(&mut settings.color);
-                    });
-                    ui.weak(kind.description());
-                }
-            });
-        ui.weak("Highlights");
-        ui.horizontal(|ui| {
-            ui.checkbox(&mut state.edge_style.highlight_selected, "Selected");
-            ui.add_enabled(
-                comparison_ready,
-                egui::Checkbox::new(&mut state.edge_style.highlight_changes, "Changes"),
-            )
-            .on_disabled_hover_text(
-                "Refresh the Git comparison below to highlight proven graph changes.",
-            );
-        });
-        ui.checkbox(&mut state.edge_style.highlight_backwards, "Backwards")
-            .on_hover_text("Keep backwards edges visible when All is off.");
-        ui.checkbox(&mut state.edge_style.show_external, "External")
-            .on_hover_text("With All off, also keep edges between files of different folders.");
-        ui.add_enabled_ui(state.edge_style.show_external, |ui| {
-            slider_row(ui, "Nesting", &mut state.edge_style.external_nesting_max, 1..=20, |v| {
-                if v >= 20.0 { "No limit".to_string() } else { format!("{v:.0}") }
-            })
-            .on_hover_text("Folders apart an external edge may be; 20 is no limit.");
-        });
-        ui.weak("Folder nesting levels");
-        ui.checkbox(&mut state.edge_style.folder_levels, "Levels")
-            .on_hover_text(
-                "Color connections by their workspace-relative source and target folders.",
-            );
-        ui.label(format!("Depth    L{}", state.edge_style.folder_depth));
-        ui.add_enabled(
-            state.edge_style.folder_levels,
-            egui::Slider::new(&mut state.edge_style.folder_depth, 1..=12),
-        );
+        if !state.edge_style.show_all {
+            visibility_filters(ui, state, comparison_ready);
+        }
         ui.separator();
         switch(ui, &mut state.edge_style.highlight_reverse_layout, "Highlight Backwards Edges")
             .on_hover_text(
@@ -107,9 +68,21 @@ pub fn draw_edges_panel(ui: &mut egui::Ui, state: &mut AppState) {
                 (EdgeStyle::Pcb, "PCB"),
             ],
         );
-        slider_row(ui, "Curvature", &mut style.bezier_curvature, 0.0..=2.0, |v| format!("{v:.2}"))
-            .on_hover_text("Bezier handle length as a multiple of the horizontal distance.");
-        slider_row(ui, "Lightness", &mut style.base_lightness, 0.0..=200.0, |v| format!("{v:.0}%"));
+        slider_row(
+            ui,
+            "Curvature",
+            &mut style.bezier_curvature,
+            0.0..=2.0,
+            |v| format!("{v:.2}"),
+        )
+        .on_hover_text("Bezier handle length as a multiple of the horizontal distance.");
+        slider_row(
+            ui,
+            "Lightness",
+            &mut style.base_lightness,
+            0.0..=200.0,
+            |v| format!("{v:.0}%"),
+        );
         ui.label("Opacity");
         segmented(
             ui,
@@ -142,21 +115,34 @@ pub fn draw_edges_panel(ui: &mut egui::Ui, state: &mut AppState) {
                 segmented(
                     ui,
                     &mut style.gradient_gap_mode,
-                    &[(GradientGapMode::Percent, "%"), (GradientGapMode::Fixed, "Fixed")],
+                    &[
+                        (GradientGapMode::Percent, "%"),
+                        (GradientGapMode::Fixed, "Fixed"),
+                    ],
                 );
                 ui.add_enabled_ui(style.gradient_gap_mode == GradientGapMode::Percent, |ui| {
                     slider_row(ui, "Gap %", &mut style.gradient_gap_pct, 0.0..=1.0, percent);
                 });
                 ui.add_enabled_ui(style.gradient_gap_mode == GradientGapMode::Fixed, |ui| {
-                    slider_row(ui, "Visible px", &mut style.gradient_fixed_visible_px, 0.0..=5000.0, |v| {
-                        format!("{v:.0}")
-                    })
+                    slider_row(
+                        ui,
+                        "Visible px",
+                        &mut style.gradient_fixed_visible_px,
+                        0.0..=5000.0,
+                        |v| format!("{v:.0}"),
+                    )
                     .on_hover_text("World px that stay visible at each end of the edge.");
                 });
-                slider_row(ui, "Min Dist", &mut style.gradient_min_dist, 0.0..=100_000.0, |v| {
-                    format!("{v:.0}")
-                })
-                .on_hover_text("Edges shorter than this many world px draw solid, without the gap.");
+                slider_row(
+                    ui,
+                    "Min Dist",
+                    &mut style.gradient_min_dist,
+                    0.0..=100_000.0,
+                    |v| format!("{v:.0}"),
+                )
+                .on_hover_text(
+                    "Edges shorter than this many world px draw solid, without the gap.",
+                );
             });
         });
     state.edge_style.use_gradient = use_gradient;
@@ -224,21 +210,23 @@ pub fn draw_edges_panel(ui: &mut egui::Ui, state: &mut AppState) {
         ui.weak("Canvas snapshot vs commit (not index). Reopen files after external edits.");
     });
 
-    Section::new("Barrel and Re-export").info(BARREL_HELP).show(ui, |ui| {
-        let style = &mut state.edge_style;
-        facade_row(
-            ui,
-            (&mut style.show_reexport_edges, "Show re-export edges"),
-            (&mut style.highlight_reexport, "Highlight re-export edges"),
-            &mut style.reexport_color,
-        );
-        facade_row(
-            ui,
-            (&mut style.show_barrel_edges, "Show barrel edges"),
-            (&mut style.highlight_barrel, "Highlight barrel edges"),
-            &mut style.barrel_color,
-        );
-    });
+    Section::new("Barrel and Re-export")
+        .info(BARREL_HELP)
+        .show(ui, |ui| {
+            let style = &mut state.edge_style;
+            facade_row(
+                ui,
+                (&mut style.show_reexport_edges, "Show re-export edges"),
+                (&mut style.highlight_reexport, "Highlight re-export edges"),
+                &mut style.reexport_color,
+            );
+            facade_row(
+                ui,
+                (&mut style.show_barrel_edges, "Show barrel edges"),
+                (&mut style.highlight_barrel, "Highlight barrel edges"),
+                &mut style.barrel_color,
+            );
+        });
 
     section(ui, "Analysis (language servers)", |ui| {
         let progress = state.deps.progress(&state.lsp.manager);
@@ -294,6 +282,69 @@ pub fn draw_edges_panel(ui: &mut egui::Ui, state: &mut AppState) {
                 });
             }
         });
+}
+
+fn visibility_filters(ui: &mut egui::Ui, state: &mut AppState, comparison_ready: bool) {
+    let style = &mut state.edge_style;
+    egui::CollapsingHeader::new("Relationship types").show(ui, |ui| {
+        for kind in RelationshipType::ALL {
+            let settings = &mut style.relationships[kind.index()];
+            ui.horizontal(|ui| {
+                switch(ui, &mut settings.visible, kind.label());
+                ui.color_edit_button_rgb(&mut settings.color);
+            });
+            ui.weak(kind.description());
+        }
+    });
+    ui.weak("Highlights");
+    ui.columns(2, |columns| {
+        switch(&mut columns[0], &mut style.highlight_selected, "Selected").on_hover_text(
+            "Show edges connected to the selection. Other filters can still show these edges.",
+        );
+        columns[1].add_enabled_ui(comparison_ready, |ui| {
+            switch(ui, &mut style.highlight_changes, "Changes").on_disabled_hover_text(
+                "Refresh the Git comparison below to show proven graph changes.",
+            );
+        });
+    });
+    switch(ui, &mut style.highlight_backwards, "Backwards")
+        .on_hover_text("Show edges whose dependency direction runs right-to-left on the canvas.");
+    ui.weak("Folder nesting levels");
+    switch(ui, &mut style.folder_levels, "Levels")
+        .on_hover_text("Show edges by bottom-up folder levels. L0 is leaf folders.");
+    if style.folder_levels {
+        let max = EdgeVisibility::max_folder_level(&state.node_store);
+        let mut depth = style.folder_depth.clamp(-1, max);
+        if slider_row(ui, "Depth", &mut depth, -1..=max, |v| {
+            if v < 0.0 {
+                "Off".into()
+            } else {
+                format!("L{v:.0}")
+            }
+        })
+        .changed()
+        {
+            style.folder_depth = depth;
+        }
+    }
+    switch(ui, &mut style.show_external, "External").on_hover_text(
+        "Also show edges between files of different folders within the nesting limit.",
+    );
+    if style.show_external {
+        slider_row(
+            ui,
+            "Nesting",
+            &mut style.external_nesting_max,
+            1..=20,
+            |v| {
+                if v >= 20.0 {
+                    "No limit".into()
+                } else {
+                    format!("{v:.0}")
+                }
+            },
+        );
+    }
 }
 
 fn percent(v: f64) -> String {

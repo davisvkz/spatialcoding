@@ -92,6 +92,7 @@ fn typescript_fixture_produces_and_filters_all_four_relationships() {
     let (_dir, mut state, root) =
         open_fixture("ts", Some(fake_lsp::launcher()), Duration::from_secs(10));
     let view = node_id(&state, &root, "src/View.tsx");
+    state.edge_style.show_all = false;
     let edges: Vec<_> = state.edge_store.all_edges().collect();
     for kind in RelationshipType::ALL {
         assert!(
@@ -102,7 +103,7 @@ fn typescript_fixture_produces_and_filters_all_four_relationships() {
         assert!(edges
             .iter()
             .filter(|e| e.relationship == kind)
-            .all(|e| !e.is_visible_for(&state.edge_style, &state.selection)));
+            .all(|e| !e.is_visible(&state.edge_style)));
         state.edge_style.relationships[kind.index()].visible = true;
     }
     let rendered = edges

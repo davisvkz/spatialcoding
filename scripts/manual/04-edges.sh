@@ -18,11 +18,12 @@ checklist "04 · Arestas de dependência via LSP ($lang)" \
   "Abrir o painel direito → Edges logo ao iniciar|'Analysis (language servers)': 'Rust: starting…' ou 'indexing… N/M files' e depois 'M files analyzed'; linguagem sem servidor mostra o erro em vermelho" \
   "Esperar a indexação terminar (rust-analyzer: alguns segundos)|as arestas aparecem aos poucos, sem travar a interface; o layout de --layout é refeito quando a análise termina" \
   "Observar o canvas sem nada selecionado|fundo quase preto, sem grade; arestas finas azul-acinzentadas e translúcidas formando uma teia (não uma parede)" \
-  "Visibility → desmarcar All sem seleção; depois selecionar um arquivo|sem seleção não há arestas; ao selecionar aparecem só as relações habilitadas ligadas à seleção" \
-  "Relationship types → alternar Imports e References|imports de módulos locais têm filtro próprio; usos de símbolos e links locais em documentos/configs continuam em References" \
+  "Visibility → alternar All|ligado recolhe os filtros sem apagar suas preferências; desligado mostra Relationship types (recolhido), Highlights e Levels" \
+  "All desligado → expandir Relationship types e alternar Imports e References|imports de módulos locais têm filtro próprio; usos de símbolos e links locais em documentos/configs continuam em References; All volta a mostrar ambos" \
   "Fixture ts → abrir View.tsx/Base.ts/Button.tsx e aguardar o LSP|View extends Base gera Inherits; JSX Button gera Renders; alternar os tipos oculta somente a relação correspondente" \
-  "Highlights → Selected e Backwards; Highlight Backwards Edges|Selected controla o realce da seleção; Backwards destaca entradas na seleção; a última opção destaca arestas indo da direita para a esquerda" \
-  "Levels → ativar e variar Depth|arestas sem override de seleção usam cores das pastas relativas à raiz, agrupadas pela profundidade escolhida" \
+  "All desligado → desligar Levels, External e Changes; testar Selected e Backwards separadamente|Selected mostra arestas da seleção; Backwards mantém arestas da direita para a esquerda mesmo sem seleção; Highlight Backwards Edges muda a cor sem reexibir arestas filtradas" \
+  "Com os outros filtros desligados, ligar Levels e variar Depth|Off não inclui arestas por pasta; L0 inclui conexões dentro das pastas folha; L1 inclui a pasta-pai; os marcadores acompanham as arestas" \
+  "Com Levels desligado, ligar External e variar Nesting|voltam as conexões entre pastas dentro do limite; No limit aceita qualquer distância" \
   "Diff → Refresh comparison sem repositório Git/HEAD|erro ou indisponibilidade visível; Changes/Diff Colors/Deleted continuam desabilitados, sem inventar um diff vazio" \
   "Em projeto Git com commit → baseline HEAD (ou outra revisão) → Refresh comparison|carregamento assíncrono, hash imutável e contagens de relações adicionadas/removidas/iguais; somente imports/documentos locais entre arquivos abertos entram na comparação" \
   "Após remover/adicionar imports, reabrir os arquivos e atualizar a comparação; ativar Changes/Diff Colors/Deleted|Changes realça as mudanças; adicionadas verdes/removidas vermelhas; Deleted oculta as removidas, que usam headers sem marcar linhas antigas no código atual" \

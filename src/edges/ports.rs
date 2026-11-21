@@ -4,7 +4,7 @@
 
 use std::collections::HashMap;
 
-use crate::edges::edge_store::{Edge, EdgeKind, EdgeStore};
+use crate::edges::edge_store::{Edge, EdgeKind, EdgeStore, EdgeVisibility};
 use crate::edges::style::{EdgeStyleConfig, RelationshipType};
 use crate::nodes::node_store::NodeStore;
 use crate::nodes::selection::Selection;
@@ -71,30 +71,51 @@ pub fn collect_ports(
     node_width: f32,
     font_size: f32,
 ) -> HashMap<u64, Vec<Port>> {
+    let visibility = EdgeVisibility::new(nodes, config);
+    collect_visible_ports(
+        edges,
+        nodes,
+        config,
+        selection,
+        (node_width, font_size),
+        &visibility,
+    )
+}
+
+pub fn collect_visible_ports(
+    edges: &EdgeStore,
+    nodes: &NodeStore,
+    config: &EdgeStyleConfig,
+    selection: &Selection,
+    dimensions: (f32, f32),
+    visibility: &EdgeVisibility,
+) -> HashMap<u64, Vec<Port>> {
     let mut by_key: HashMap<(u64, usize, PortSide), Port> = HashMap::new();
-    let nothing_selected = selection.count() == 0 && selection.symbols().is_empty();
     for edge in edges.all_edges() {
-        if !edge.is_visible_for(config, selection) {
-            continue;
-        }
         let (Some(src), Some(tgt)) = (
             nodes.get_file(edge.source_node),
             nodes.get_file(edge.target_node),
         ) else {
             continue;
         };
-        let src_rect = src.world_rect(node_width, font_size);
-        let tgt_rect = tgt.world_rect(node_width, font_size);
-        let emphasized = !nothing_selected && edge.is_selected(selection);
-        let _ = (src_rect, tgt_rect);
+        let connected = edge.is_selected(selection);
+        if !visibility.allows_endpoints(edge, config, connected, (src, tgt), dimensions) {
+            continue;
+        }
+        let emphasized = config.emphasizes_selection() && connected;
         let ends = [
             (src, edge.source_span, SOURCE_SIDE, source_kind(edge)),
             (tgt, edge.target_span, TARGET_SIDE, target_kind(edge)),
         ];
         for (node, span, side, kind) in ends {
+            if visibility.proxy(node.id).is_some() {
+                continue;
+            }
             let Some(span) = span else { continue };
             // A line cut off from a long file attaches to its marker row.
-            let Some(row) = node.anchor_row(span.start) else { continue };
+            let Some(row) = node.anchor_row(span.start) else {
+                continue;
+            };
             let port = by_key.entry((node.id, row, side)).or_insert(Port {
                 line: row,
                 side,
@@ -131,7 +152,11 @@ mod tests {
     }
 
     fn name(line: usize) -> Option<NameSpan> {
-        Some(NameSpan { line, start_byte: 0, end_byte: 1 })
+        Some(NameSpan {
+            line,
+            start_byte: 0,
+            end_byte: 1,
+        })
     }
 
     /// `a.ts` at x=0 and `b.ts` at x=500, ten lines each.
@@ -143,9 +168,16 @@ mod tests {
         (nodes, a, b)
     }
 
-    fn collect(edges: &EdgeStore, nodes: &NodeStore, selection: &Selection) -> HashMap<u64, Vec<Port>> {
+    fn collect(
+        edges: &EdgeStore,
+        nodes: &NodeStore,
+        selection: &Selection,
+    ) -> HashMap<u64, Vec<Port>> {
         // Re-export edges are hidden by default (as in v2); these tests need them.
-        let config = EdgeStyleConfig { show_reexport_edges: true, ..Default::default() };
+        let config = EdgeStyleConfig {
+            show_reexport_edges: true,
+            ..Default::default()
+        };
         collect_ports(edges, nodes, &config, selection, WIDTH, FONT)
     }
 
@@ -158,11 +190,21 @@ mod tests {
         let ports = collect(&edges, &nodes, &Selection::default());
         assert_eq!(
             ports[&a],
-            vec![Port { line: 2, side: PortSide::Right, kind: PortKind::Symbol, emphasized: false }]
+            vec![Port {
+                line: 2,
+                side: PortSide::Right,
+                kind: PortKind::Symbol,
+                emphasized: false
+            }]
         );
         assert_eq!(
             ports[&b],
-            vec![Port { line: 5, side: PortSide::Left, kind: PortKind::Symbol, emphasized: false }]
+            vec![Port {
+                line: 5,
+                side: PortSide::Left,
+                kind: PortKind::Symbol,
+                emphasized: false
+            }]
         );
     }
 
@@ -197,32 +239,49 @@ mod tests {
         let (nodes, a, b) = two_files();
         let mut edges = EdgeStore::default();
         edges.add_full(
-            a, b, Some("fn".into()), None, line(0), line(4), name(4), None, EdgeKind::ReExport,
+            a,
+            b,
+            Some("fn".into()),
+            None,
+            line(0),
+            line(4),
+            name(4),
+            None,
+            EdgeKind::ReExport,
         );
         let module = edges.add_spanned(b, a, None, line(8), line(0), None);
         edges.set_relationship(module, RelationshipType::Imports);
 
         let ports = collect(&edges, &nodes, &Selection::default());
-        let kind_at = |node: u64, line: usize| {
-            ports[&node].iter().find(|p| p.line == line).map(|p| p.kind)
-        };
+        let kind_at =
+            |node: u64, line: usize| ports[&node].iter().find(|p| p.line == line).map(|p| p.kind);
         assert_eq!(kind_at(a, 0), Some(PortKind::Import), "re-export source");
-        assert_eq!(kind_at(b, 4), Some(PortKind::Symbol), "re-exported definition");
+        assert_eq!(
+            kind_at(b, 4),
+            Some(PortKind::Symbol),
+            "re-exported definition"
+        );
         assert_eq!(kind_at(b, 8), Some(PortKind::Import), "import statement");
         let module_edge = edges.all_edges().find(|e| e.id == module).unwrap();
         assert_eq!(target_kind(module_edge), PortKind::Import, "module target");
     }
 
     #[test]
-    fn no_ports_for_missing_spans_hidden_edges_or_lines_past_the_file_and_cut_lines_use_the_marker() {
+    fn no_ports_for_missing_spans_hidden_edges_or_lines_past_the_file_and_cut_lines_use_the_marker()
+    {
         let (mut nodes, a, b) = two_files();
         let mut edges = EdgeStore::default();
         edges.add_spanned(a, b, None, None, line(20), None);
         let hidden = edges.add_spanned(a, b, None, line(1), line(1), None);
         edges.set_relationship(hidden, RelationshipType::Renders);
-        let mut config = EdgeStyleConfig::default();
+        let mut config = EdgeStyleConfig {
+            show_all: false,
+            ..Default::default()
+        };
         config.relationships[RelationshipType::Renders.index()].visible = false;
-        assert!(collect_ports(&edges, &nodes, &config, &Selection::default(), WIDTH, FONT).is_empty());
+        let mut selection = Selection::default();
+        selection.select(a);
+        assert!(collect_ports(&edges, &nodes, &config, &selection, WIDTH, FONT).is_empty());
 
         edges.add_spanned(a, b, None, line(2), line(2), None);
         {
@@ -230,8 +289,12 @@ mod tests {
             b.collapsed = true;
             b.shown_lines = 1;
         }
-        let ports = collect_ports(&edges, &nodes, &config, &Selection::default(), WIDTH, FONT);
-        assert_eq!(ports[&b].iter().map(|p| p.line).collect::<Vec<_>>(), vec![1], "line 2 is cut off: its port sits on the marker row");
+        let ports = collect_ports(&edges, &nodes, &config, &selection, WIDTH, FONT);
+        assert_eq!(
+            ports[&b].iter().map(|p| p.line).collect::<Vec<_>>(),
+            vec![1],
+            "line 2 is cut off: its port sits on the marker row"
+        );
     }
 
     #[test]

@@ -14,7 +14,14 @@ pub const BEZIER_MAX_BACKWARDS_REACH: f32 = 3000.0;
 /// are `h = dx * k` long (`k` 0–2); a backwards edge (`dx < 0`) caps them at
 /// 3000 world px (`zoom` converts that to screen px). `*_dir` is +1 when the
 /// edge leaves/enters through a right side and -1 through a left side.
-pub fn bezier_points(from: Pos2, from_dir: f32, to: Pos2, to_dir: f32, k: f32, zoom: f32) -> [Pos2; 4] {
+pub fn bezier_points(
+    from: Pos2,
+    from_dir: f32,
+    to: Pos2,
+    to_dir: f32,
+    k: f32,
+    zoom: f32,
+) -> [Pos2; 4] {
     let dx = to.x - from.x;
     let mut reach = dx.abs() * k.clamp(0.0, 2.0);
     if dx < 0.0 {
@@ -201,19 +208,16 @@ pub fn depth_opacity(mode: OpacityMode, distance: usize) -> f32 {
 /// Radius of a connection marker in screen px: `max(0.5, (lineHeight - 2) /
 /// 2)` in world px for a code line, 8 for a collapsed folder.
 pub fn marker_radius(line_height_world: f32, folder: bool, zoom: f32) -> f32 {
-    let world = if folder { 8.0 } else { ((line_height_world - 2.0) / 2.0).max(0.5) };
+    let world = if folder {
+        8.0
+    } else {
+        ((line_height_world - 2.0) / 2.0).max(0.5)
+    };
     world * zoom
 }
 
 /// Share of the line width the endpoint rectangle's gradient spans.
 pub const ENDPOINT_RECT_SPAN: f32 = 0.75;
-
-/// With All off, whether an edge between files `distance` folders apart
-/// stays: inside one folder or within `local_depth`, or external and within
-/// the nesting band (20 means no limit).
-pub fn stays_with_all_off(distance: usize, local_depth: usize, show_external: bool, nesting_max: usize) -> bool {
-    distance == 0 || distance <= local_depth || (show_external && (nesting_max >= 20 || distance <= nesting_max))
-}
 
 /// Side of a collision cell for arrow heads, in screen px.
 pub const ARROW_CELL: f32 = 16.0;
@@ -243,7 +247,10 @@ pub fn arrows_to_draw(arrows: &[(Pos2, u8)]) -> Vec<usize> {
         .into_iter()
         .filter(|&i| {
             let tip = arrows[i].0;
-            taken.insert(((tip.x / ARROW_CELL).floor() as i32, (tip.y / ARROW_CELL).floor() as i32))
+            taken.insert((
+                (tip.x / ARROW_CELL).floor() as i32,
+                (tip.y / ARROW_CELL).floor() as i32,
+            ))
         })
         .collect();
     drawn.sort_unstable();
@@ -286,13 +293,22 @@ mod tests {
     fn pcb_runs_horizontal_diagonal_horizontal() {
         // dx 100, dy 40: Nc = 30, then 40 diagonal, then 30.
         let pts = pcb_points(p(0.0, 0.0), p(100.0, 40.0));
-        assert_eq!(pts, vec![p(0.0, 0.0), p(30.0, 0.0), p(70.0, 40.0), p(100.0, 40.0)]);
+        assert_eq!(
+            pts,
+            vec![p(0.0, 0.0), p(30.0, 0.0), p(70.0, 40.0), p(100.0, 40.0)]
+        );
         // Upwards mirrors the diagonal.
         let pts = pcb_points(p(0.0, 0.0), p(100.0, -40.0));
         assert_eq!(pts[2], p(70.0, -40.0));
         // |dy| < 1 is a straight line; no room for the diagonal is a step.
-        assert_eq!(pcb_points(p(0.0, 0.0), p(100.0, 0.5)), vec![p(0.0, 0.0), p(100.0, 0.5)]);
-        assert_eq!(pcb_points(p(0.0, 0.0), p(10.0, 100.0)), step_points(p(0.0, 0.0), p(10.0, 100.0)));
+        assert_eq!(
+            pcb_points(p(0.0, 0.0), p(100.0, 0.5)),
+            vec![p(0.0, 0.0), p(100.0, 0.5)]
+        );
+        assert_eq!(
+            pcb_points(p(0.0, 0.0), p(10.0, 100.0)),
+            step_points(p(0.0, 0.0), p(10.0, 100.0))
+        );
     }
 
     #[test]
@@ -314,7 +330,9 @@ mod tests {
 
     #[test]
     fn percent_gap_leaves_the_complement_visible_at_each_end() {
-        let v = |pct| gradient_visible_fraction(GradientGapMode::Percent, pct, 1000.0, 0.0, 5000.0).unwrap();
+        let v = |pct| {
+            gradient_visible_fraction(GradientGapMode::Percent, pct, 1000.0, 0.0, 5000.0).unwrap()
+        };
         assert!((v(0.8) - 0.1).abs() < 1e-6, "80% gap leaves 10% per end");
         assert_eq!(v(0.0), 0.5);
         assert_eq!(v(1.0), 0.0);
@@ -334,7 +352,11 @@ mod tests {
         assert_eq!(gradient_alpha(0.0, 0.1), 1.0);
         assert_eq!(gradient_alpha(1.0, 0.1), 1.0);
         assert_eq!(gradient_alpha(0.5, 0.1), 0.0, "inside the gap");
-        assert_eq!(gradient_alpha(0.1, 0.1), 0.0, "gap starts at the visible share");
+        assert_eq!(
+            gradient_alpha(0.1, 0.1),
+            0.0,
+            "gap starts at the visible share"
+        );
         let mid = gradient_alpha(0.05, 0.1);
         assert!((mid - 0.5).abs() < 0.06, "{mid}");
         assert!(gradient_alpha(0.02, 0.1) > gradient_alpha(0.08, 0.1));
@@ -378,7 +400,10 @@ mod tests {
     #[test]
     fn depth_opacity_bands_and_full_mode() {
         let depth = |d| depth_opacity(OpacityMode::Depth, d);
-        assert_eq!([depth(0), depth(1), depth(2), depth(3), depth(4), depth(5)], [1.0, 0.5, 0.5, 0.25, 0.25, 0.125]);
+        assert_eq!(
+            [depth(0), depth(1), depth(2), depth(3), depth(4), depth(5)],
+            [1.0, 0.5, 0.5, 0.25, 0.25, 0.125]
+        );
         assert_eq!(depth_opacity(OpacityMode::Full, 9), 1.0);
     }
 
@@ -386,27 +411,44 @@ mod tests {
     fn marker_radius_follows_the_line_height_and_the_zoom() {
         assert_eq!(marker_radius(18.0, false, 1.0), 8.0);
         assert_eq!(marker_radius(18.0, false, 0.5), 4.0);
-        assert_eq!(marker_radius(2.0, false, 1.0), 0.5, "never below half a pixel");
-        assert_eq!(marker_radius(18.0, true, 0.25), 2.0, "a folder marker has radius 8");
-    }
-
-    #[test]
-    fn all_off_keeps_internal_edges_and_external_ones_within_the_nesting_band() {
-        assert!(stays_with_all_off(0, 1, false, 20), "inside one folder");
-        assert!(stays_with_all_off(1, 1, false, 20), "within the local depth");
-        assert!(!stays_with_all_off(3, 1, false, 20), "external is off");
-        assert!(stays_with_all_off(3, 1, true, 20), "20 is no limit");
-        assert!(stays_with_all_off(3, 1, true, 4) && !stays_with_all_off(5, 1, true, 4));
+        assert_eq!(
+            marker_radius(2.0, false, 1.0),
+            0.5,
+            "never below half a pixel"
+        );
+        assert_eq!(
+            marker_radius(18.0, true, 0.25),
+            2.0,
+            "a folder marker has radius 8"
+        );
     }
 
     #[test]
     fn arrows_share_a_cell_by_priority_then_order() {
         let tip = |x: f32, y: f32| Pos2::new(x, y);
         // Two in one cell (the later one outranks), one apart, one tied with the first.
-        let arrows = [(tip(2.0, 2.0), 0), (tip(5.0, 5.0), 2), (tip(100.0, 2.0), 0), (tip(3.0, 3.0), 2)];
-        assert_eq!(arrows_to_draw(&arrows), vec![1, 2], "the selected one wins its cell; the tie keeps the first");
+        let arrows = [
+            (tip(2.0, 2.0), 0),
+            (tip(5.0, 5.0), 2),
+            (tip(100.0, 2.0), 0),
+            (tip(3.0, 3.0), 2),
+        ];
+        assert_eq!(
+            arrows_to_draw(&arrows),
+            vec![1, 2],
+            "the selected one wins its cell; the tie keeps the first"
+        );
         assert_eq!(arrows_to_draw(&[]), Vec::<usize>::new());
-        assert_eq!([arrow_priority(false, false, false), arrow_priority(false, true, false), arrow_priority(true, false, false), arrow_priority(true, true, false), arrow_priority(true, false, true)], [0, 1, 2, 3, 4]);
+        assert_eq!(
+            [
+                arrow_priority(false, false, false),
+                arrow_priority(false, true, false),
+                arrow_priority(true, false, false),
+                arrow_priority(true, true, false),
+                arrow_priority(true, false, true)
+            ],
+            [0, 1, 2, 3, 4]
+        );
     }
 
     #[test]

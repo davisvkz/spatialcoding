@@ -38,6 +38,12 @@ fn git_controls_compare_real_relationships_and_hide_deleted_links() {
     app.set_size(egui::vec2(1800.0, 2200.0));
     app.app_state_mut().right_panel = Some(RightPanel::DependencyEdges);
     app.run();
+    app.get_by_label("All").click();
+    app.run();
+    app.get_by_label("Levels").click();
+    app.get_by_role_and_label(egui::accesskit::Role::CheckBox, "Backwards")
+        .click();
+    app.run();
     assert!(app
         .get_by_role_and_label(egui::accesskit::Role::CheckBox, "Changes")
         .is_disabled());
@@ -105,7 +111,7 @@ fn git_controls_compare_real_relationships_and_hide_deleted_links() {
         .all_edges()
         .find(|e| e.change == EdgeChange::Deleted)
         .unwrap();
-    assert!(deleted.is_visible_for(&s.edge_style, &s.selection));
+    assert!(deleted.is_visible(&s.edge_style));
     assert!(
         deleted.source_span.is_none() && deleted.source_name_span.is_none(),
         "obsolete baseline positions never attach to current identifiers"
@@ -125,7 +131,7 @@ fn git_controls_compare_real_relationships_and_hide_deleted_links() {
         .all_edges()
         .find(|e| e.change == EdgeChange::Deleted)
         .unwrap()
-        .is_visible_for(&s.edge_style, &s.selection));
+        .is_visible(&s.edge_style));
     spatialcoding::workspace::clear_canvas(app.app_state_mut());
     app.run();
     assert!(
@@ -140,19 +146,52 @@ fn reference_visibility_controls_update_the_shared_graph_policy() {
     let mut app = app();
     app.app_state_mut().right_panel = Some(RightPanel::DependencyEdges);
     app.run();
+    let toggle_count = |app: &App, name| {
+        app.query_all_by_role_and_label(egui::accesskit::Role::CheckBox, name)
+            .count()
+    };
+    assert_eq!(
+        toggle_count(&app, "Selected"),
+        0,
+        "All keeps the panel compact"
+    );
+    assert_eq!(toggle_count(&app, "Highlight Backwards Edges"), 1);
     app.get_by_label("All").click();
+    app.run();
+    assert_eq!(
+        toggle_count(&app, "References"),
+        0,
+        "relationships start collapsed"
+    );
+    app.get_by_label("Relationship types").click();
+    app.run();
     app.get_by_label("References").click();
     app.get_by_label("Selected").click();
     app.get_by_label("Levels").click();
-    app.get_by_label("Backwards").click();
+    app.run();
+    app.get_by_role_and_label(egui::accesskit::Role::CheckBox, "Backwards")
+        .click();
+    app.run();
     app.get_by_label("Highlight Backwards Edges").click();
     app.run();
-    assert!(app.app_state().edge_style.use_gradient, "the gradient is on by default, as in v2");
+    assert!(
+        app.app_state().edge_style.use_gradient,
+        "the gradient is on by default, as in v2"
+    );
     let cfg = &app.app_state().edge_style;
     assert!(!cfg.show_all);
     assert!(!cfg.relationships[RelationshipType::References.index()].visible);
     assert!(!cfg.highlight_selected);
-    assert!(cfg.folder_levels && cfg.highlight_backwards && cfg.highlight_reverse_layout);
+    assert!(!cfg.folder_levels && !cfg.highlight_backwards && cfg.highlight_reverse_layout);
+    app.get_by_label("All").click();
+    app.run();
+    assert_eq!(toggle_count(&app, "Selected"), 0);
+    app.get_by_label("All").click();
+    app.run();
+    assert!(
+        !app.app_state().edge_style.relationships[RelationshipType::References.index()].visible
+    );
+    assert!(!app.app_state().edge_style.highlight_selected);
     app.get_by_label("Fixed").click();
     app.run();
     assert_eq!(
@@ -161,6 +200,78 @@ fn reference_visibility_controls_update_the_shared_graph_policy() {
     );
     assert!(app.get_by_label("Diff Colors").is_disabled());
     assert!(app.get_by_label("Deleted").is_disabled());
+}
+
+#[test]
+fn folder_levels_backwards_and_selection_filter_strokes_and_ports_together() {
+    use spatialcoding::analysis::dependencies::LineSpan;
+    use spatialcoding::edges::{ports, style::RelationshipType};
+
+    let mut app = app();
+    let state = app.app_state_mut();
+    let nodes = &mut state.node_store;
+    let file = |nodes: &mut spatialcoding::nodes::node_store::NodeStore, path: &str, x, y| {
+        nodes.add_file(path.into(), "const x = 1;\n".into(), egui::pos2(x, y))
+    };
+    let a = file(nodes, "src/a/one.txt", 100.0, 100.0);
+    let b = file(nodes, "src/a/two.txt", 500.0, 140.0);
+    let c = file(nodes, "src/b/three.txt", 900.0, 220.0);
+    for path in ["src", "src/a", "src/b"] {
+        nodes.add_folder(path.into(), 0);
+    }
+    let row = Some(LineSpan { start: 0, end: 0 });
+    state.edge_store.add_spanned(a, b, None, row, row, None);
+    state.edge_store.add_spanned(c, b, None, row, row, None);
+    state.settings.node_width = 150.0;
+    state.edge_style.show_all = false;
+    state.edge_style.folder_levels = true;
+    state.edge_style.folder_depth = 0;
+    state.edge_style.highlight_selected = false;
+    state.edge_style.highlight_backwards = false;
+    let check = |app: &mut App, count, sources: &[u64]| {
+        app.show_at(egui::pos2(575.0, 180.0), egui::pos2(700.0, 450.0));
+        let state = app.app_state();
+        let ports = ports::collect_ports(
+            &state.edge_store,
+            &state.node_store,
+            &state.edge_style,
+            &state.selection,
+            state.settings.node_width,
+            state.settings.font_size,
+        );
+        assert_eq!(ports.contains_key(&a), sources.contains(&a));
+        assert_eq!(ports.contains_key(&c), sources.contains(&c));
+        assert_eq!(
+            app.output()
+                .shapes
+                .iter()
+                .filter(|shape| matches!(shape.shape, egui::Shape::CubicBezier(_)))
+                .count(),
+            count,
+            "unexpected strokes for sources {sources:?}",
+        );
+    };
+    check(&mut app, 1, &[a]);
+    app.app_state_mut().edge_style.folder_depth = 1;
+    check(&mut app, 2, &[a, c]);
+    app.app_state_mut().edge_style.folder_depth = -1;
+    check(&mut app, 0, &[]);
+    app.app_state_mut().edge_style.folder_levels = false;
+    app.app_state_mut().selection.select(a);
+    check(&mut app, 0, &[]);
+    app.app_state_mut().edge_style.highlight_backwards = true;
+    check(&mut app, 1, &[c]);
+    app.app_state_mut().edge_style.show_external = true;
+    app.app_state_mut().edge_style.highlight_backwards = false;
+    app.app_state_mut().edge_style.external_nesting_max = 1;
+    check(&mut app, 0, &[]);
+    app.app_state_mut().edge_style.external_nesting_max = 2;
+    check(&mut app, 1, &[c]);
+    app.app_state_mut().edge_style.relationships[RelationshipType::References.index()].visible =
+        false;
+    check(&mut app, 0, &[]);
+    app.app_state_mut().edge_style.show_all = true;
+    check(&mut app, 2, &[a, c]);
 }
 
 #[test]

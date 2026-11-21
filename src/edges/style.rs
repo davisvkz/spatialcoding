@@ -139,10 +139,11 @@ pub struct EdgeStyleConfig {
     pub show_external: bool,
     #[serde(default = "default_external_nesting")]
     pub external_nesting_max: usize,
-    #[serde(default)]
+    #[serde(default = "default_true")]
     pub folder_levels: bool,
+    /// Bottom-up canvas folder level: -1 = off, 0 = leaf folders.
     #[serde(default = "default_folder_depth")]
-    pub folder_depth: usize,
+    pub folder_depth: i32,
     pub style: EdgeStyle,
     pub opacity_mode: OpacityMode,
     pub show_all: bool,
@@ -209,8 +210,8 @@ fn default_gradient_gap_mode() -> GradientGapMode {
 fn default_external_nesting() -> usize {
     20
 }
-fn default_folder_depth() -> usize {
-    1
+fn default_folder_depth() -> i32 {
+    12 // The panel clamps to the deepest available canvas level.
 }
 fn default_gradient_gap_pct() -> f32 {
     0.8
@@ -288,25 +289,8 @@ impl EdgeStyleConfig {
         self.hide_short_pct = 0.0;
         self.min_size_pct = self.min_size_pct.clamp(0.3, 1.0);
     }
-    /// A stable palette keyed by the workspace-relative folder prefix. Opening
-    /// another file does not change an existing folder's color.
-    pub fn folder_color(&self, file: &std::path::Path, root: &std::path::Path) -> Option<[f32; 3]> {
-        let relative = file.parent()?.strip_prefix(root).ok()?;
-        let mut hash = 2166136261_u32;
-        for part in relative.components().take(self.folder_depth.max(1)) {
-            for byte in part.as_os_str().to_string_lossy().bytes().chain(*b"/") {
-                hash = (hash ^ u32::from(byte)).wrapping_mul(16777619);
-            }
-        }
-        let palette = [
-            [0.45, 0.67, 0.86],
-            [0.71, 0.57, 0.85],
-            [0.36, 0.74, 0.63],
-            [0.86, 0.65, 0.39],
-            [0.82, 0.48, 0.59],
-            [0.58, 0.71, 0.40],
-        ];
-        Some(palette[hash as usize % palette.len()])
+    pub fn emphasizes_selection(&self) -> bool {
+        self.show_all || self.highlight_selected
     }
     pub fn kind_color(&self, label: &str) -> egui::Color32 {
         let rgb = self
@@ -333,13 +317,13 @@ impl Default for EdgeStyleConfig {
             highlight_reverse_layout: false,
             show_external: false,
             external_nesting_max: default_external_nesting(),
-            folder_levels: false,
+            folder_levels: true,
             folder_depth: default_folder_depth(),
             style: EdgeStyle::Bezier,
             opacity_mode: OpacityMode::Depth,
             // v2 keeps the rest of the web visible (dimmed) around a selection.
             show_all: true,
-            highlight_backwards: false,
+            highlight_backwards: true,
             show_connection_markers: true,
             // Arrow heads only on the selection's edges while `only_selected`
             // is on, as v2's "Arrow Heads › Only selected".
@@ -376,24 +360,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn folder_colors_are_workspace_relative_and_group_at_the_selected_depth() {
-        use std::path::Path;
-        let mut config = EdgeStyleConfig::default();
-        let color =
-            |cfg: &EdgeStyleConfig, path| cfg.folder_color(Path::new(path), Path::new("/repo"));
-        assert_eq!(
-            color(&config, "/repo/src/a/one.rs"),
-            color(&config, "/repo/src/b/two.rs")
-        );
-        config.folder_depth = 2;
-        assert_ne!(
-            color(&config, "/repo/src/a/one.rs"),
-            color(&config, "/repo/src/b/two.rs")
-        );
-        assert_eq!(color(&config, "/outside/a.rs"), None);
-    }
-
-    #[test]
     fn legacy_symbol_pill_setting_is_ignored_and_not_serialized_again() {
         let mut value = serde_json::to_value(EdgeStyleConfig::default()).unwrap();
         value
@@ -425,8 +391,8 @@ mod tests {
         let config: EdgeStyleConfig = serde_json::from_value(value).unwrap();
         assert!(config.highlight_selected);
         assert!(config.relationships.iter().all(|style| style.visible));
-        assert!(!config.folder_levels && !config.highlight_reverse_layout);
-        assert_eq!(config.folder_depth, 1);
+        assert!(config.folder_levels && !config.highlight_reverse_layout);
+        assert_eq!(config.folder_depth, default_folder_depth());
         assert!(!config.highlight_changes && !config.diff_colors && !config.show_deleted);
     }
 

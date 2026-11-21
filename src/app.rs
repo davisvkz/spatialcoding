@@ -404,12 +404,15 @@ impl SpatialCodingApp {
         self.state.node_store.refresh_hidden();
         self.update_canvas_symbol_hover(ui, &response);
         self.draw_folder_nodes(&painter);
-        let ports = self.collect_ports();
+        let visibility = crate::edges::edge_store::EdgeVisibility::new(
+            &self.state.node_store, &self.state.edge_style,
+        );
+        let ports = self.collect_ports(&visibility);
         // The web of dependencies lies below the nodes; the selection's edges
         // and highlighted backwards edges are drawn over them.
-        self.draw_edges(&painter, edge_renderer::EdgeLayer::Below);
+        self.draw_edges(&painter, &visibility, edge_renderer::EdgeLayer::Below);
         self.draw_file_nodes(&painter, canvas_rect, &ports);
-        self.draw_edges(&painter, edge_renderer::EdgeLayer::Above);
+        self.draw_edges(&painter, &visibility, edge_renderer::EdgeLayer::Above);
         self.draw_ports(&painter, canvas_rect, &ports);
         // Token edges and, zoomed out, a name pill on every pinned token.
         let pills = self.state.viewport.zoom < crate::nodes::lod::THRESHOLDS[0];
@@ -822,20 +825,20 @@ impl SpatialCodingApp {
     }
 
     /// Ports of this frame, or none while they are off or nodes are blocks.
-    fn collect_ports(&self) -> HashMap<u64, Vec<Port>> {
+    fn collect_ports(&self, visibility: &crate::edges::edge_store::EdgeVisibility) -> HashMap<u64, Vec<Port>> {
         let state = &self.state;
         if !state.edge_style.show_ports
             || !LodLevel::from_zoom(state.viewport.zoom).draws_code()
         {
             return HashMap::new();
         }
-        let mut ports = ports::collect_ports(
+        let mut ports = ports::collect_visible_ports(
             &state.edge_store,
             &state.node_store,
             &state.edge_style,
             &state.selection,
-            state.settings.node_width,
-            state.settings.font_size,
+            (state.settings.node_width, state.settings.font_size),
+            visibility,
         );
         // Files hidden in a collapsed folder show no ports.
         ports.retain(|&id, _| !state.node_store.view.hidden_files.contains(&id));
@@ -1252,7 +1255,12 @@ impl SpatialCodingApp {
         self.pin_marks = pin_marks;
     }
 
-    fn draw_edges(&mut self, painter: &egui::Painter, layer: edge_renderer::EdgeLayer) {
+    fn draw_edges(
+        &mut self,
+        painter: &egui::Painter,
+        visibility: &crate::edges::edge_store::EdgeVisibility,
+        layer: edge_renderer::EdgeLayer,
+    ) {
         // LSP "Dim Dependency Edges": while a symbol is active.
         let symbol_active =
             !self.state.selection.symbols().is_empty() || !self.state.lsp.pins.is_empty();
@@ -1312,9 +1320,8 @@ impl SpatialCodingApp {
             self.state.settings.node_width,
             self.state.settings.font_size,
             &mut symbol_rect,
-            self.state.loaded_dir.as_deref(),
+            visibility,
             &edge_renderer::CollapseRouting {
-                proxies: self.state.node_store.collapse_proxies(),
                 merge: self.state.settings.folders.merge_collapsed_edges,
                 symbol_dim,
             },
