@@ -19,6 +19,7 @@ checklist "04 · Arestas de dependência via LSP ($lang)" \
   "Esperar a indexação terminar (rust-analyzer: alguns segundos)|as arestas aparecem aos poucos, sem travar a interface; o layout de --layout é refeito quando a análise termina" \
   "Observar o canvas sem nada selecionado|fundo quase preto, sem grade; arestas finas azul-acinzentadas e translúcidas formando uma teia (não uma parede)" \
   "Visibility → alternar All|ligado recolhe os filtros sem apagar suas preferências; desligado mostra Relationship types (recolhido), Highlights e Levels" \
+  "Com um arquivo selecionado, alternar o interruptor ao lado de Dependency Edges (testar com All ligado e desligado)|arestas, setas, marcadores e realces das dependências somem; ao religar reaparecem com os mesmos filtros, sem reindexar" \
   "All desligado → expandir Relationship types e alternar Imports e References|imports de módulos locais têm filtro próprio; usos de símbolos e links locais em documentos/configs continuam em References; All volta a mostrar ambos" \
   "Com a fixture ts, deixar só src/index.ts aberto e selecionado, sem tsconfig ou LSP; File nodes → Open imported files|abre src/lib/math.ts pelo alias @lib/math e src/components/index.ts pelo import relativo" \
   "Fixture ts → abrir View.tsx/Base.ts/Button.tsx e aguardar o LSP|View extends Base gera Inherits; JSX Button gera Renders; alternar os tipos oculta somente a relação correspondente" \

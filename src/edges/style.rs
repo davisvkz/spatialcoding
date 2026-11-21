@@ -146,6 +146,8 @@ pub struct EdgeStyleConfig {
     pub folder_depth: i32,
     pub style: EdgeStyle,
     pub opacity_mode: OpacityMode,
+    /// Master canvas visibility, independent of All and the saved filters.
+    pub show_edges: bool,
     pub show_all: bool,
     pub highlight_backwards: bool,
     pub show_connection_markers: bool,
@@ -321,6 +323,7 @@ impl Default for EdgeStyleConfig {
             folder_depth: default_folder_depth(),
             style: EdgeStyle::Bezier,
             opacity_mode: OpacityMode::Depth,
+            show_edges: true,
             // v2 keeps the rest of the web visible (dimmed) around a selection.
             show_all: true,
             highlight_backwards: true,
@@ -377,6 +380,7 @@ mod tests {
     fn legacy_configs_enable_reference_visibility_and_selection_emphasis() {
         let mut value = serde_json::to_value(EdgeStyleConfig::default()).unwrap();
         for key in [
+            "show_edges",
             "highlight_changes",
             "diff_colors",
             "show_deleted",
@@ -389,6 +393,7 @@ mod tests {
             value.as_object_mut().unwrap().remove(key);
         }
         let config: EdgeStyleConfig = serde_json::from_value(value).unwrap();
+        assert!(config.show_edges);
         assert!(config.highlight_selected);
         assert!(config.relationships.iter().all(|style| style.visible));
         assert!(config.folder_levels && !config.highlight_reverse_layout);

@@ -43,7 +43,7 @@ pub fn draw_edges_panel(ui: &mut egui::Ui, state: &mut AppState) {
     let comparison_ready = state.git_comparison.is_ready();
     section(ui, "Visibility", |ui| {
         switch(ui, &mut state.edge_style.show_all, "All").on_hover_text(
-            "Show all dependency edges. Turn this off to filter relationship types, highlights and folder nesting levels.",
+            "Show all eligible edges instead of filtering by relationship type and scope. To hide every edge, use the switch beside the panel title.",
         );
         if !state.edge_style.show_all {
             visibility_filters(ui, state, comparison_ready);

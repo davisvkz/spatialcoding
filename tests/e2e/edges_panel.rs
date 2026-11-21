@@ -1,8 +1,9 @@
 //! Dependency Edges panel: v2 defaults, the Gradient legend switch, arrow
 //! Min Size, the Barrel and Re-export rows and the kebab reset.
 
+use egui::accesskit::Toggled;
 use egui_kittest::kittest::Queryable;
-use spatialcoding::edges::style::EdgeStyleConfig;
+use spatialcoding::edges::style::{EdgeStyleConfig, MARKER_COLOR, SELECTED_COLOR};
 use spatialcoding::state::RightPanel;
 
 use crate::common::*;
@@ -24,6 +25,98 @@ fn defaults_follow_the_reference() {
     assert!(!cfg.show_reexport_edges && !cfg.highlight_reexport && !cfg.highlight_barrel);
     assert_eq!((cfg.min_size_pct, cfg.gradient_gap_pct), (0.5, 0.8));
     assert_eq!(cfg.gradient_min_dist, 40_000.0);
+}
+
+#[test]
+fn header_switch_hides_and_restores_the_filtered_graph_without_reindexing() {
+    let fx = fixture();
+    let mut app = app_with(&fx);
+    let source = app.open(&fx.path("src/main.rs"));
+    let target = app.open(&fx.path("src/util.rs"));
+    app.set_size(egui::vec2(2400.0, 900.0));
+    {
+        let s = app.app_state_mut();
+        s.left_panel = None;
+        s.right_panel = Some(RightPanel::DependencyEdges);
+        s.node_store.get_file_mut(source).unwrap().position = egui::Pos2::ZERO;
+        s.node_store.get_file_mut(target).unwrap().position = egui::pos2(900.0, 0.0);
+        s.selection.select(source);
+        s.viewport.zoom = 1.0;
+        s.viewport.target_zoom = 1.0;
+    }
+    app.show_at(egui::pos2(800.0, 60.0), egui::pos2(1000.0, 300.0));
+    app.get_by_label("All").click();
+    app.run();
+    let edges = |app: &App| {
+        let mut ids: Vec<_> = app
+            .app_state()
+            .edge_store
+            .all_edges()
+            .map(|e| e.id)
+            .collect();
+        ids.sort_unstable();
+        ids
+    };
+    let ids = edges(&app);
+    let [r, g, b] = SELECTED_COLOR.map(|c| (c * 255.0) as u8);
+    let arrow_color = egui::Color32::from_rgb(r, g, b);
+    let statement_color = app
+        .app_state()
+        .edge_style
+        .kind_color("fn")
+        .gamma_multiply(0.85);
+    let decorations = |app: &App| {
+        let mut counts = [0; 4];
+        for shape in frame_shapes(app) {
+            match shape {
+                egui::Shape::CubicBezier(_) => counts[0] += 1,
+                egui::Shape::Path(p) if p.points.len() == 3 && p.fill == arrow_color => {
+                    counts[1] += 1;
+                }
+                egui::Shape::Circle(c) if c.fill == MARKER_COLOR.gamma_multiply(0.5) => {
+                    counts[2] += 1;
+                }
+                egui::Shape::Rect(r) if r.fill == statement_color => counts[3] += 1,
+                _ => {}
+            }
+        }
+        counts
+    };
+    let before = decorations(&app);
+    assert!(before.iter().all(|&n| n > 0), "{before:?}");
+
+    app.get_by_label("Show dependency edges").click();
+    app.run();
+    assert_eq!(decorations(&app), [0; 4]);
+    assert_eq!(edges(&app), ids);
+    assert_eq!(app.selected(), [source]);
+    assert!(!app.app_state().edge_style.show_all);
+
+    app.get_by_label("Show dependency edges").click();
+    app.run();
+    assert_eq!(decorations(&app), before);
+    assert_eq!(edges(&app), ids);
+    assert!(!app.app_state().edge_style.show_all);
+}
+
+#[test]
+fn hidden_dependency_edges_survive_restart() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("settings.json");
+    let mut app = edges_panel();
+    app.state_mut().enable_settings_persistence(path.clone());
+    app.get_by_label("Show dependency edges").click();
+    app.run();
+    for _ in 0..8 {
+        app.step();
+    }
+    let mut reopened = edges_panel();
+    reopened.state_mut().enable_settings_persistence(path);
+    reopened.run();
+    assert_eq!(
+        reopened.get_by_label("Show dependency edges").toggled(),
+        Some(Toggled::False)
+    );
 }
 
 #[test]
@@ -63,6 +156,8 @@ fn barrel_and_reexport_rows_have_distinct_highlight_toggles_and_an_info_tooltip(
 #[test]
 fn kebab_reset_restores_the_edge_defaults() {
     let mut app = edges_panel();
+    app.get_by_label("Show dependency edges").click();
+    app.run();
     {
         let s = &mut app.app_state_mut().edge_style;
         s.use_gradient = false;
@@ -77,4 +172,9 @@ fn kebab_reset_restores_the_edge_defaults() {
     let cfg = &app.app_state().edge_style;
     assert!(cfg.use_gradient && !cfg.show_reexport_edges);
     assert_eq!(cfg.min_size_pct, 0.5);
+    app.run();
+    assert_eq!(
+        app.get_by_label("Show dependency edges").toggled(),
+        Some(Toggled::True)
+    );
 }

@@ -90,7 +90,8 @@ impl Edge {
     }
 
     pub fn is_visible(&self, config: &EdgeStyleConfig) -> bool {
-        (config.show_all || config.relationships[self.relationship.index()].visible)
+        config.show_edges
+            && (config.show_all || config.relationships[self.relationship.index()].visible)
             && (self.change != EdgeChange::Deleted || config.show_deleted)
             && match self.kind {
                 EdgeKind::Direct => true,

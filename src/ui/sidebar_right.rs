@@ -16,7 +16,11 @@ use crate::ui::{
 const PANELS: &[(&str, &str, RightPanel)] = &[
     (icons::LAYOUT, "Layout", RightPanel::Layout),
     (icons::SYMBOLS, "LSP Symbols", RightPanel::LspSymbols),
-    (icons::EDGES, "Dependency Edges", RightPanel::DependencyEdges),
+    (
+        icons::EDGES,
+        "Dependency Edges",
+        RightPanel::DependencyEdges,
+    ),
     (icons::FOLDERS, "Folders", RightPanel::Folders),
     (icons::FILE_NODES, "File nodes", RightPanel::FileNodes),
     (icons::CST_TREE, "CST", RightPanel::Cst),
@@ -79,9 +83,15 @@ pub fn draw_sidebar_right(ctx: &egui::Context, state: &mut AppState) {
                 let mut spec = HeaderSpec::new(icon_ch, title);
                 spec.menu_label = panel_menus::menu_label(panel);
                 spec.menu = entries.iter().map(|(item, _)| item.clone()).collect();
-                if panel == RightPanel::Cst {
-                    spec.switch = Some(("Toggle CST nodes", &mut state.settings.cst.show_canvas));
-                }
+                spec.switch = match panel {
+                    RightPanel::DependencyEdges => {
+                        Some(("Show dependency edges", &mut state.edge_style.show_edges))
+                    }
+                    RightPanel::Cst => {
+                        Some(("Toggle CST nodes", &mut state.settings.cst.show_canvas))
+                    }
+                    _ => None,
+                };
                 let header = panel_header(ui, spec);
                 if let Some(i) = header.menu_clicked {
                     panel_menus::apply(entries[i].1, state);
@@ -151,5 +161,4 @@ mod tests {
             );
         }
     }
-
 }
