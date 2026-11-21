@@ -10,6 +10,9 @@ use super::{DependencyLink, LineSpan, OpenFiles};
 use crate::analysis::cst::{CstLanguage, parse_tree};
 use crate::edges::style::RelationshipType;
 
+mod rust_modules;
+pub(crate) use rust_modules::{ModuleIssue, ModuleIssueReason};
+
 pub(crate) type ConfigSources = BTreeMap<PathBuf, String>;
 const MAX_CONFIG_BYTES: usize = 256 * 1024;
 
@@ -57,33 +60,51 @@ pub fn links(root: &Path, open: &OpenFiles<'_>) -> Vec<DependencyLink> {
 pub(crate) fn links_with_configs(
     root: &Path, open: &OpenFiles<'_>, configs: &ConfigSources,
 ) -> Vec<DependencyLink> {
+    analyze_with_configs(root, open, configs).links
+}
+
+#[derive(Default)]
+pub(crate) struct LocalAnalysis {
+    pub links: Vec<DependencyLink>,
+    pub rust_issues: Vec<ModuleIssue>,
+}
+
+pub(crate) fn analyze(root: &Path, open: &OpenFiles<'_>) -> LocalAnalysis {
+    analyze_with_configs(root, open, &working_configs(root, open))
+}
+
+fn analyze_with_configs(root: &Path, open: &OpenFiles<'_>, configs: &ConfigSources) -> LocalAnalysis {
     let aliases: BTreeMap<_, _> = configs.iter()
         .map(|(path, text)| (path, TsPaths::parse(path, text)))
         .collect();
-    let mut out = Vec::new();
+    let mut result = LocalAnalysis::default();
     for (path, text) in open.iter().filter(|(p, _)| p.starts_with(root)) {
         if let Some((language, tree)) = parse_tree(path, text) {
             let paths = ancestors(root, path)
                 .find_map(|dir| aliases.get(&dir.join("tsconfig.json")))
                 .and_then(Option::as_ref);
+            if language == CstLanguage::Rust {
+                rust_modules::analyze(root, open, (path, text), tree.root_node(), &mut result);
+            }
             let mut pending = vec![tree.root_node()];
             while let Some(node) = pending.pop() {
                 if !node.has_error() {
-                    syntax_links(root, open, (path, text), language, node, paths, &mut out);
+                    syntax_links(root, open, (path, text), language, node, paths, &mut result.links);
                 }
                 let mut cursor = node.walk();
                 pending.extend(node.named_children(&mut cursor));
             }
         }
         match path.extension().and_then(|e| e.to_str()) {
-            Some("md" | "mdx") => markdown_links(root, open, path, text, &mut out),
-            Some("json") => json_links(root, open, path, text, &mut out),
+            Some("md" | "mdx") => markdown_links(root, open, path, text, &mut result.links),
+            Some("json") => json_links(root, open, path, text, &mut result.links),
             _ => {}
         }
     }
-    out.sort_by(|a, b| (&a.source, a.usage.start, &a.target).cmp(&(&b.source, b.usage.start, &b.target)));
-    out.dedup_by(|a, b| a.source == b.source && a.target == b.target && a.source_name_span == b.source_name_span && a.relationship == b.relationship);
-    out
+    result.links.sort_by(|a, b| (&a.source, a.usage.start, &a.target).cmp(&(&b.source, b.usage.start, &b.target)));
+    result.links.dedup_by(|a, b| a.source == b.source && a.target == b.target && a.source_name_span == b.source_name_span && a.relationship == b.relationship);
+    result.rust_issues.sort_by(|a, b| (&a.path, a.line, &a.name).cmp(&(&b.path, b.line, &b.name)));
+    result
 }
 
 fn syntax_links(root: &Path, open: &OpenFiles<'_>, (path, text): (&Path, &str), language: CstLanguage, node: Node, paths: Option<&TsPaths>, out: &mut Vec<DependencyLink>) {
@@ -106,22 +127,6 @@ fn syntax_links(root: &Path, open: &OpenFiles<'_>, (path, text): (&Path, &str), 
             }
         }
         CstLanguage::Rust => {
-            if node.kind() == "mod_item" && node.child_by_field_name("body").is_none()
-                && let Some(name) = node.child_by_field_name("name") {
-                // A #[path] attribute changes resolution: skip rather than lie.
-                if node.prev_named_sibling().is_some_and(|n| n.kind() == "attribute_item") { return; }
-                let Some(parent) = path.parent() else { return };
-                let parent = if matches!(path.file_stem().and_then(|s| s.to_str()), Some("lib" | "main" | "mod")) {
-                    parent.to_path_buf()
-                } else { parent.join(path.file_stem().unwrap_or_default()) };
-                // Inline modules change the base directory; not guessed here.
-                if node.parent().is_some_and(|n| n.kind() != "source_file") { return; }
-                let value = raw(name);
-                let candidates = [parent.join(format!("{value}.rs")), parent.join(&value).join("mod.rs")];
-                if let Some(target) = unique(root, open, candidates) {
-                    push(path, text, &target, name.start_byte(), name.end_byte(), RelationshipType::Imports, out);
-                }
-            }
             if node.kind() == "macro_invocation"
                 && node.child_by_field_name("macro").is_some_and(|n| matches!(raw(n).as_str(), "include_str" | "include_bytes")) {
                 let mut cursor = node.walk();
@@ -189,15 +194,32 @@ fn normalize(path: &Path) -> Option<PathBuf> {
 }
 
 fn unique(root: &Path, open: &OpenFiles<'_>, candidates: impl IntoIterator<Item = PathBuf>) -> Option<PathBuf> {
-    let mut matches = Vec::new();
+    match candidates_in(root, open, candidates) {
+        RelationCandidates::One(target) => Some(target),
+        RelationCandidates::None | RelationCandidates::Many => None,
+    }
+}
+
+enum RelationCandidates {
+    None,
+    One(PathBuf),
+    Many,
+}
+
+fn candidates_in(root: &Path, open: &OpenFiles<'_>, candidates: impl IntoIterator<Item = PathBuf>) -> RelationCandidates {
+    let mut found = None;
     for candidate in candidates {
         let Some(candidate) = normalize(&candidate).filter(|p| p.starts_with(root)) else { continue };
         let Some((actual, _)) = open.get(&candidate) else { continue };
         if let (Ok(root), Ok(actual)) = (root.canonicalize(), actual.canonicalize())
             && !actual.starts_with(root) { continue; }
-        if !matches.contains(&actual.to_path_buf()) { matches.push(actual.to_path_buf()); }
+        match found.as_deref() {
+            Some(previous) if previous != actual => return RelationCandidates::Many,
+            Some(_) => {}
+            None => found = Some(actual.to_path_buf()),
+        }
     }
-    (matches.len() == 1).then(|| matches.remove(0))
+    found.map_or(RelationCandidates::None, RelationCandidates::One)
 }
 
 #[derive(serde::Deserialize)]
@@ -394,6 +416,76 @@ mod tests {
             ("/p/x.ts", ""),
             ("/p/x.tsx", ""),
             ("/outside.ts", ""),
+        ];
+        let open = OpenFiles::new(files.iter().map(|(p, t)| (Path::new(p), *t)));
+        assert!(links(Path::new("/p"), &open).is_empty());
+    }
+
+    #[test]
+    fn rust_module_paths_survive_attributes_and_follow_inline_scopes() {
+        let files = [
+            ("/p/src/lib.rs", r##"
+#![cfg_attr(all(not(feature = "std"), not(test)), no_std)]
+mod plain;
+#[doc(hidden)]
+// A regular comment does not detach the attribute.
+mod documented;
+#[macro_use]
+mod macros;
+mod outer { mod inner { mod nested; } }
+mod inline { #[path = "other.rs"] mod explicit; }
+#[path = r#"shared/actual.rs"#] mod renamed;
+#[path = "relocated"] mod relocated { mod inside; }
+"##),
+            ("/p/src/plain.rs", "#[path = \"file_sibling.rs\"] mod explicit;\nmod inline { mod nested; }"),
+            ("/p/src/documented.rs", ""),
+            ("/p/src/macros.rs", ""),
+            ("/p/src/outer/inner/nested/mod.rs", ""),
+            ("/p/src/inline/other.rs", ""),
+            ("/p/src/shared/actual.rs", ""),
+            ("/p/src/relocated/inside.rs", ""),
+            ("/p/src/file_sibling.rs", ""),
+            ("/p/src/plain/inline/nested.rs", ""),
+        ];
+        let open = OpenFiles::new(files.iter().map(|(p, t)| (Path::new(p), *t)));
+        let links = links(Path::new("/p"), &open);
+        assert_eq!(links.iter().map(|link| link.target.as_path()).collect::<Vec<_>>(), [
+            Path::new("/p/src/plain.rs"),
+            Path::new("/p/src/documented.rs"),
+            Path::new("/p/src/macros.rs"),
+            Path::new("/p/src/outer/inner/nested/mod.rs"),
+            Path::new("/p/src/inline/other.rs"),
+            Path::new("/p/src/shared/actual.rs"),
+            Path::new("/p/src/relocated/inside.rs"),
+            Path::new("/p/src/file_sibling.rs"),
+            Path::new("/p/src/plain/inline/nested.rs"),
+        ]);
+    }
+
+    #[test]
+    fn rust_module_paths_do_not_guess_across_conditional_or_ambiguous_scopes() {
+        let files = [
+            ("/p/src/lib.rs", r#"
+#[cfg(feature = "optional")]
+// This comment does not detach cfg.
+mod optional;
+#[cfg_attr(test, path = "other.rs")]
+mod conditional;
+#[cfg(unix)] mod gated { mod nested; }
+mod ambiguous;
+#[path = "../../outside.rs"] mod escape;
+#[path = "gone.rs"] mod missing;
+"#),
+            ("/p/src/optional.rs", ""),
+            ("/p/src/conditional.rs", ""),
+            ("/p/src/other.rs", ""),
+            ("/p/src/gated/nested.rs", ""),
+            ("/p/other/lib.rs", "#![cfg_attr(test, cfg(unix))]\nmod nested;"),
+            ("/p/other/nested.rs", ""),
+            ("/p/src/ambiguous.rs", ""),
+            ("/p/src/ambiguous/mod.rs", ""),
+            ("/p/outside.rs", ""),
+            ("/outside.rs", ""),
         ];
         let open = OpenFiles::new(files.iter().map(|(p, t)| (Path::new(p), *t)));
         assert!(links(Path::new("/p"), &open).is_empty());

@@ -29,6 +29,9 @@ EOF
 mod config;
 mod net;
 mod util;
+mod inline { #[doc(hidden)] pub mod nested; }
+#[cfg(any())]
+mod gated;
 
 use crate::net::client::Client;
 
@@ -37,6 +40,9 @@ fn main() {
     let client = Client::new(&cfg);
     println!("{}", util::shout(&client.greet()));
 }
+EOF
+  put "$d" src/inline/nested.rs <<'EOF'
+pub fn value() -> u32 { 42 }
 EOF
   put "$d" src/config.rs <<'EOF'
 use crate::util::parse_port;

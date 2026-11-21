@@ -16,6 +16,7 @@ esac
 dir=$(fixture "$lang")
 checklist "04 · Arestas de dependência via LSP ($lang)" \
   "Abrir o painel direito → Edges logo ao iniciar|'Analysis (language servers)': 'Rust: starting…' ou 'indexing… N/M files' e depois 'M files analyzed'; linguagem sem servidor mostra o erro em vermelho" \
+  "Na fixture Rust, abrir Dependency Edges → Rust modules (static), mesmo sem rust-analyzer|Imports liga util.rs a helpers/strings.rs via #[path] e main.rs a inline/nested.rs; gated é listado como condicional, sem aresta" \
   "Esperar a indexação terminar (rust-analyzer: alguns segundos)|as arestas aparecem aos poucos, sem travar a interface; o layout de --layout é refeito quando a análise termina" \
   "Observar o canvas sem nada selecionado|fundo quase preto, sem grade; arestas finas azul-acinzentadas e translúcidas formando uma teia (não uma parede)" \
   "Visibility → alternar All|ligado recolhe os filtros sem apagar suas preferências; desligado mostra Relationship types (recolhido), Highlights e Levels" \

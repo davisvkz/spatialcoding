@@ -14,6 +14,7 @@ use std::collections::{HashMap, VecDeque};
 use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
 
+use super::local::{self, LocalAnalysis, ModuleIssue};
 use super::{DependencyLink, LineSpan, OpenFilePaths, OpenFiles, StatementFinder, byte_offset, pick_symbols, usage_occurrences};
 use crate::analysis::lsp::manager::{LspManager, LspRequest, LspResponse, RequestId, ServerStatus};
 use crate::analysis::lsp::{Location, LspSymbol, Position, ServerId, server_for};
@@ -97,7 +98,7 @@ pub struct SymbolOccurrence<'a> {
 
 #[derive(Default)]
 pub struct DependencyIndexer {
-    local_links: Vec<DependencyLink>,
+    local: LocalAnalysis,
     open_paths: OpenFilePaths,
     root: Option<PathBuf>,
     files: HashMap<PathBuf, FileEntry>,
@@ -122,8 +123,7 @@ impl DependencyIndexer {
                 ..Self::default()
             };
         }
-        self.refresh_open_paths(files.iter().map(|&(path, _)| path));
-        self.local_links = super::local::links(root, &self.open_files(files.iter().copied()));
+        self.refresh_local_snapshot(root, files);
         self.files
             .retain(|path, entry| files.iter().any(|(p, text)| *p == path && hash_text(text) == entry.hash));
         for (path, text) in files {
@@ -155,8 +155,19 @@ impl DependencyIndexer {
         self.pump(manager);
     }
 
-    pub(crate) fn refresh_open_paths<'a>(&mut self, paths: impl IntoIterator<Item = &'a Path>) {
-        self.open_paths = OpenFilePaths::new(paths);
+    /// Recompute local evidence when canvas membership changes, independently of LSP jobs.
+    pub(crate) fn refresh_local_snapshot(&mut self, root: &Path, files: &[(&Path, &str)]) {
+        self.open_paths = OpenFilePaths::new(files.iter().map(|&(path, _)| path));
+        self.local = local::analyze(root, &self.open_files(files.iter().copied()));
+    }
+
+    pub(crate) fn clear_local_snapshot(&mut self) {
+        self.open_paths = OpenFilePaths::default();
+        self.local = LocalAnalysis::default();
+    }
+
+    pub(crate) fn rust_module_issues(&self) -> &[ModuleIssue] {
+        &self.local.rust_issues
     }
 
     pub(crate) fn open_files<'a>(&'a self, files: impl IntoIterator<Item = (&'a Path, &'a str)>) -> OpenFiles<'a> {
@@ -402,7 +413,7 @@ impl DependencyIndexer {
         let mut finder = StatementFinder::default();
         let mut targets: Vec<(&PathBuf, &FileEntry)> = self.files.iter().collect();
         targets.sort_by_key(|(path, _)| *path);
-        let mut out: Vec<_> = self.local_links.iter().filter(|l| open.get(&l.source).is_some() && open.get(&l.target).is_some()).cloned().collect();
+        let mut out: Vec<_> = self.local.links.iter().filter(|l| open.get(&l.source).is_some() && open.get(&l.target).is_some()).cloned().collect();
         for (target, entry) in targets {
             let Some(Ok(symbols)) = &entry.symbols else { continue };
             if !open.contains_path(target) {

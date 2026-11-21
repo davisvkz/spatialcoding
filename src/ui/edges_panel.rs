@@ -3,6 +3,7 @@
 //! reference: v2.codecanvas.app.
 
 use crate::analysis::dependencies::indexer::ServerProgress;
+use crate::analysis::dependencies::local::{ModuleIssue, ModuleIssueReason};
 use crate::analysis::lsp::manager::ServerStatus;
 use crate::edges::edge_store::EdgeVisibility;
 use crate::edges::style::{EdgeStyle, GradientGapMode, OpacityMode, RelationshipType};
@@ -54,6 +55,8 @@ pub fn draw_edges_panel(ui: &mut egui::Ui, state: &mut AppState) {
                 "Draw in red the edges whose importer ends to the right of where the exported file starts.",
             );
     });
+
+    rust_module_diagnostics(ui, state.deps.rust_module_issues());
 
     section(ui, "Style", |ui| {
         let style = &mut state.edge_style;
@@ -280,6 +283,37 @@ pub fn draw_edges_panel(ui: &mut egui::Ui, state: &mut AppState) {
                         ui.weak(format!("{count}"));
                     });
                 });
+            }
+        });
+}
+
+fn rust_module_diagnostics(ui: &mut egui::Ui, issues: &[ModuleIssue]) {
+    const MAX_ROWS: usize = 12;
+    if issues.is_empty() {
+        return;
+    }
+    Section::new("Rust modules (static)")
+        .info("File links from Rust module declarations, independent of the language server and visibility filters. Only open files are in the canvas snapshot.")
+        .show(ui, |ui| {
+            ui.label(match issues.len() {
+                1 => "1 unresolved Rust module".to_owned(),
+                n => format!("{n} unresolved Rust modules"),
+            });
+            for issue in issues.iter().take(MAX_ROWS) {
+                let reason = match issue.reason {
+                    ModuleIssueReason::Conditional => "Conditional module (cfg or cfg_attr)",
+                    ModuleIssueReason::UnsupportedAttribute => "Unsupported module attribute",
+                    ModuleIssueReason::OutsideWorkspace => "Path leaves the workspace",
+                    ModuleIssueReason::Missing => "Target not in the canvas snapshot",
+                    ModuleIssueReason::Ambiguous => "Multiple targets in the canvas snapshot",
+                };
+                ui.weak(format!(
+                    "{}:{} · {}: {reason}",
+                    issue.path.display(), issue.line, issue.name
+                ));
+            }
+            if issues.len() > MAX_ROWS {
+                ui.weak(format!("{} more not shown", issues.len() - MAX_ROWS));
             }
         });
 }

@@ -1,7 +1,7 @@
 //! Keeps scripts/manual honest: generates a fixture with the real
 //! `fixtures.sh` and checks the dependency edges that `04-edges.sh` promises.
-//! Edges come from language servers: the fake one of `fake_lsp.rs` here, and
-//! the real rust-analyzer in an ignored test.
+//! Checks both static imports and symbol edges from LSP: the fake server of
+//! `fake_lsp.rs` here, and real rust-analyzer in an ignored test.
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -132,6 +132,15 @@ fn typescript_fixture_produces_and_filters_all_four_relationships() {
         rendered.name_span.is_some(),
         "definition comes from LSP, not guessed spelling"
     );
+}
+
+#[test]
+fn rust_fixture_resolves_path_and_nested_modules_without_lsp() {
+    let offline: Launcher = std::sync::Arc::new(|_, _| Err("offline".into()));
+    let (_dir, state, root) = open_fixture("rust", Some(offline), Duration::from_secs(10));
+    assert!(!spans(&state, &root, "src/main.rs", "src/net/mod.rs").is_empty());
+    assert!(!spans(&state, &root, "src/main.rs", "src/inline/nested.rs").is_empty());
+    assert!(!spans(&state, &root, "src/util.rs", "src/helpers/strings.rs").is_empty());
 }
 
 #[test]

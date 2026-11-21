@@ -269,7 +269,7 @@ pub fn clear_canvas(state: &mut AppState) {
     state.git_comparison.invalidate();
     state.top_level_highlights.clear();
     state.node_store.clear();
-    state.deps.refresh_open_paths(std::iter::empty());
+    state.deps.clear_local_snapshot();
     state.edge_store.clear();
     state.selection.clear();
 }
@@ -304,7 +304,14 @@ pub fn remove_nodes(state: &mut AppState, ids: &[u64]) {
     }
     if !ids.is_empty() {
         state.layout_dirty = true;
-        state.deps.refresh_open_paths(state.node_store.file_nodes.values().map(|node| node.path.as_path()));
+        if let Some(root) = &state.loaded_dir {
+            let files: Vec<_> = state.node_store.file_nodes.values()
+                .map(|node| (node.path.as_path(), node.content.as_str()))
+                .collect();
+            state.deps.refresh_local_snapshot(root, &files);
+        } else {
+            state.deps.clear_local_snapshot();
+        }
     }
     apply_dependency_edges(state);
 }

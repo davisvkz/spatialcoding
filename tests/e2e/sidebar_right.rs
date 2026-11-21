@@ -5,6 +5,54 @@ use spatialcoding::state::RightPanel;
 use crate::common::*;
 
 #[test]
+fn dependency_edges_explain_unresolved_rust_modules_without_lsp() {
+    let fx = fixture();
+    std::fs::write(
+        fx.path("src/main.rs"),
+        "mod util;\n#[cfg(test)] mod gated;\nmod missing;\nmod clash;\n",
+    )
+    .unwrap();
+    std::fs::write(fx.path("src/clash.rs"), "").unwrap();
+    std::fs::create_dir(fx.path("src/clash")).unwrap();
+    std::fs::write(fx.path("src/clash/mod.rs"), "").unwrap();
+    let mut app = app_with(&fx);
+    app.app_state_mut()
+        .lsp
+        .manager
+        .set_launcher(std::sync::Arc::new(|_, _| Err("offline".into())));
+    for path in [
+        "src/main.rs",
+        "src/util.rs",
+        "src/clash.rs",
+        "src/clash/mod.rs",
+    ] {
+        app.open(&fx.path(path));
+    }
+    app.set_size(egui::vec2(1800.0, 2200.0));
+    app.app_state_mut().right_panel = Some(RightPanel::DependencyEdges);
+    app.run();
+    app.get_by_label("Rust modules (static)");
+    app.get_by_label("3 unresolved Rust modules");
+    app.get_by_label_contains("gated: Conditional");
+    app.get_by_label_contains("missing: Target not in the canvas snapshot");
+    app.get_by_label_contains("clash: Multiple targets");
+    assert_eq!(app.app_state().edge_store.all_edges().count(), 1);
+
+    std::fs::write(fx.path("src/missing.rs"), "").unwrap();
+    let target = app.open(&fx.path("src/missing.rs"));
+    app.run();
+    app.get_by_label("2 unresolved Rust modules");
+    spatialcoding::workspace::remove_nodes(app.app_state_mut(), &[target]);
+    app.app_state_mut().edge_style.show_all = false;
+    app.run();
+    app.get_by_label("3 unresolved Rust modules");
+
+    spatialcoding::workspace::clear_canvas(app.app_state_mut());
+    app.run();
+    assert!(app.query_by_label("Rust modules (static)").is_none());
+}
+
+#[test]
 fn git_controls_compare_real_relationships_and_hide_deleted_links() {
     use spatialcoding::edges::edge_store::EdgeChange;
     let fx = fixture();
