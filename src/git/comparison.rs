@@ -15,6 +15,7 @@ use crate::edges::style::RelationshipType;
 pub struct GraphInput {
     pub root: PathBuf,
     pub files: BTreeMap<PathBuf, String>,
+    pub(crate) configs: local::ConfigSources,
 }
 
 impl GraphInput {
@@ -22,6 +23,7 @@ impl GraphInput {
         let mut hasher = std::collections::hash_map::DefaultHasher::new();
         self.root.hash(&mut hasher);
         self.files.hash(&mut hasher);
+        self.configs.hash(&mut hasher);
         hasher.finish()
     }
 }
@@ -64,16 +66,18 @@ impl GraphDiff {
         root: &Path,
         baseline: &BTreeMap<PathBuf, String>,
         current: &BTreeMap<PathBuf, String>,
+        configs: (&local::ConfigSources, &local::ConfigSources),
         commit: String,
     ) -> Self {
-        let analyze = |files: &BTreeMap<PathBuf, String>| {
-            local::links(
+        let analyze = |files: &BTreeMap<PathBuf, String>, configs| {
+            local::links_with_configs(
                 root,
                 &OpenFiles::new(files.iter().map(|(p, t)| (p.as_path(), t.as_str()))),
+                configs,
             )
         };
-        let before = analyze(baseline);
-        let after = analyze(current);
+        let before = analyze(baseline, configs.0);
+        let after = analyze(current, configs.1);
         use crate::analysis::dependencies::classify::{classify_link, promote_barrels};
         let kinds: Vec<_> = before
             .iter()
@@ -169,14 +173,28 @@ pub fn compare(input: &GraphInput, baseline: &str) -> Result<GraphDiff, Comparis
             "Comparison limits: 512 files, 2 MiB/file, 32 MiB total.".into(),
         ));
     }
-    let paths: Vec<_> = input.files.keys().cloned().collect();
-    let (commit, files) = repo
+    let config_paths = local::config_paths(&input.root, input.files.keys().map(PathBuf::as_path));
+    let paths: Vec<_> = input
+        .files
+        .keys()
+        .chain(&config_paths)
+        .cloned()
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .collect();
+    let (commit, mut files) = repo
         .baseline(baseline, &paths)
         .map_err(ComparisonError::Error)?;
+    let configs = config_paths
+        .into_iter()
+        .filter_map(|path| files.get(&path).map(|text| (path, text.clone())))
+        .collect();
+    files.retain(|path, _| input.files.contains_key(path));
     Ok(GraphDiff::between(
         &input.root,
         &files,
         &input.files,
+        (&configs, &input.configs),
         commit,
     ))
 }
@@ -284,6 +302,55 @@ mod tests {
     }
 
     #[test]
+    fn closed_tsconfig_is_read_from_each_revision() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        git(&root, &["init", "-q"]);
+        let config = |target: &str| {
+            format!(r#"{{"compilerOptions":{{"paths":{{"@value":["./{target}"]}}}}}}"#)
+        };
+        let tsconfig = root.join("tsconfig.json");
+        std::fs::write(&tsconfig, config("a")).unwrap();
+        let files: BTreeMap<_, _> = [
+            ("app.ts", "import '@value';"),
+            ("a.ts", "export {};"),
+            ("b.ts", "export {};"),
+        ]
+        .into_iter()
+        .map(|(path, text)| (root.join(path), text.to_owned()))
+        .collect();
+        for (path, text) in &files {
+            std::fs::write(path, text).unwrap();
+        }
+        git(&root, &["add", "."]);
+        git(
+            &root,
+            &[
+                "-c",
+                "user.name=T",
+                "-c",
+                "user.email=t@e",
+                "commit",
+                "-qm",
+                "initial",
+            ],
+        );
+        std::fs::write(&tsconfig, config("b")).unwrap();
+        let configs = local::working_configs(
+            &root,
+            &OpenFiles::new(files.iter().map(|(p, t)| (p.as_path(), t.as_str()))),
+        );
+        let input = GraphInput {
+            root: root.clone(),
+            files,
+            configs,
+        };
+        let diff = compare(&input, "HEAD").unwrap();
+        assert_eq!(diff.counts(), (1, 1, 0));
+        assert_eq!(diff.deleted[0].target, root.join("a.ts"));
+    }
+
+    #[test]
     fn baseline_is_a_real_commit_and_ignores_the_index_without_modifying_it() {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path();
@@ -313,6 +380,7 @@ mod tests {
         let index_before = std::fs::read(root.join(".git/index")).unwrap();
         let input = GraphInput {
             root: root.into(),
+            configs: Default::default(),
             files: [
                 (root.join("app.ts"), current.into()),
                 (root.join("a.ts"), "export {};\n".into()),
@@ -351,7 +419,13 @@ mod tests {
             root.join("app.ts"),
             "// moved\n\nimport './b';\nimport './a';\n".into(),
         );
-        let diff = GraphDiff::between(root, &before, &after, "commit".into());
+        let diff = GraphDiff::between(
+            root,
+            &before,
+            &after,
+            (&Default::default(), &Default::default()),
+            "commit".into(),
+        );
         assert_eq!(diff.counts(), (0, 0, 2));
         let mut lsp = local::links(
             root,
@@ -379,7 +453,13 @@ mod tests {
             root.join("index.ts"),
             "export * from './a';\nexport * from './b';\n".into(),
         );
-        let diff = GraphDiff::between(root, &before, &after, "baseline".into());
+        let diff = GraphDiff::between(
+            root,
+            &before,
+            &after,
+            (&Default::default(), &Default::default()),
+            "baseline".into(),
+        );
         assert_eq!(
             diff.deleted_kinds,
             vec![crate::edges::edge_store::EdgeKind::Barrel; 2]
@@ -405,6 +485,7 @@ mod tests {
     fn no_repository_and_unborn_head_are_visible_failures_not_empty_diffs() {
         let dir = tempfile::tempdir().unwrap();
         let input = GraphInput {
+            configs: Default::default(),
             root: dir.path().into(),
             files: Default::default(),
         };

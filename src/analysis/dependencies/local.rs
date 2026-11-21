@@ -1,22 +1,75 @@
 //! Evidence-only local module and document links; independent of LSP/runtime.
 
+use std::collections::{BTreeMap, BTreeSet};
+use std::io::Read;
 use std::path::{Component, Path, PathBuf};
+use std::sync::LazyLock;
 use tree_sitter::Node;
 
 use super::{DependencyLink, LineSpan, OpenFiles};
 use crate::analysis::cst::{CstLanguage, parse_tree};
 use crate::edges::style::RelationshipType;
 
-/// Deterministic links between eligible open files. No package search, network
-/// access, runtime evaluation or arbitrary string-to-symbol matching.
+pub(crate) type ConfigSources = BTreeMap<PathBuf, String>;
+const MAX_CONFIG_BYTES: usize = 256 * 1024;
+
+/// Candidate project configs, including absent paths that may exist in Git.
+pub(crate) fn config_paths<'a>(
+    root: &'a Path,
+    paths: impl IntoIterator<Item = &'a Path>,
+) -> BTreeSet<PathBuf> {
+    paths.into_iter()
+        .filter(|p| matches!(CstLanguage::from_path(p), Some(
+            CstLanguage::TypeScript | CstLanguage::Tsx | CstLanguage::JavaScript
+        )))
+        .flat_map(|p| ancestors(root, p).map(|dir| dir.join("tsconfig.json")))
+        .collect()
+}
+
+fn ancestors<'a>(root: &'a Path, path: &'a Path) -> impl Iterator<Item = &'a Path> {
+    path.ancestors().skip(1).take_while(move |dir| dir.starts_with(root))
+}
+
+/// Read closed configs, but prefer the snapshot for configs on the canvas.
+pub(crate) fn working_configs(root: &Path, open: &OpenFiles<'_>) -> ConfigSources {
+    let Ok(canonical_root) = root.canonicalize() else { return ConfigSources::new() };
+    config_paths(root, open.iter().map(|(p, _)| p)).into_iter().filter_map(|path| {
+        let actual = path.canonicalize().ok()?;
+        if !actual.starts_with(&canonical_root) || !actual.is_file() { return None; }
+        let text = if let Some((_, text)) = open.get(&path) {
+            text.to_owned()
+        } else {
+            let mut text = String::new();
+            let _ = std::fs::File::open(actual).ok()?.take(MAX_CONFIG_BYTES as u64 + 1)
+                .read_to_string(&mut text).ok()?;
+            text
+        };
+        (text.len() <= MAX_CONFIG_BYTES).then_some((path, text))
+    }).collect()
+}
+
 pub fn links(root: &Path, open: &OpenFiles<'_>) -> Vec<DependencyLink> {
+    links_with_configs(root, open, &working_configs(root, open))
+}
+
+/// Deterministic links within a caller-supplied snapshot; no package search,
+/// config discovery, network access, or config execution.
+pub(crate) fn links_with_configs(
+    root: &Path, open: &OpenFiles<'_>, configs: &ConfigSources,
+) -> Vec<DependencyLink> {
+    let aliases: BTreeMap<_, _> = configs.iter()
+        .map(|(path, text)| (path, TsPaths::parse(path, text)))
+        .collect();
     let mut out = Vec::new();
     for (path, text) in open.iter().filter(|(p, _)| p.starts_with(root)) {
         if let Some((language, tree)) = parse_tree(path, text) {
+            let paths = ancestors(root, path)
+                .find_map(|dir| aliases.get(&dir.join("tsconfig.json")))
+                .and_then(Option::as_ref);
             let mut pending = vec![tree.root_node()];
             while let Some(node) = pending.pop() {
                 if !node.has_error() {
-                    syntax_links(root, open, path, text, language, node, &mut out);
+                    syntax_links(root, open, (path, text), language, node, paths, &mut out);
                 }
                 let mut cursor = node.walk();
                 pending.extend(node.named_children(&mut cursor));
@@ -33,14 +86,14 @@ pub fn links(root: &Path, open: &OpenFiles<'_>) -> Vec<DependencyLink> {
     out
 }
 
-fn syntax_links(root: &Path, open: &OpenFiles<'_>, path: &Path, text: &str, language: CstLanguage, node: Node, out: &mut Vec<DependencyLink>) {
+fn syntax_links(root: &Path, open: &OpenFiles<'_>, (path, text): (&Path, &str), language: CstLanguage, node: Node, paths: Option<&TsPaths>, out: &mut Vec<DependencyLink>) {
     let raw = |n: Node| n.utf8_text(text.as_bytes()).unwrap_or("").to_string();
     match language {
         CstLanguage::TypeScript | CstLanguage::Tsx | CstLanguage::JavaScript => {
             if matches!(node.kind(), "import_statement" | "export_statement")
                 && let Some(source) = node.child_by_field_name("source")
                 && let Some(value) = literal(&raw(source)) {
-                add_relative(root, open, (path, text), value, source.start_byte() + 1, true, out);
+                add_js_import(root, open, (path, text), value, source.start_byte() + 1, paths, out);
             }
             // `import()` is a grammar keyword, unlike shadowable require().
             if node.kind() == "call_expression"
@@ -49,7 +102,7 @@ fn syntax_links(root: &Path, open: &OpenFiles<'_>, path: &Path, text: &str, lang
                 && args.named_child_count() == 1
                 && let Some(source) = args.named_child(0)
                 && let Some(value) = literal(&raw(source)) {
-                add_relative(root, open, (path, text), value, source.start_byte() + 1, true, out);
+                add_js_import(root, open, (path, text), value, source.start_byte() + 1, paths, out);
             }
         }
         CstLanguage::Rust => {
@@ -147,6 +200,79 @@ fn unique(root: &Path, open: &OpenFiles<'_>, candidates: impl IntoIterator<Item 
     (matches.len() == 1).then(|| matches.remove(0))
 }
 
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct TsCompilerOptions {
+    base_url: Option<PathBuf>,
+    #[serde(default)]
+    paths: BTreeMap<String, Vec<String>>,
+}
+
+struct TsPaths {
+    base: PathBuf,
+    paths: BTreeMap<String, Vec<String>>,
+}
+
+impl TsPaths {
+    fn parse(path: &Path, text: &str) -> Option<Self> {
+        if text.len() > MAX_CONFIG_BYTES { return None; }
+        // Preserve strings (including URL-like text) while removing JSONC
+        // comments and trailing commas. The result is still validated as JSON.
+        static COMMENTS: LazyLock<regex::Regex> = LazyLock::new(|| {
+            regex::Regex::new(r#"("(?:[^"\\]|\\.)*")|(?s:/\*.*?\*/)|//[^\r\n]*"#).unwrap()
+        });
+        static TRAILING: LazyLock<regex::Regex> = LazyLock::new(|| {
+            regex::Regex::new(r#"("(?:[^"\\]|\\.)*")|,\s*([}\]])"#).unwrap()
+        });
+        #[derive(serde::Deserialize)]
+        #[serde(rename_all = "camelCase")]
+        struct Config {
+            compiler_options: TsCompilerOptions,
+        }
+        let clean = COMMENTS.replace_all(text.trim_start_matches('\u{feff}'), "$1 ");
+        let clean = TRAILING.replace_all(&clean, "${1}${2}");
+        let options = serde_json::from_str::<Config>(&clean).ok()?.compiler_options;
+        let base = options.base_url.as_deref().unwrap_or(Path::new("."));
+        if !base.is_relative() { return None; }
+        Some(Self { base: path.parent()?.join(base), paths: options.paths })
+    }
+
+    fn target(&self, value: &str) -> Option<PathBuf> {
+        let (targets, capture) = if let Some(targets) = self.paths.get(value) {
+            (targets, "")
+        } else {
+            let (_, targets, capture) = self.paths.iter().filter_map(|(key, targets)| {
+                let (prefix, suffix) = key.split_once('*')?;
+                if suffix.contains('*') { return None; }
+                let capture = value.strip_prefix(prefix)?.strip_suffix(suffix)?;
+                Some((prefix.len(), targets, capture))
+            }).max_by_key(|(prefix, _, _)| *prefix)?;
+            (targets, capture)
+        };
+        // Ordered fallback lists would require knowing whether each target
+        // exists even when it isn't on the canvas or in this Git snapshot.
+        let [target] = targets.as_slice() else { return None; };
+        let target = target.replacen('*', capture, 1);
+        let target = Path::new(&target);
+        (target.is_relative() && !target.to_string_lossy().contains(['*', ':', '\\', '%']))
+            .then(|| self.base.join(target))
+    }
+}
+
+fn add_js_import(
+    root: &Path, open: &OpenFiles<'_>, (path, text): (&Path, &str), value: &str,
+    offset: usize, paths: Option<&TsPaths>, out: &mut Vec<DependencyLink>,
+) {
+    if value.starts_with('.') {
+        return add_relative(root, open, (path, text), value, offset, true, out);
+    }
+    if value.contains([':', '?', '\\', '%', '#']) || value.starts_with('/') { return; }
+    let Some(base) = paths.and_then(|paths| paths.target(value)) else { return; };
+    if let Some(target) = unique(root, open, module_candidates(&base)) {
+        push(path, text, &target, offset, offset + value.len(), RelationshipType::Imports, out);
+    }
+}
+
 fn add_relative(root: &Path, open: &OpenFiles<'_>, source: (&Path, &str), value: &str, offset: usize, module: bool, out: &mut Vec<DependencyLink>) {
     let (path, text) = source;
     let value = value.split('#').next().unwrap_or("");
@@ -154,19 +280,23 @@ fn add_relative(root: &Path, open: &OpenFiles<'_>, source: (&Path, &str), value:
     if module && !value.starts_with('.') { return; }
     let Some(parent) = path.parent() else { return };
     let base = parent.join(value);
-    let mut candidates = vec![base.clone()];
-    if module {
-        let extensions = ["ts", "tsx", "js", "jsx", "mjs", "cjs", "mts", "cts"];
-        if base.extension().is_none() {
-            for ext in extensions { candidates.extend([base.with_extension(ext), base.join(format!("index.{ext}"))]); }
-        } else if base.extension().is_some_and(|e| e == "js" || e == "jsx" || e == "mjs" || e == "cjs") {
-            for ext in ["ts", "tsx", "mts", "cts"] { candidates.push(base.with_extension(ext)); }
-        }
-    }
+    let candidates = if module { module_candidates(&base) } else { vec![base] };
     if let Some(target) = unique(root, open, candidates) {
         let relationship = if module { RelationshipType::Imports } else { RelationshipType::References };
         push(path, text, &target, offset, offset + value.len(), relationship, out);
     }
+}
+
+fn module_candidates(base: &Path) -> Vec<PathBuf> {
+    let mut candidates = vec![base.to_owned()];
+    if base.extension().is_none() {
+        for ext in ["ts", "tsx", "js", "jsx", "mjs", "cjs", "mts", "cts"] {
+            candidates.extend([base.with_extension(ext), base.join(format!("index.{ext}"))]);
+        }
+    } else if base.extension().is_some_and(|e| e == "js" || e == "jsx" || e == "mjs" || e == "cjs") {
+        for ext in ["ts", "tsx", "mts", "cts"] { candidates.push(base.with_extension(ext)); }
+    }
+    candidates
 }
 
 fn push(path: &Path, text: &str, target: &Path, start: usize, end: usize, relationship: RelationshipType, out: &mut Vec<DependencyLink>) {
@@ -267,6 +397,33 @@ mod tests {
         ];
         let open = OpenFiles::new(files.iter().map(|(p, t)| (Path::new(p), *t)));
         assert!(links(Path::new("/p"), &open).is_empty());
+    }
+
+    #[test]
+    fn exact_and_wildcard_aliases_use_the_nearest_jsonc_config() {
+        let root = Path::new("/p");
+        let files = [
+            ("/p/web/app.ts", "export * from '@app/exact';\nimport('@app/util');\nimport '@escape';\nimport '@ambiguous';"),
+            ("/p/web/src/exact.ts", ""),
+            ("/p/web/src/util/index.ts", ""),
+            ("/p/web/src/ambiguous.ts", ""),
+            ("/p/web/src/ambiguous.tsx", ""),
+            ("/outside.ts", ""),
+        ];
+        let configs = BTreeMap::from([
+            (root.join("tsconfig.json"), r#"{"compilerOptions":{"paths":{"@app/*":["./missing/*"]}}}"#.into()),
+            (root.join("web/tsconfig.json"), r#"{
+                // Use the workspace tsconfig, not the parent config.
+                "compilerOptions": {"baseUrl": "src", "paths": {
+                    "@app/exact": ["exact"], "@app/*": ["*"],
+                    "@escape": ["../../../outside"], "@ambiguous": ["ambiguous"],
+                }},
+            }"#.into()),
+        ]);
+        let open = OpenFiles::new(files.iter().map(|(p, t)| (Path::new(p), *t)));
+        let links = links_with_configs(root, &open, &configs);
+        assert_eq!(links.iter().map(|link| link.target.as_path()).collect::<Vec<_>>(),
+            [Path::new("/p/web/src/exact.ts"), Path::new("/p/web/src/util/index.ts")]);
     }
 
     #[test]

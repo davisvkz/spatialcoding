@@ -212,6 +212,7 @@ pub fn panel_header(ui: &mut egui::Ui, spec: HeaderSpec<'_>) -> HeaderResponse {
 pub struct Section<'a> {
     label: &'a str,
     info: Option<&'a str>,
+    info_disclosure: Option<(&'a str, &'a mut bool)>,
     switch: Option<(&'a str, &'a mut bool)>,
     collapsible: Option<bool>,
 }
@@ -221,6 +222,7 @@ impl<'a> Section<'a> {
         Self {
             label,
             info: None,
+            info_disclosure: None,
             switch: None,
             collapsible: None,
         }
@@ -230,6 +232,12 @@ impl<'a> Section<'a> {
     /// "<label> info" for accessibility.
     pub fn info(mut self, text: &'a str) -> Self {
         self.info = Some(text);
+        self
+    }
+
+    /// A clickable ⓘ in the legend, for help that should also work by keyboard.
+    pub fn info_disclosure(mut self, label: &'a str, open: &'a mut bool) -> Self {
+        self.info_disclosure = Some((label, open));
         self
     }
 
@@ -252,6 +260,7 @@ impl<'a> Section<'a> {
         let Section {
             label,
             info,
+            info_disclosure,
             switch,
             collapsible,
         } = self;
@@ -263,6 +272,11 @@ impl<'a> Section<'a> {
             ui.label(egui::RichText::new(label).small().weak());
             if let Some(text) = info {
                 info_icon(ui, &format!("{label} info"), text);
+            }
+            if let Some((label, open)) = info_disclosure
+                && icons::tool_icon_button(ui, icons::INFO, label).clicked()
+            {
+                *open = !*open;
             }
             if let Some((switch_label, value)) = switch {
                 switch_only(ui, value, switch_label);

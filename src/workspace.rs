@@ -450,9 +450,13 @@ fn auto_open_matches(state: &mut AppState) {
 }
 
 fn comparison_input(state: &AppState) -> Option<crate::git::comparison::GraphInput> {
+    let root = state.loaded_dir.clone()?;
+    let nodes = &state.node_store.file_nodes;
+    let open = state.deps.open_files(nodes.values().map(|n| (n.path.as_path(), n.content.as_str())));
     Some(crate::git::comparison::GraphInput {
-        root: state.loaded_dir.clone()?,
-        files: state.node_store.file_nodes.values().map(|n| (n.path.clone(), n.content.clone())).collect(),
+        configs: crate::analysis::dependencies::local::working_configs(&root, &open),
+        root,
+        files: nodes.values().map(|n| (n.path.clone(), n.content.clone())).collect(),
     })
 }
 
@@ -884,7 +888,9 @@ pub fn apply_fs_changes(state: &mut AppState, batch: &crate::fs::watcher::WatchB
     if !gone.is_empty() {
         remove_nodes(state, &gone);
     }
-    if !applied.reloaded.is_empty() {
+    let config_changed = batch.modified.iter().chain(&batch.created).chain(&batch.removed)
+        .any(|path| path.file_name().is_some_and(|name| name == "tsconfig.json"));
+    if !applied.reloaded.is_empty() || config_changed {
         if grew_or_shrank {
             state.layout_dirty = true;
         }

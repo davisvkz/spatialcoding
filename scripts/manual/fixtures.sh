@@ -120,9 +120,9 @@ EOF
 
 # TypeScript/JS: relative imports, index resolution, tsconfig paths,
 # .js→.ts mapping, require and dynamic import.
-# With typescript-language-server: index→components/index, index→lib/math (@lib alias),
+# Without LSP: index→components/index, index→lib/math (@lib alias),
 # components/index→Button, Button→lib/math, Button→lib/format (.js→.ts),
-# legacy.js→lib/math (require), lazy→lib/format (dynamic import).
+# lazy→lib/format (dynamic import). The shadowable require is not inferred.
 fixture_ts() {
   local d=$1
   put "$d" package.json <<'EOF'

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Dependency edges from the language servers (TASK-4, TASK-30, TASK-31, TASK-43).
 # Usage: 04-edges.sh [rust|ts|python|go|mixed]   (default: rust)
-# Edges only appear for languages whose server is installed (see 12-lsp.sh):
+# Symbol-level edges require the language server (see 12-lsp.sh):
 # rust-analyzer, typescript-language-server, pyright/basedpyright/pylsp, gopls.
 source "$(dirname -- "${BASH_SOURCE[0]}")/lib.sh"
 
@@ -20,6 +20,7 @@ checklist "04 · Arestas de dependência via LSP ($lang)" \
   "Observar o canvas sem nada selecionado|fundo quase preto, sem grade; arestas finas azul-acinzentadas e translúcidas formando uma teia (não uma parede)" \
   "Visibility → alternar All|ligado recolhe os filtros sem apagar suas preferências; desligado mostra Relationship types (recolhido), Highlights e Levels" \
   "All desligado → expandir Relationship types e alternar Imports e References|imports de módulos locais têm filtro próprio; usos de símbolos e links locais em documentos/configs continuam em References; All volta a mostrar ambos" \
+  "Com a fixture ts, deixar só src/index.ts aberto e selecionado, sem tsconfig ou LSP; File nodes → Open imported files|abre src/lib/math.ts pelo alias @lib/math e src/components/index.ts pelo import relativo" \
   "Fixture ts → abrir View.tsx/Base.ts/Button.tsx e aguardar o LSP|View extends Base gera Inherits; JSX Button gera Renders; alternar os tipos oculta somente a relação correspondente" \
   "All desligado → desligar Levels, External e Changes; testar Selected e Backwards separadamente|Selected mostra arestas da seleção; Backwards mantém arestas da direita para a esquerda mesmo sem seleção; Highlight Backwards Edges muda a cor sem reexibir arestas filtradas" \
   "Com os outros filtros desligados, ligar Levels e variar Depth|Off não inclui arestas por pasta; L0 inclui conexões dentro das pastas folha; L1 inclui a pasta-pai; os marcadores acompanham as arestas" \

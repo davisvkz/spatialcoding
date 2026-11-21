@@ -87,6 +87,23 @@ fn span(start: usize, end: usize) -> LineSpan {
 }
 
 #[test]
+fn typescript_fixture_resolves_the_config_alias_without_lsp() {
+    use spatialcoding::edges::style::RelationshipType::Imports;
+    let offline: Launcher = std::sync::Arc::new(|_, _| Err("offline".into()));
+    let (_dir, state, root) = open_fixture("ts", Some(offline), Duration::from_secs(10));
+    let (source, target) = (
+        node_id(&state, &root, "src/index.ts"),
+        node_id(&state, &root, "src/lib/math.ts"),
+    );
+    assert!(state
+        .edge_store
+        .all_edges()
+        .any(|edge| edge.relationship == Imports
+            && edge.source_node == source
+            && edge.target_node == target));
+}
+
+#[test]
 fn typescript_fixture_produces_and_filters_all_four_relationships() {
     use spatialcoding::edges::style::RelationshipType;
     let (_dir, mut state, root) =

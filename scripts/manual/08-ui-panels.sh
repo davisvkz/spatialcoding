@@ -22,7 +22,7 @@ checklist "08 · Toolbar, painéis e diálogos" \
   "Sidebar direita: clicar num ícone do trilho abre o painel; clicar de novo fecha|ordem Layout, LSP Symbols, Dependency Edges, Folders, File nodes, CST, Agent notes, Performance; título igual ao nome do painel" \
   "Em cada painel, clicar no ⋮ do cabeçalho|abre o menu do painel (ex.: Reset Layout settings); Performance não tem ⋮; clicar num item fecha o menu" \
   "Mudar File Spacing no Layout, depois ⋮ → Reset Layout settings|o valor volta ao padrão" \
-  "Painel Performance: passar o mouse em Auto, Eager/On Open/Lazy, Use SQLite database e no ⓘ de Analysis|controles cinza com o motivo (análise ao abrir, em memória); On Open marcado; CST Depth igual ao do painel CST" \
+  "Painel Performance: passar o mouse em Auto, Eager/On Open/Lazy e Use SQLite database|controles cinza com o motivo (análise ao abrir, em memória); On Open marcado; CST Depth igual ao do painel CST" \
   "Painel Agent notes: passar o mouse em Connect an MCP agent; abrir o ⋮|link e itens do menu desabilitados com a explicação de que não há conexão MCP" \
   "Mudar um ajuste de painel, fechar o app e abrir de novo|o ajuste continua (arquivo ~/.config/spatialcoding/settings.json; apague-o para voltar aos padrões)" \
   "Reduzir a altura da janela; abrir Layout e rolar para baixo|controles inferiores (Sort/Alt Rev) ficam acessíveis; cabeçalho e botão de fechar permanecem fixos; canvas não se move" \
@@ -34,5 +34,5 @@ checklist "08 · Toolbar, painéis e diálogos" \
   "Local Server no rail, sem agente MCP conectado|o ícone tem um ponto laranja; ele some quando um agente se conecta" \
   "Ctrl+K, passar o mouse em 'Next diff layout' e clicar em Go to UI|o painel Changes abre e o seletor Changes | Unified | Split pulsa (só ele, não o painel inteiro)" \
   "Folders → Namespace / package view (Folders, Namespaces, Both, None)|com arquivos .go, .java, .kt ou .cs abertos, Namespaces nomeia a pasta pelo package/namespace, Both mostra 'pasta (namespace)' e None apaga os nomes" \
-  "Performance → About analysis storage (expandir)|explica que a análise fica em memória e só as configurações vão ao disco"
+  "Performance → clicar no ⓘ ao lado de Analysis (About analysis storage)|mostra a explicação de que a análise fica em memória; clicar de novo recolhe"
 launch "$dir" --open-all --layout

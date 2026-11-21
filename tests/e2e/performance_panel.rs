@@ -17,7 +17,7 @@ fn panel(panel: RightPanel) -> App {
 #[test]
 fn analysis_modes_and_sqlite_are_disabled_with_an_explanation() {
     let mut app = panel(RightPanel::Performance);
-    app.get_by_label("Analysis info");
+    app.get_by_label("About analysis storage");
     assert!(app.get_by_label("Auto").is_disabled());
     for mode in ["Eager", "On Open", "Lazy"] {
         assert!(app.get_by_label(mode).is_disabled(), "{mode}");
@@ -30,7 +30,10 @@ fn analysis_modes_and_sqlite_are_disabled_with_an_explanation() {
 #[test]
 fn performance_cst_depth_is_the_cst_panels_depth() {
     let mut app = panel(RightPanel::Performance);
-    assert!(app.app_state().settings.cst.limit_depth, "on by default, as v2");
+    assert!(
+        app.app_state().settings.cst.limit_depth,
+        "on by default, as v2"
+    );
     app.get_by_label("Limit CST depth").click();
     app.run();
     assert!(!app.app_state().settings.cst.limit_depth);
@@ -38,7 +41,11 @@ fn performance_cst_depth_is_the_cst_panels_depth() {
     app.app_state_mut().cst.show_settings = true;
     app.run();
     let limit = app.get_by_label("Limit CST depth");
-    assert_eq!(limit.toggled(), Some(egui::accesskit::Toggled::False), "the CST panel shows it off");
+    assert_eq!(
+        limit.toggled(),
+        Some(egui::accesskit::Toggled::False),
+        "the CST panel shows it off"
+    );
 }
 
 #[test]
@@ -56,7 +63,13 @@ fn agent_notes_show_their_hint_and_an_enabled_menu() {
 fn performance_explains_where_analysis_is_stored() {
     let mut app = panel(RightPanel::Performance);
     app.get_by_label("About analysis storage");
-    app.get_by_label("Expand About analysis storage").click(); // folded by default
+    assert!(app
+        .query_by_label("Expand About analysis storage")
+        .is_none());
+    assert!(app
+        .query_by_label_contains("Syntax trees, language-server answers")
+        .is_none());
+    app.get_by_label("About analysis storage").click();
     app.run();
     app.get_by_label_contains("Syntax trees, language-server answers");
 }
