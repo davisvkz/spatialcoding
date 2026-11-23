@@ -16,7 +16,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 
 use egui::{Pos2, Vec2};
 
-use crate::edges::edge_store::EdgeStore;
+use crate::edges::edge_store::{Edge, EdgeChange, EdgeKind, EdgeStore};
 use crate::layout::settings::{HAlign, LayoutSettings, SortMode, VAlign};
 use crate::nodes::folder_node::{COLLAPSED_FOLDER_SIZE, FOLDER_HEADER_HEIGHT};
 use crate::nodes::node_store::NodeStore;
@@ -55,6 +55,15 @@ struct Placement {
     offsets: HashMap<Item, Vec2>,
     /// Laid-out content size of each group.
     sizes: HashMap<Group, Vec2>,
+}
+
+/// Whether an edge takes part in the layout. Barrel and re-export hops are
+/// routing: the layout follows the direct dependency on the provider, or a
+/// barrel would close false cycles through its crate or package root. Edges
+/// that exist only in a Git baseline are not dependencies of the current
+/// tree, so comparing against a revision must not move nodes.
+fn feeds_layout(edge: &Edge) -> bool {
+    edge.kind == EdgeKind::Direct && edge.change != EdgeChange::Deleted
 }
 
 pub fn apply_layout(nodes: &mut NodeStore, edges: &EdgeStore, settings: &LayoutSettings) {
@@ -131,7 +140,8 @@ pub fn apply_layout(nodes: &mut NodeStore, edges: &EdgeStore, settings: &LayoutS
     let mut group_edges: HashMap<Group, HashSet<(Item, Item)>> = HashMap::new();
     let mut chains: HashMap<u64, Vec<Item>> = HashMap::new();
     for edge in edges.all_edges() {
-        if edge.source_node == edge.target_node
+        if !feeds_layout(edge)
+            || edge.source_node == edge.target_node
             || !nodes.file_nodes.contains_key(&edge.source_node)
             || !nodes.file_nodes.contains_key(&edge.target_node)
         {
@@ -565,6 +575,7 @@ fn interleave<T: Copy>(items: &mut [T]) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::edges::edge_store::{EdgeChange, EdgeKind};
     use std::path::{Path, PathBuf};
 
     const NODE_WIDTH: f32 = 700.0;
@@ -652,6 +663,48 @@ mod tests {
         assert_eq!(pos(&nodes, ids[0]).x, 0.0);
         assert_eq!(pos(&nodes, ids[2]).x, 0.0);
         assert_eq!(pos(&nodes, ids[1]).x, COLUMN);
+    }
+
+    /// A barrel hop `a -> index -> b` plus the shortcut `a -> b`: only the
+    /// shortcut is a dependency. Counting the hop would push `b` to a third
+    /// column, and a barrel that re-exports its importer would close a cycle.
+    #[test]
+    fn barrel_and_reexport_edges_do_not_move_nodes() {
+        let (mut nodes, ids) = store(3);
+        let mut direct = EdgeStore::default();
+        direct.add(ids[0], ids[2], None);
+        apply_layout(&mut nodes, &direct, &settings(SortMode::Asc, VAlign::Top));
+        let expected: Vec<_> = ids.iter().map(|&id| pos(&nodes, id)).collect();
+
+        let mut edges = EdgeStore::default();
+        edges.add(ids[0], ids[2], None);
+        for (source, target, kind) in
+            [(ids[0], ids[1], EdgeKind::Barrel), (ids[1], ids[2], EdgeKind::ReExport)]
+        {
+            edges.add_full(source, target, None, None, None, None, None, None, kind);
+        }
+        apply_layout(&mut nodes, &edges, &settings(SortMode::Asc, VAlign::Top));
+
+        let actual: Vec<_> = ids.iter().map(|&id| pos(&nodes, id)).collect();
+        assert_eq!(actual, expected);
+    }
+
+    /// Comparing with a Git revision adds Deleted edges to the store; they
+    /// describe the old tree and must not reflow the current one.
+    #[test]
+    fn deleted_edges_do_not_move_nodes() {
+        let (mut nodes, ids) = store(3);
+        let mut edges = EdgeStore::default();
+        edges.add(ids[0], ids[1], None);
+        apply_layout(&mut nodes, &edges, &settings(SortMode::Asc, VAlign::Top));
+        let expected: Vec<_> = ids.iter().map(|&id| pos(&nodes, id)).collect();
+
+        let removed = edges.add(ids[1], ids[2], None);
+        edges.set_change(removed, EdgeChange::Deleted);
+        apply_layout(&mut nodes, &edges, &settings(SortMode::Asc, VAlign::Top));
+
+        let actual: Vec<_> = ids.iter().map(|&id| pos(&nodes, id)).collect();
+        assert_eq!(actual, expected);
     }
 
     #[test]
