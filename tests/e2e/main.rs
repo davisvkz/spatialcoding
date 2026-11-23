@@ -4,6 +4,10 @@
 //!
 //! Run with `cargo test --test e2e`.
 
+// The allocator of the shipped binary, so the timings of `perf.rs` match it.
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 mod common;
 
 mod canvas;

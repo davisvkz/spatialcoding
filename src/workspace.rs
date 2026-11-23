@@ -379,6 +379,7 @@ fn find_file_node(state: &AppState, path: &Path) -> Option<u64> {
 /// language servers in the background, and redraws the edges known so far.
 /// New edges arrive through [`poll_lsp`].
 pub fn rebuild_edges(state: &mut AppState) {
+    profiling::function_scope!();
     state.git_comparison.invalidate();
     let Some(root) = state.loaded_dir.clone() else {
         return;

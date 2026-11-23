@@ -161,6 +161,150 @@ fn frame_time_with_the_whole_repository_open() {
     }
 }
 
+/// Opens this repository on the canvas (no language server, synthetic edges)
+/// and times what the other tests skip: the cold open, the first frame with
+/// cold highlight/CST caches, a continuous zoom sweep through the levels that
+/// draw text, and the tessellation of a text frame (TASK-83).
+///
+/// `cargo test --release --test e2e perf::open_and_zoom -- --ignored --nocapture`
+#[test]
+#[ignore = "timing measurement; run with --release --ignored --nocapture"]
+fn open_and_zoom_sweep_with_the_whole_repository() {
+    let root = std::fs::canonicalize(Path::new(env!("CARGO_MANIFEST_DIR"))).unwrap();
+    let mut harness = app();
+    let no_server: Launcher =
+        std::sync::Arc::new(|_, _| Err("perf test: no language server".into()));
+    harness.app_state_mut().lsp.manager.set_launcher(no_server);
+    harness.state_mut().open_folder(root);
+    harness.run();
+    let set_zoom = |harness: &mut crate::common::App, zoom: f32| {
+        harness
+            .app_state_mut()
+            .viewport
+            .zoom_to(zoom, crate::common::CANVAS_SPOT);
+    };
+    set_zoom(&mut harness, 0.6);
+
+    let ms = |start: Instant| start.elapsed().as_secs_f64() * 1000.0;
+    // The pieces of the open, to see where its time goes.
+    {
+        let state = harness.app_state();
+        let dir = state.loaded_dir.clone().unwrap();
+        let start = Instant::now();
+        let tree = spatialcoding::fs::loader::load_directory_filtered(
+            &dir, &dir, state.settings.show_dot_folders, &state.ignore_set(),
+        )
+        .unwrap();
+        println!("  load_directory_filtered:   {:.1} ms", ms(start));
+        let mut paths = Vec::new();
+        fn walk(node: &spatialcoding::fs::tree::TreeNode, out: &mut Vec<std::path::PathBuf>) {
+            match node {
+                spatialcoding::fs::tree::TreeNode::File { path, .. } => out.push(path.clone()),
+                spatialcoding::fs::tree::TreeNode::Dir { children, .. } => {
+                    children.iter().for_each(|c| walk(c, out));
+                }
+            }
+        }
+        walk(&tree, &mut paths);
+        let start = Instant::now();
+        for path in &paths {
+            let _ = spatialcoding::fs::loader::read_file_content(path);
+        }
+        println!("  read {} files:           {:.1} ms", paths.len(), ms(start));
+    }
+    let start = Instant::now();
+    let opened = spatialcoding::workspace::open_all_files(harness.app_state_mut()).len();
+    println!("open_all_files: {opened} files in {:.1} ms", ms(start));
+    let start = Instant::now();
+    spatialcoding::workspace::rebuild_edges(harness.app_state_mut());
+    println!("  rebuild_edges alone:       {:.1} ms", ms(start));
+    add_synthetic_edges(harness.app_state_mut());
+    spatialcoding::workspace::apply_layout_keeping_selection(harness.app_state_mut());
+    // Centre the view on the middle file so the sweep always has nodes in sight.
+    {
+        let state = harness.app_state_mut();
+        let (w, f) = (state.settings.node_width, state.settings.font_size);
+        let mut ids: Vec<u64> = state.node_store.file_nodes.keys().copied().collect();
+        ids.sort_unstable();
+        let middle = state.node_store.file_nodes[&ids[ids.len() / 2]].world_rect(w, f);
+        let spot = crate::common::CANVAS_SPOT;
+        let zoom = state.viewport.zoom;
+        state.viewport.offset = egui::vec2(
+            spot.x / zoom - middle.center().x,
+            spot.y / zoom - middle.center().y,
+        );
+    }
+    // Zoomed out to L2 the screen holds many files, none of them colored yet.
+    set_zoom(&mut harness, 0.12);
+    let start = Instant::now();
+    harness.step();
+    println!("first frame at L2 (many cold files): {:.1} ms", ms(start));
+    set_zoom(&mut harness, 0.6);
+    let start = Instant::now();
+    harness.step();
+    println!("first frame at L1 (cold highlight):  {:.1} ms", ms(start));
+    set_zoom(&mut harness, 0.06);
+    let start = Instant::now();
+    harness.step();
+    println!("first frame at L3 (cold CST tint):   {:.1} ms", ms(start));
+    for _ in 0..80 {
+        harness.step();
+    }
+
+    // Zoom 1.0 -> 0.25 -> 1.0 around the middle of the screen, 2 % a frame.
+    // Frames at L1 draw text; the ones below 0.3 draw bars.
+    let (mut text, mut bars) = (Vec::new(), Vec::new());
+    let mut zoom = 1.0_f32;
+    let mut factor = 0.98_f32;
+    set_zoom(&mut harness, zoom);
+    for _ in 0..140 {
+        zoom *= factor;
+        if zoom < 0.25 {
+            factor = 1.0 / 0.98;
+        }
+        set_zoom(&mut harness, zoom);
+        let frame = Instant::now();
+        harness.step();
+        let took = frame.elapsed();
+        if took > Duration::from_millis(30) {
+            println!("  slow frame {:.1} ms at zoom {zoom:.3}", took.as_secs_f64() * 1000.0);
+        }
+        if zoom >= 0.3 { text.push(took) } else { bars.push(took) }
+    }
+    report_frames("zoom sweep, text (L1)", text);
+    report_frames("zoom sweep, bars (L2)", bars);
+    // The same levels with the zoom held still.
+    for (label, zoom) in [("still, text (zoom 0.6)", 0.6), ("still, text (zoom 0.35)", 0.35), ("still, bars (zoom 0.2)", 0.2)] {
+        set_zoom(&mut harness, zoom);
+        harness.step();
+        let samples = (0..60)
+            .map(|_| {
+                let frame = Instant::now();
+                harness.step();
+                frame.elapsed()
+            })
+            .collect();
+        report_frames(label, samples);
+    }
+    let ctx = harness.ctx.clone();
+    let galleys = ctx.fonts(|f| f.num_galleys_in_cache());
+    let [atlas_w, atlas_h] = ctx.fonts(|f| f.font_image_size());
+    println!("galleys in cache after the sweep: {galleys}, font atlas {atlas_w}x{atlas_h}");
+
+    // Tessellation of a frame that draws text.
+    set_zoom(&mut harness, 0.6);
+    harness.step();
+    let shapes = harness.output().shapes.clone();
+    let count = shapes.len();
+    let start = Instant::now();
+    let primitives = ctx.tessellate(shapes, 1.0);
+    println!(
+        "tessellate at L1: {count} shapes -> {} primitives in {:.2} ms",
+        primitives.len(),
+        ms(start),
+    );
+}
+
 /// The same Cargo project for both servers. Most symbols have no cross-file
 /// references; one in four files calls a function in the next file.
 fn indexing_fixture(root: &Path) {

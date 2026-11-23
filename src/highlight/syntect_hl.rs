@@ -26,6 +26,7 @@ impl Highlighter {
     }
 
     pub fn highlight_file(&mut self, path: &Path, content: &str) -> &[Vec<(Style, String)>] {
+        profiling::function_scope!();
         let key = path.to_string_lossy().into_owned();
 
         if !self.cache.contains_key(&key)

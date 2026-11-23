@@ -1,6 +1,11 @@
 use spatialcoding::app::SpatialCodingApp;
 use spatialcoding::cli::{self, Command, USAGE};
 
+// The dependency analysis parses every open file on all cores; the default
+// allocator serializes those threads (TASK-83).
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 fn main() -> eframe::Result {
     env_logger::init();
 

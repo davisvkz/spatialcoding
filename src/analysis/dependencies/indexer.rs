@@ -99,6 +99,7 @@ pub struct SymbolOccurrence<'a> {
 #[derive(Default)]
 pub struct DependencyIndexer {
     local: LocalAnalysis,
+    parse_cache: local::ParseCache,
     open_paths: OpenFilePaths,
     root: Option<PathBuf>,
     files: HashMap<PathBuf, FileEntry>,
@@ -158,12 +159,14 @@ impl DependencyIndexer {
     /// Recompute local evidence when canvas membership changes, independently of LSP jobs.
     pub(crate) fn refresh_local_snapshot(&mut self, root: &Path, files: &[(&Path, &str)]) {
         self.open_paths = OpenFilePaths::new(files.iter().map(|&(path, _)| path));
-        self.local = local::analyze(root, &self.open_files(files.iter().copied()));
+        let open = OpenFiles::using_paths(files.iter().copied(), &self.open_paths);
+        self.local = local::analyze(root, &open, &mut self.parse_cache);
     }
 
     pub(crate) fn clear_local_snapshot(&mut self) {
         self.open_paths = OpenFilePaths::default();
         self.local = LocalAnalysis::default();
+        self.parse_cache = local::ParseCache::default();
     }
 
     pub(crate) fn rust_module_issues(&self) -> &[ModuleIssue] {

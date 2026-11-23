@@ -1,10 +1,13 @@
 //! Evidence-only local module and document links; independent of LSP/runtime.
 
-use std::collections::{BTreeMap, BTreeSet};
+use rayon::prelude::*;
+use std::collections::hash_map::DefaultHasher;
+use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::hash::{Hash, Hasher};
 use std::io::Read;
 use std::path::{Component, Path, PathBuf};
-use std::sync::LazyLock;
-use tree_sitter::Node;
+use std::sync::{Arc, LazyLock};
+use tree_sitter::{Node, Tree};
 
 use super::{DependencyLink, LineSpan, OpenFiles};
 use crate::analysis::cst::{CstLanguage, parse_tree};
@@ -60,7 +63,7 @@ pub fn links(root: &Path, open: &OpenFiles<'_>) -> Vec<DependencyLink> {
 pub(crate) fn links_with_configs(
     root: &Path, open: &OpenFiles<'_>, configs: &ConfigSources,
 ) -> Vec<DependencyLink> {
-    analyze_with_configs(root, open, configs).links
+    analyze_with_configs(root, open, configs, &mut ParseCache::default()).links
 }
 
 #[derive(Default)]
@@ -69,37 +72,103 @@ pub(crate) struct LocalAnalysis {
     pub rust_issues: Vec<ModuleIssue>,
 }
 
-pub(crate) fn analyze(root: &Path, open: &OpenFiles<'_>) -> LocalAnalysis {
-    analyze_with_configs(root, open, &working_configs(root, open))
+/// The syntax tree of every open file, by path and content hash.
+///
+/// Parsing is most of the analysis (about 0.4 ms per KB), and the analysis
+/// runs again whenever the set of open files changes, so a file whose text did
+/// not change keeps its tree. The trees do not depend on the other open files,
+/// only the links resolved from them do.
+#[derive(Default)]
+pub(crate) struct ParseCache(HashMap<PathBuf, (u64, Parsed)>);
+
+/// A file's language and tree; `None` for files without a bundled grammar.
+type Parsed = Option<(CstLanguage, Arc<Tree>)>;
+
+impl ParseCache {
+    /// The trees of `files`, in order. Files not seen with this text are
+    /// parsed in parallel; entries of files no longer listed are dropped.
+    fn trees(&mut self, files: &[(&Path, &str)]) -> Vec<Parsed> {
+        profiling::function_scope!();
+        let hashes: Vec<u64> = files.par_iter().map(|(_, text)| hash_text(text)).collect();
+        let missing: Vec<usize> = (0..files.len())
+            .filter(|&i| self.0.get(files[i].0).is_none_or(|(hash, _)| *hash != hashes[i]))
+            .collect();
+        let parsed: Vec<Parsed> = missing
+            .par_iter()
+            .map(|&i| parse_tree(files[i].0, files[i].1).map(|(language, tree)| (language, Arc::new(tree))))
+            .collect();
+        for (&i, tree) in missing.iter().zip(parsed) {
+            self.0.insert(files[i].0.to_path_buf(), (hashes[i], tree));
+        }
+        let listed: std::collections::HashSet<&Path> = files.iter().map(|(path, _)| *path).collect();
+        self.0.retain(|path, _| listed.contains(path.as_path()));
+        files.iter().map(|(path, _)| self.0[*path].1.clone()).collect()
+    }
+
+    #[cfg(test)]
+    fn tree_of(&self, path: &Path) -> Option<Arc<Tree>> {
+        self.0.get(path)?.1.as_ref().map(|(_, tree)| tree.clone())
+    }
 }
 
-fn analyze_with_configs(root: &Path, open: &OpenFiles<'_>, configs: &ConfigSources) -> LocalAnalysis {
+fn hash_text(text: &str) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    text.hash(&mut hasher);
+    hasher.finish()
+}
+
+pub(crate) fn analyze(root: &Path, open: &OpenFiles<'_>, cache: &mut ParseCache) -> LocalAnalysis {
+    analyze_with_configs(root, open, &working_configs(root, open), cache)
+}
+
+fn analyze_with_configs(
+    root: &Path,
+    open: &OpenFiles<'_>,
+    configs: &ConfigSources,
+    cache: &mut ParseCache,
+) -> LocalAnalysis {
     let aliases: BTreeMap<_, _> = configs.iter()
         .map(|(path, text)| (path, TsPaths::parse(path, text)))
         .collect();
-    let mut result = LocalAnalysis::default();
-    for (path, text) in open.iter().filter(|(p, _)| p.starts_with(root)) {
-        if let Some((language, tree)) = parse_tree(path, text) {
-            let paths = ancestors(root, path)
-                .find_map(|dir| aliases.get(&dir.join("tsconfig.json")))
-                .and_then(Option::as_ref);
-            if language == CstLanguage::Rust {
-                rust_modules::analyze(root, open, (path, text), tree.root_node(), &mut result);
-            }
-            let mut pending = vec![tree.root_node()];
-            while let Some(node) = pending.pop() {
-                if !node.has_error() {
-                    syntax_links(root, open, (path, text), language, node, paths, &mut result.links);
+    let files: Vec<(&Path, &str)> = open.iter().filter(|(p, _)| p.starts_with(root)).collect();
+    let trees = cache.trees(&files);
+    // Each file is analysed on its own; only the targets it resolves to need
+    // the other open files, and those are read-only.
+    profiling::scope!("local links of every file");
+    let per_file: Vec<LocalAnalysis> = files
+        .par_iter()
+        .zip(trees.par_iter())
+        .map(|(&(path, text), parsed)| {
+            let mut result = LocalAnalysis::default();
+            if let Some((language, tree)) = parsed {
+                let language = *language;
+                let paths = ancestors(root, path)
+                    .find_map(|dir| aliases.get(&dir.join("tsconfig.json")))
+                    .and_then(Option::as_ref);
+                if language == CstLanguage::Rust {
+                    rust_modules::analyze(root, open, (path, text), tree.root_node(), &mut result);
                 }
-                let mut cursor = node.walk();
-                pending.extend(node.named_children(&mut cursor));
+                let mut pending = vec![tree.root_node()];
+                while let Some(node) = pending.pop() {
+                    if !node.has_error() {
+                        syntax_links(root, open, (path, text), language, node, paths, &mut result.links);
+                    }
+                    let mut cursor = node.walk();
+                    pending.extend(node.named_children(&mut cursor));
+                }
             }
-        }
-        match path.extension().and_then(|e| e.to_str()) {
-            Some("md" | "mdx") => markdown_links(root, open, path, text, &mut result.links),
-            Some("json") => json_links(root, open, path, text, &mut result.links),
-            _ => {}
-        }
+            match path.extension().and_then(|e| e.to_str()) {
+                Some("md" | "mdx") => markdown_links(root, open, path, text, &mut result.links),
+                Some("json") => json_links(root, open, path, text, &mut result.links),
+                _ => {}
+            }
+            result
+        })
+        .collect();
+    let mut result = LocalAnalysis::default();
+    for part in per_file {
+        result.links.extend(part.links);
+        result.rust_issues.extend(part.rust_issues);
     }
     result.links.sort_by(|a, b| (&a.source, a.usage.start, &a.target).cmp(&(&b.source, b.usage.start, &b.target)));
     result.links.dedup_by(|a, b| a.source == b.source && a.target == b.target && a.source_name_span == b.source_name_span && a.relationship == b.relationship);
@@ -385,6 +454,54 @@ fn json_links(root: &Path, open: &OpenFiles<'_>, path: &Path, text: &str, out: &
 mod tests {
     use super::*;
     use crate::edges::style::RelationshipType::{Imports, References};
+
+    fn analyze_files(files: &[(&str, &str)], cache: &mut ParseCache) -> Vec<(PathBuf, PathBuf)> {
+        let open = OpenFiles::new(files.iter().map(|(p, t)| (Path::new(p), *t)));
+        let result = analyze_with_configs(Path::new("/p"), &open, &ConfigSources::new(), cache);
+        result.links.into_iter().map(|l| (l.source, l.target)).collect()
+    }
+
+    #[test]
+    fn a_warm_parse_cache_gives_the_links_of_a_cold_one() {
+        let files = [
+            ("/p/app.ts", "import { a } from './a';\nexport * from './b';"),
+            ("/p/a.ts", "export const a = 1;"),
+            ("/p/b.ts", "export const b = 1;"),
+            ("/p/README.md", "[a](a.ts)"),
+        ];
+        let cold = analyze_files(&files, &mut ParseCache::default());
+        let mut cache = ParseCache::default();
+        analyze_files(&files, &mut cache);
+        assert_eq!(analyze_files(&files, &mut cache), cold);
+        assert_eq!(cold.len(), 3);
+    }
+
+    #[test]
+    fn the_parse_cache_keeps_a_tree_until_its_text_changes() {
+        let mut cache = ParseCache::default();
+        let before = [("/p/app.ts", "import { a } from './a';"), ("/p/a.ts", "export const a = 1;")];
+        assert_eq!(analyze_files(&before, &mut cache).len(), 1);
+        let first = cache.tree_of(Path::new("/p/app.ts")).unwrap();
+        // Another file opens: the tree of the unchanged one is reused.
+        let more = [before[0], before[1], ("/p/b.ts", "export const b = 1;")];
+        analyze_files(&more, &mut cache);
+        assert!(Arc::ptr_eq(&first, &cache.tree_of(Path::new("/p/app.ts")).unwrap()));
+        // Its text changes: a new tree, and the new link.
+        let edited = [("/p/app.ts", "import { b } from './b';"), more[1], more[2]];
+        let links = analyze_files(&edited, &mut cache);
+        assert!(!Arc::ptr_eq(&first, &cache.tree_of(Path::new("/p/app.ts")).unwrap()));
+        assert_eq!(links, [(PathBuf::from("/p/app.ts"), PathBuf::from("/p/b.ts"))]);
+    }
+
+    #[test]
+    fn the_parse_cache_drops_files_that_are_no_longer_open() {
+        let mut cache = ParseCache::default();
+        analyze_files(&[("/p/app.ts", "import './a';"), ("/p/a.ts", "export {};")], &mut cache);
+        assert!(cache.tree_of(Path::new("/p/a.ts")).is_some());
+        analyze_files(&[("/p/app.ts", "import './a';")], &mut cache);
+        assert!(cache.tree_of(Path::new("/p/a.ts")).is_none());
+        assert!(cache.tree_of(Path::new("/p/app.ts")).is_some());
+    }
 
     #[test]
     fn local_imports_are_real_even_without_a_language_server() {

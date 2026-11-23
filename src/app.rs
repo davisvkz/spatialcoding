@@ -398,6 +398,7 @@ impl SpatialCodingApp {
         );
 
         self.state.node_store.view = crate::folder_actions::folder_view(&self.state);
+        profiling::scope!("folder bounds and hidden sets");
         self.update_folder_bounds();
         let zoom_collapsed = crate::folder_actions::zoom_collapsed(&self.state, self.state.viewport.zoom);
         self.state.node_store.view.zoom_collapsed = zoom_collapsed;
@@ -889,6 +890,7 @@ impl SpatialCodingApp {
         canvas_rect: egui::Rect,
         ports: &HashMap<u64, Vec<Port>>,
     ) {
+        profiling::function_scope!();
         let mut pin_marks: Vec<ui::pin_overlay::PinMark> = Vec::new();
         let zoom = self.state.viewport.zoom;
         let lod = LodLevel::from_zoom(zoom);
@@ -1261,6 +1263,7 @@ impl SpatialCodingApp {
         visibility: &crate::edges::edge_store::EdgeVisibility,
         layer: edge_renderer::EdgeLayer,
     ) {
+        profiling::function_scope!();
         // LSP "Dim Dependency Edges": while a symbol is active.
         let symbol_active =
             !self.state.selection.symbols().is_empty() || !self.state.lsp.pins.is_empty();
@@ -1378,6 +1381,7 @@ fn start_watcher(dir: &std::path::Path, ctx: &egui::Context) -> Option<crate::fs
 
 impl eframe::App for SpatialCodingApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        profiling::function_scope!();
         input::handle_shortcuts(ctx, &mut self.state);
         self.run_app_actions();
         self.serve_agents();
@@ -1480,6 +1484,7 @@ impl eframe::App for SpatialCodingApp {
 
         let now = ctx.input(|i| i.time);
         self.save_settings_if_changed(now);
+        profiling::finish_frame!();
     }
 }
 
