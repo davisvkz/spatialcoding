@@ -107,6 +107,8 @@ pub trait AppExt {
     /// Steps frames until the language servers answered every question of
     /// the dependency indexer.
     fn settle_edges(&mut self);
+    /// Waits for the syntax trees being parsed in the background.
+    fn settle_syntax_trees(&mut self);
     /// World-space center of a file node.
     fn node_center(&self, id: u64) -> Pos2;
     /// Pans the view so `world` shows at screen position `screen`.
@@ -141,7 +143,14 @@ impl AppExt for App {
             std::thread::sleep(std::time::Duration::from_millis(5));
             self.step();
         }
+        self.settle_syntax_trees();
         self.run();
+    }
+
+    fn settle_syntax_trees(&mut self) {
+        let state = self.app_state_mut();
+        state.cst.wait_idle(&state.node_store);
+        self.step();
     }
 
     fn node_center(&self, id: u64) -> Pos2 {

@@ -1449,6 +1449,8 @@ impl eframe::App for SpatialCodingApp {
             ctx.request_repaint_after(std::time::Duration::from_millis(350));
         }
         crate::workspace::poll_lsp(&mut self.state);
+        // Syntax trees parsed in the background: take in the finished ones.
+        self.state.cst.poll(ctx, &self.state.node_store);
         self.follow_disk();
         if self.state.git_comparison.is_loading() {
             ctx.request_repaint_after(std::time::Duration::from_millis(100));

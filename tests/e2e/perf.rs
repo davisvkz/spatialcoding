@@ -218,8 +218,13 @@ fn open_and_zoom_sweep_with_the_whole_repository() {
     let start = Instant::now();
     spatialcoding::workspace::rebuild_edges(harness.app_state_mut());
     println!("  rebuild_edges alone:       {:.1} ms", ms(start));
-    add_synthetic_edges(harness.app_state_mut());
+    let start = Instant::now();
     spatialcoding::workspace::apply_layout_keeping_selection(harness.app_state_mut());
+    println!("  apply layout, static edges: {:.1} ms", ms(start));
+    add_synthetic_edges(harness.app_state_mut());
+    let start = Instant::now();
+    spatialcoding::workspace::apply_layout_keeping_selection(harness.app_state_mut());
+    println!("  apply layout, synthetic edges: {:.1} ms", ms(start));
     // Centre the view on the middle file so the sweep always has nodes in sight.
     {
         let state = harness.app_state_mut();

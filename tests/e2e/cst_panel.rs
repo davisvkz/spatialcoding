@@ -19,6 +19,9 @@ fn select_and_open_cst(app: &mut App, fx: &Fixture, rel: &str) -> u64 {
     app.get_by_label("CST").click();
     app.run();
     assert_eq!(app.app_state().right_panel, Some(RightPanel::Cst));
+    // The trees are parsed on a worker: the panel fills in once they are.
+    app.settle_syntax_trees();
+    app.run();
     id
 }
 
@@ -31,6 +34,8 @@ fn mapping_lists_canvas_types_without_a_selection_and_counts_selected_files() {
     app.app_state_mut().selection.clear();
     app.app_state_mut().right_panel = Some(RightPanel::Cst);
     app.run();
+    app.settle_syntax_trees();
+    app.run();
     app.get_by_label("Symbol Mapping");
     app.get_by_label("function item");
     let rows = &app.app_state().cst.mapping;
@@ -40,6 +45,8 @@ fn mapping_lists_canvas_types_without_a_selection_and_counts_selected_files() {
     let total = functions.nodes.len();
 
     app.app_state_mut().selection.select(main);
+    app.run();
+    app.settle_syntax_trees();
     app.run();
     let functions = app
         .app_state()
@@ -308,6 +315,8 @@ fn zoomed_out_levels_tint_the_cst_by_role() {
     app.app_state_mut().viewport.zoom = 0.2;
     app.app_state_mut().viewport.target_zoom = 0.2;
     app.show_at(center, CANVAS_SPOT);
+    // The tint is built on a worker: wait for it before reading the frame.
+    app.settle_syntax_trees();
     let l2 = function_tints(&app);
     assert!(l2.contains(&10), "L2 tint alpha .04 -> 10, got {l2:?}");
 
@@ -315,6 +324,7 @@ fn zoomed_out_levels_tint_the_cst_by_role() {
     app.app_state_mut().viewport.zoom = 0.06;
     app.app_state_mut().viewport.target_zoom = 0.06;
     app.show_at(center, CANVAS_SPOT);
+    app.settle_syntax_trees();
     let l3 = function_tints(&app);
     assert!(l3.contains(&26), "L3 tint alpha .10 -> 26, got {l3:?}");
 
@@ -334,6 +344,7 @@ fn a_hidden_type_is_not_tinted_and_a_style_override_changes_the_alpha() {
     app.app_state_mut().viewport.zoom = 0.2;
     app.app_state_mut().viewport.target_zoom = 0.2;
     app.show_at(center, CANVAS_SPOT);
+    app.settle_syntax_trees();
     assert!(function_tints(&app).contains(&10));
 
     let mut style = spatialcoding::analysis::cst_style::CstTypeStyle::default_for("function_item");
@@ -375,6 +386,8 @@ fn a_type_style_editor_sets_visibility_fill_and_borders_and_resets() {
     app.open(&fx.path("src/util.rs"));
     app.app_state_mut().selection.clear();
     app.app_state_mut().right_panel = Some(RightPanel::Cst);
+    app.run();
+    app.settle_syntax_trees();
     app.run();
 
     app.get_by_label("Style function item").click();

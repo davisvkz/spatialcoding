@@ -4,8 +4,10 @@
 //! the syntax nodes at the ends of the selection's edges are outlined
 //! (painted by the app shell through [`highlight_rect`]).
 
-use std::collections::{hash_map::DefaultHasher, BTreeMap};
+use std::collections::{hash_map::DefaultHasher, BTreeMap, HashMap, HashSet};
 use std::hash::{Hash, Hasher};
+use std::sync::mpsc::{channel, Receiver, Sender};
+use std::sync::Arc;
 
 use crate::analysis::cst::{parse_cst, CstNode, CstTree};
 use crate::nodes::node_store::NodeStore;
@@ -34,9 +36,13 @@ pub struct MappingRow {
 
 #[derive(Default)]
 pub struct CstPanelState {
-    cached: Option<CachedCst>,
-    /// Trees of the files at the ends of selected edges, by node id.
-    edge_trees: std::collections::HashMap<u64, CachedCst>,
+    /// The syntax tree of each file that was asked for, by node id: for the
+    /// panel, the symbol mapping, the edge ends and the tint. Parsed on a
+    /// worker; an entry is only good for the content it was parsed from.
+    trees: HashMap<u64, TreeEntry>,
+    /// The node and content the panel's tree was asked for.
+    synced: Option<(u64, u64)>,
+    worker: Worker,
     /// Set while the pointer is over a row; reset every frame the panel draws.
     pub hovered: Option<CstHover>,
     /// With Single Hover Symbol off: the hovered row's ancestors' lines.
@@ -52,8 +58,8 @@ pub struct CstPanelState {
     pub mapping_hover: Vec<(CstHover, egui::Color32)>,
     mapping_hash: Option<u64>,
     /// The tint of every open file at the zoomed-out levels, by node id.
-    tints: std::collections::HashMap<u64, TintCache>,
-    /// How many times a file was parsed (cache misses).
+    tints: HashMap<u64, TintCache>,
+    /// How many parses were started (cache misses).
     parses: usize,
 }
 
@@ -81,10 +87,59 @@ const MAX_TINT_ITEMS: usize = 6000;
 /// first line's start and the file's widest column.
 const BOX_SCAN_LINES: usize = 200;
 
-struct CachedCst {
-    node_id: u64,
+struct TreeEntry {
     source_hash: u64,
-    tree: Option<CstTree>,
+    /// `None` when the language has no grammar.
+    tree: Option<Arc<CstTree>>,
+}
+
+/// What a job is for: the node, its content, and the tint settings if the
+/// tint is wanted too.
+type Key = (u64, u64, Option<u64>);
+
+/// A file to parse (unless its tree is already known) and tint.
+struct Job {
+    key: Key,
+    path: std::path::PathBuf,
+    content: String,
+    tree: Option<Arc<CstTree>>,
+    /// `(limit_depth, max_depth)` when the tint is wanted.
+    tint: Option<(bool, usize)>,
+}
+
+struct Done {
+    key: Key,
+    tree: Option<Arc<CstTree>>,
+    items: Option<Vec<TintItem>>,
+}
+
+fn run_job(job: Job) -> Done {
+    profiling::function_scope!();
+    let tree = match job.tree {
+        Some(tree) => Some(tree),
+        None => parse_cst(&job.path, &job.content).map(Arc::new),
+    };
+    let items = job.tint.map(|(limit_depth, max_depth)| match &tree {
+        Some(tree) => collect_tint(&tree.root, &job.content, limit_depth, max_depth),
+        None => Vec::new(),
+    });
+    Done { key: job.key, tree, items }
+}
+
+/// The parses in flight and where their results come back. Each job runs on
+/// the rayon pool and asks for a repaint when it is done.
+struct Worker {
+    tx: Sender<Done>,
+    rx: Receiver<Done>,
+    pending: HashSet<Key>,
+    ctx: Option<egui::Context>,
+}
+
+impl Default for Worker {
+    fn default() -> Self {
+        let (tx, rx) = channel();
+        Self { tx, rx, pending: HashSet::new(), ctx: None }
+    }
 }
 
 fn source_hash(node: &crate::nodes::file_node::FileNode) -> u64 {
@@ -92,59 +147,123 @@ fn source_hash(node: &crate::nodes::file_node::FileNode) -> u64 {
 }
 
 impl CstPanelState {
-    /// Makes [`Self::tree`] match file node `node_id`, parsing only when the
-    /// node or its path/content changed since the last call.
-    pub fn sync(&mut self, node_store: &NodeStore, node_id: u64) {
-        let Some(node) = node_store.get_file(node_id) else {
-            self.cached = None;
-            return;
-        };
-        let source_hash = source_hash(node);
-        let fresh = self
-            .cached
-            .as_ref()
-            .is_some_and(|c| c.node_id == node_id && c.source_hash == source_hash);
-        if !fresh {
-            self.parses += 1;
-            self.cached = Some(CachedCst {
-                node_id,
-                source_hash,
-                tree: parse_cst(&node.path, &node.content),
-            });
+    /// Takes in what the workers finished, and remembers `ctx` to ask for a
+    /// repaint when the next ones do. Called once a frame, before drawing.
+    pub fn poll(&mut self, ctx: &egui::Context, store: &NodeStore) {
+        if self.worker.ctx.is_none() {
+            self.worker.ctx = Some(ctx.clone());
+        }
+        while let Ok(done) = self.worker.rx.try_recv() {
+            self.finish(done, store);
         }
     }
 
-    /// The tree of the last synced node, if its language has a grammar.
-    pub fn tree(&self) -> Option<&CstTree> {
-        self.cached.as_ref()?.tree.as_ref()
+    /// Waits until nothing is being parsed. For tests and tools that need the
+    /// answer now.
+    pub fn wait_idle(&mut self, store: &NodeStore) {
+        while !self.worker.pending.is_empty() {
+            match self.worker.rx.recv_timeout(std::time::Duration::from_secs(30)) {
+                Ok(done) => self.finish(done, store),
+                Err(_) => break,
+            }
+        }
     }
 
-    /// The (cached) tree of any file node, for edge-end highlights.
+    /// Whether any file is still being parsed.
+    pub fn is_parsing(&self) -> bool {
+        !self.worker.pending.is_empty()
+    }
+
+    /// Whether the tree of the file last given to [`Self::sync`] is on its way.
+    pub fn parsing_selected(&self) -> bool {
+        self.synced.is_some_and(|(id, hash)| !self.is_fresh(id, hash))
+    }
+
+    fn finish(&mut self, done: Done, store: &NodeStore) {
+        self.worker.pending.remove(&done.key);
+        let (node_id, hash, settings_hash) = done.key;
+        // The file closed or changed meanwhile: the answer is for a text that is gone.
+        if store.get_file(node_id).map(source_hash) != Some(hash) {
+            return;
+        }
+        self.trees.insert(node_id, TreeEntry { source_hash: hash, tree: done.tree });
+        if let (Some(settings_hash), Some(items)) = (settings_hash, done.items) {
+            self.tints.insert(node_id, TintCache { source_hash: hash, settings_hash, items });
+        }
+    }
+
+    fn is_fresh(&self, node_id: u64, hash: u64) -> bool {
+        self.trees.get(&node_id).is_some_and(|e| e.source_hash == hash)
+    }
+
+    /// Starts parsing `node` (and tinting it, when `tint` is given as the
+    /// settings hash and depth) unless a job for this content is running.
+    fn ask(&mut self, node: &crate::nodes::file_node::FileNode, tint: Option<(u64, (bool, usize))>) {
+        let hash = source_hash(node);
+        let key = (node.id, hash, tint.map(|(settings_hash, _)| settings_hash));
+        let running = self.worker.pending.iter().any(|k| k.0 == node.id && k.1 == hash && (tint.is_none() || k.2 == key.2));
+        if running {
+            return;
+        }
+        let known = self.trees.get(&node.id).filter(|e| e.source_hash == hash).and_then(|e| e.tree.clone());
+        let job = Job {
+            key,
+            path: node.path.clone(),
+            content: node.content.clone(),
+            tree: known,
+            tint: tint.map(|(_, depth)| depth),
+        };
+        self.parses += usize::from(job.tree.is_none());
+        self.worker.pending.insert(key);
+        let tx = self.worker.tx.clone();
+        let ctx = self.worker.ctx.clone();
+        rayon::spawn(move || {
+            let done = run_job(job);
+            let _ = tx.send(done);
+            if let Some(ctx) = ctx {
+                ctx.request_repaint();
+            }
+        });
+    }
+
+    /// Asks for the tree of file node `node_id` to show in the panel; it is
+    /// there ([`Self::tree`]) once the worker has parsed it, and only parsed
+    /// again when the node or its content changed.
+    pub fn sync(&mut self, node_store: &NodeStore, node_id: u64) {
+        let Some(node) = node_store.get_file(node_id) else {
+            self.synced = None;
+            return;
+        };
+        let hash = source_hash(node);
+        self.synced = Some((node_id, hash));
+        if !self.is_fresh(node_id, hash) {
+            self.ask(node, None);
+        }
+    }
+
+    /// The tree of the last synced node, if its language has a grammar and
+    /// it is parsed.
+    pub fn tree(&self) -> Option<&CstTree> {
+        let (id, hash) = self.synced?;
+        self.trees.get(&id).filter(|e| e.source_hash == hash)?.tree.as_deref()
+    }
+
+    /// The tree of any file node, for edge-end highlights and the mapping:
+    /// `None` while it is being parsed, and for languages without a grammar.
     fn tree_of(&mut self, node_store: &NodeStore, node_id: u64) -> Option<&CstTree> {
         let node = node_store.get_file(node_id)?;
         let hash = source_hash(node);
-        let fresh = self
-            .edge_trees
-            .get(&node_id)
-            .is_some_and(|c| c.source_hash == hash);
-        if !fresh {
-            self.parses += 1;
-            let tree = parse_cst(&node.path, &node.content);
-            self.edge_trees.insert(
-                node_id,
-                CachedCst {
-                    node_id,
-                    source_hash: hash,
-                    tree,
-                },
-            );
+        if !self.is_fresh(node_id, hash) {
+            self.ask(node, None);
+            return None;
         }
-        self.edge_trees.get(&node_id)?.tree.as_ref()
+        self.trees.get(&node_id)?.tree.as_deref()
     }
 
     /// The tinted nodes of file `node_id`: named nodes below the root,
     /// within the depth limit, with their bounding boxes. Cached by content
-    /// and settings.
+    /// and settings; built on a worker, so until it is ready this is the last
+    /// tint of the file, or nothing.
     pub fn tint_items(
         &mut self,
         store: &NodeStore,
@@ -164,20 +283,15 @@ impl CstPanelState {
             .get(&node_id)
             .is_some_and(|c| c.source_hash == source_hash && c.settings_hash == settings_hash);
         if !fresh {
-            let items = match self.tree_of(store, node_id) {
-                Some(tree) => collect_tint(&tree.root, &node.content, settings),
-                None => Vec::new(),
-            };
-            self.tints.insert(
-                node_id,
-                TintCache {
-                    source_hash,
-                    settings_hash,
-                    items,
-                },
-            );
+            // A language without a grammar has nothing to tint, and the
+            // answer is already known.
+            if self.trees.get(&node_id).is_some_and(|e| e.source_hash == source_hash && e.tree.is_none()) {
+                self.tints.insert(node_id, TintCache { source_hash, settings_hash, items: Vec::new() });
+            } else {
+                self.ask(node, Some((settings_hash, (settings.limit_depth, settings.max_depth))));
+            }
         }
-        &self.tints[&node_id].items
+        self.tints.get(&node_id).map_or(&[], |c| c.items.as_slice())
     }
 
     /// Clears what the canvas paints for this panel.
@@ -194,8 +308,7 @@ impl CstPanelState {
         selected: &std::collections::HashSet<u64>,
         settings: &CstSettings,
     ) {
-        self.edge_trees
-            .retain(|id, _| store.get_file(*id).is_some());
+        self.trees.retain(|id, _| store.get_file(*id).is_some());
         self.tints.retain(|id, _| store.get_file(*id).is_some());
         let mut ids: Vec<_> = store.file_nodes.keys().copied().collect();
         ids.sort_unstable();
@@ -217,7 +330,9 @@ impl CstPanelState {
             return;
         }
         let mut rows = BTreeMap::new();
+        let mut waiting = false;
         for id in ids {
+            waiting |= store.get_file(id).is_some_and(|n| !self.is_fresh(id, source_hash(n)));
             if let Some(tree) = self.tree_of(store, id) {
                 collect_mapping(
                     &tree.root,
@@ -230,7 +345,10 @@ impl CstPanelState {
             }
         }
         self.mapping = rows.into_values().collect();
-        self.mapping_hash = Some(hash);
+        // Files still being parsed are missing from the rows: look again next frame.
+        if !waiting {
+            self.mapping_hash = Some(hash);
+        }
     }
 }
 
@@ -250,7 +368,7 @@ pub fn mapping_color(kind: &str, settings: &CstSettings) -> egui::Color32 {
 }
 
 /// The nodes to tint: pre-order, named, below the root.
-fn collect_tint(root: &CstNode, content: &str, settings: &CstSettings) -> Vec<TintItem> {
+fn collect_tint(root: &CstNode, content: &str, limit_depth: bool, max_depth: usize) -> Vec<TintItem> {
     let lines: Vec<&str> = content.lines().collect();
     let indent: Vec<usize> = lines
         .iter()
@@ -263,7 +381,7 @@ fn collect_tint(root: &CstNode, content: &str, settings: &CstSettings) -> Vec<Ti
         if out.len() >= MAX_TINT_ITEMS {
             break;
         }
-        if settings.limit_depth && depth > settings.max_depth {
+        if limit_depth && depth > max_depth {
             continue;
         }
         if node.named && node.end_line >= node.start_line {
@@ -689,10 +807,14 @@ pub fn draw_cst_panel(ui: &mut egui::Ui, state: &mut AppState) {
     let node = state.node_store.get_file(node_id).unwrap();
     ui.label(egui::RichText::new(node.file_name()).strong());
     let Some(tree) = state.cst.tree() else {
-        ui.label(format!(
-            "No syntax tree: {} is not supported.",
-            node.language
-        ));
+        if state.cst.parsing_selected() {
+            ui.label("Parsing\u{2026}");
+        } else {
+            ui.label(format!(
+                "No syntax tree: {} is not supported.",
+                node.language
+            ));
+        }
         return;
     };
     ui.label(format!(
@@ -890,6 +1012,18 @@ mod tests {
         parse_cst(std::path::Path::new("/p/a.rs"), src).unwrap()
     }
 
+    /// Asks for the mapping, waits for the trees it needed, and asks again.
+    fn settle(
+        cst: &mut CstPanelState,
+        store: &NodeStore,
+        selected: &std::collections::HashSet<u64>,
+        settings: &CstSettings,
+    ) {
+        cst.sync_mapping(store, selected, settings);
+        cst.wait_idle(store);
+        cst.sync_mapping(store, selected, settings);
+    }
+
     #[test]
     fn mapping_cache_tracks_content_filters_selection_and_closed_files() {
         let (mut store, a) = store_with("a.rs", "fn a() { let x = 1; }\n");
@@ -901,7 +1035,7 @@ mod tests {
         let mut cst = CstPanelState::default();
         let mut settings = CstSettings::default();
         let mut selected = std::collections::HashSet::from([a]);
-        cst.sync_mapping(&store, &selected, &settings);
+        settle(&mut cst, &store, &selected, &settings);
         let row = cst
             .mapping
             .iter()
@@ -910,10 +1044,10 @@ mod tests {
         assert_eq!((row.selected, row.nodes.len()), (1, 2));
         assert!(cst.mapping.windows(2).all(|w| w[0].kind < w[1].kind));
         assert!(!cst.mapping.iter().any(|r| r.kind == "identifier"));
-        cst.sync_mapping(&store, &selected, &settings);
+        settle(&mut cst, &store, &selected, &settings);
         assert_eq!(cst.parses, 2);
         selected.insert(b);
-        cst.sync_mapping(&store, &selected, &settings);
+        settle(&mut cst, &store, &selected, &settings);
         assert_eq!(cst.parses, 2, "selection changes don't reparse");
         assert_eq!(
             cst.mapping
@@ -924,7 +1058,7 @@ mod tests {
             2
         );
         store.replace_content(b, "struct B;\n".into());
-        cst.sync_mapping(&store, &selected, &settings);
+        settle(&mut cst, &store, &selected, &settings);
         assert_eq!(cst.parses, 3);
         assert_eq!(
             cst.mapping
@@ -936,20 +1070,20 @@ mod tests {
             1
         );
         settings.max_depth = 0;
-        cst.sync_mapping(&store, &selected, &settings);
+        settle(&mut cst, &store, &selected, &settings);
         assert!(cst.mapping.is_empty(), "the root is not a semantic symbol");
         settings.limit_depth = false;
         settings.semantic_only = false;
-        cst.sync_mapping(&store, &selected, &settings);
+        settle(&mut cst, &store, &selected, &settings);
         assert!(cst.mapping.iter().any(|r| r.kind == "identifier"));
         assert!(!cst.mapping.iter().any(|r| r.kind == "fn"));
         settings.show_hidden_types = true;
-        cst.sync_mapping(&store, &selected, &settings);
+        settle(&mut cst, &store, &selected, &settings);
         assert!(cst.mapping.iter().any(|r| r.kind == "fn"));
         store.file_nodes.remove(&a);
-        cst.sync_mapping(&store, &selected, &settings);
+        settle(&mut cst, &store, &selected, &settings);
         assert!(!cst.mapping.iter().any(|r| r.kind == "function_item"));
-        assert!(!cst.edge_trees.contains_key(&a));
+        assert!(!cst.trees.contains_key(&a));
     }
 
     #[test]
@@ -1046,12 +1180,18 @@ mod tests {
         let mut cst = CstPanelState::default();
 
         cst.sync(&store, id);
+        assert!(cst.tree().is_none() && cst.parsing_selected(), "the tree is on its way");
         cst.sync(&store, id);
-        assert_eq!(cst.parses, 1);
+        cst.wait_idle(&store);
+        cst.sync(&store, id);
+        assert_eq!(cst.parses, 1, "asking again while it parses, or after, does not parse again");
+        assert!(!cst.parsing_selected());
         assert_eq!(cst.tree().unwrap().root.kind, "source_file");
 
         store.replace_content(id, "struct S;\n".into());
         cst.sync(&store, id);
+        assert!(cst.tree().is_none(), "the old tree is not the tree of the new text");
+        cst.wait_idle(&store);
         assert_eq!(cst.parses, 2);
         let root = &cst.tree().unwrap().root;
         assert_eq!(root.children[0].kind, "struct_item");
@@ -1068,12 +1208,75 @@ mod tests {
         let mut cst = CstPanelState::default();
 
         cst.sync(&store, rs);
+        cst.wait_idle(&store);
         assert!(cst.tree().is_some());
         cst.sync(&store, md);
+        cst.wait_idle(&store);
         assert!(cst.tree().is_none(), "Markdown has no grammar");
+        assert!(!cst.parsing_selected(), "and that is known, not pending");
         cst.sync(&store, 999);
         assert!(cst.tree().is_none());
         assert_eq!(cst.parses, 2);
+    }
+
+    #[test]
+    fn the_tint_is_built_on_a_worker_and_kept_while_the_next_one_is() {
+        let (mut store, id) = store_with("a.rs", "fn a() {\n    let x = 1;\n}\n");
+        let mut cst = CstPanelState::default();
+        let settings = CstSettings::default();
+
+        assert!(cst.tint_items(&store, id, &settings).is_empty(), "not parsed yet");
+        assert!(cst.is_parsing());
+        cst.wait_idle(&store);
+        let first = cst.tint_items(&store, id, &settings).len();
+        assert!(first > 0, "the function and what is inside it");
+        assert_eq!(cst.parses, 1);
+
+        // A different depth tints again from the tree already parsed.
+        let shallow = CstSettings { max_depth: 1, ..CstSettings::default() };
+        assert_eq!(cst.tint_items(&store, id, &shallow).len(), first, "the last tint is shown meanwhile");
+        cst.wait_idle(&store);
+        assert!(cst.tint_items(&store, id, &shallow).len() < first);
+        assert_eq!(cst.parses, 1, "the tree was reused");
+
+        // New text: the old tint stays until the new one arrives.
+        store.replace_content(id, "struct S;\n".into());
+        let shown = cst.tint_items(&store, id, &shallow).len();
+        assert!(shown > 0, "still the old tint");
+        cst.wait_idle(&store);
+        assert_eq!(cst.tint_items(&store, id, &shallow)[0].kind, "struct_item");
+        assert_eq!(cst.parses, 2);
+    }
+
+    #[test]
+    fn an_answer_for_text_that_changed_or_a_file_that_closed_is_dropped() {
+        let (mut store, id) = store_with("a.rs", "fn a() {}\n");
+        let mut cst = CstPanelState::default();
+        let settings = CstSettings::default();
+
+        cst.tint_items(&store, id, &settings);
+        store.replace_content(id, "struct S;\n".into());
+        cst.wait_idle(&store);
+        assert!(!cst.is_fresh(id, source_hash(store.get_file(id).unwrap())), "the answer was for the old text");
+        assert!(!cst.trees.contains_key(&id));
+
+        cst.tint_items(&store, id, &settings);
+        store.file_nodes.remove(&id);
+        cst.wait_idle(&store);
+        assert!(cst.trees.is_empty() && cst.tints.is_empty());
+    }
+
+    #[test]
+    fn a_language_without_a_grammar_is_tinted_with_nothing_and_asked_once() {
+        let (store, id) = store_with("README.md", "# hi\n");
+        let mut cst = CstPanelState::default();
+        let settings = CstSettings::default();
+
+        assert!(cst.tint_items(&store, id, &settings).is_empty());
+        cst.wait_idle(&store);
+        assert!(cst.tint_items(&store, id, &settings).is_empty());
+        assert!(!cst.is_parsing());
+        assert_eq!(cst.parses, 1);
     }
 
     #[test]
