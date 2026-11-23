@@ -3717,6 +3717,7 @@ dependencies = [
  "egui_kittest",
  "env_logger",
  "flate2",
+ "libc",
  "log",
  "mimalloc",
  "notify",

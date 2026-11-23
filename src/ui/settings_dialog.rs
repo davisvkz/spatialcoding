@@ -86,7 +86,7 @@ pub fn draw_command_proposals(ctx: &egui::Context, state: &mut AppState) {
             ui.monospace(proposal.command.join(" "));
             ui.add_space(4.0);
             ui.weak(format!("Folder: {}", proposal.root.display()));
-            ui.weak("The repository may belong to someone else: only allow commands you trust. The answer is remembered for this exact command in this folder; until then the default server runs.");
+            ui.weak("The repository may belong to someone else: only allow commands you trust. The answer is remembered for this exact command and language in this folder; until then the default server runs.");
             ui.separator();
             ui.horizontal(|ui| {
                 if ui.button("Allow").clicked() {
@@ -104,8 +104,17 @@ pub fn draw_command_proposals(ctx: &egui::Context, state: &mut AppState) {
         state.command_proposals.remove(0);
     }
     if let Some(allowed) = answer {
-        state.settings.lsp_command_answers.retain(|a| !(a.root == proposal.root && a.command == proposal.command));
-        state.settings.lsp_command_answers.push(Answer { root: proposal.root.clone(), command: proposal.command.clone(), allowed });
+        let language = project_config::language_key(proposal.server).to_string();
+        state
+            .settings
+            .lsp_command_answers
+            .retain(|a| !(a.root == proposal.root && a.language == language && a.command == proposal.command));
+        state.settings.lsp_command_answers.push(Answer {
+            root: proposal.root.clone(),
+            language,
+            command: proposal.command.clone(),
+            allowed,
+        });
         project_config::sync_answers(&proposal.root, &state.settings.lsp_command_answers);
         // The servers start again, now with (or without) the suggested command.
         state.lsp.manager.restart_servers();

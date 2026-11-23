@@ -33,6 +33,10 @@ rayon = "1"
 mimalloc = "0.1.52"
 profiling = "1.0.18"
 
+[target.'cfg(unix)'.dependencies]
+# geteuid: the socket directory must belong to the current user.
+libc = "0.2"
+
 [features]
 # `cargo run --release --features profile` streams frame and function scopes
 # to a running Tracy profiler (see the CLI guide). Off, the scopes cost nothing.

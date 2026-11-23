@@ -9,6 +9,60 @@ use serde_json::{json, Value};
 
 use super::api;
 
+/// The longest request line read from an agent (stdio or the app socket).
+pub const MAX_REQUEST_BYTES: usize = 4 * 1024 * 1024;
+
+/// What [`read_capped_line`] found.
+#[derive(Debug, PartialEq, Eq)]
+pub enum Line {
+    /// The input ended.
+    Eof,
+    /// One line, without its line ending.
+    Text(String),
+    /// The line was longer than the cap. It was read to its end and dropped,
+    /// so the next call starts on the next line.
+    TooLong,
+}
+
+/// Reads one line of at most `max` bytes. Unlike `BufRead::lines` it never
+/// holds more than `max` bytes of a line, however long the sender makes it.
+pub fn read_capped_line(reader: &mut impl BufRead, max: usize) -> std::io::Result<Line> {
+    let mut bytes = Vec::new();
+    let (mut too_long, mut seen_any) = (false, false);
+    loop {
+        let buf = reader.fill_buf()?;
+        if buf.is_empty() {
+            break;
+        }
+        seen_any = true;
+        let newline = buf.iter().position(|&b| b == b'\n');
+        let chunk = &buf[..newline.unwrap_or(buf.len())];
+        if !too_long {
+            if bytes.len() + chunk.len() > max {
+                too_long = true;
+                bytes = Vec::new();
+            } else {
+                bytes.extend_from_slice(chunk);
+            }
+        }
+        let used = newline.map_or(chunk.len(), |i| i + 1);
+        reader.consume(used);
+        if newline.is_some() {
+            break;
+        }
+    }
+    if too_long {
+        return Ok(Line::TooLong);
+    }
+    if !seen_any {
+        return Ok(Line::Eof);
+    }
+    if bytes.last() == Some(&b'\r') {
+        bytes.pop();
+    }
+    Ok(Line::Text(String::from_utf8_lossy(&bytes).into_owned()))
+}
+
 /// The protocol version answered when the client names none.
 const DEFAULT_PROTOCOL: &str = "2024-11-05";
 
@@ -19,9 +73,16 @@ pub trait Backend {
 }
 
 /// Reads requests from `input` until it ends, writing the answers to `output`.
-pub fn serve(input: impl BufRead, mut output: impl Write, backend: &mut dyn Backend) -> std::io::Result<()> {
-    for line in input.lines() {
-        let line = line?;
+pub fn serve(mut input: impl BufRead, mut output: impl Write, backend: &mut dyn Backend) -> std::io::Result<()> {
+    loop {
+        let line = match read_capped_line(&mut input, MAX_REQUEST_BYTES)? {
+            Line::Eof => break,
+            Line::TooLong => {
+                writeln!(output, "{}", error_reply(Value::Null, -32600, "request too large"))?;
+                continue;
+            }
+            Line::Text(line) => line,
+        };
         if line.trim().is_empty() {
             continue;
         }
@@ -217,5 +278,36 @@ mod tests {
         serve("not json\n".as_bytes(), &mut out, &mut Fake { names: vec![] }).unwrap();
         let reply: Value = serde_json::from_slice(&out).unwrap();
         assert_eq!(reply["error"]["code"], -32700);
+    }
+
+    #[test]
+    fn a_line_over_the_cap_is_dropped_and_the_next_one_still_reads() {
+        let mut input = std::io::Cursor::new(b"short\r\n123456789\nok\n\nlast".to_vec());
+        assert_eq!(read_capped_line(&mut input, 8).unwrap(), Line::Text("short".into()), "CRLF is trimmed");
+        assert_eq!(read_capped_line(&mut input, 8).unwrap(), Line::TooLong, "nine bytes over a cap of eight");
+        assert_eq!(read_capped_line(&mut input, 8).unwrap(), Line::Text("ok".into()), "the stream stayed in sync");
+        assert_eq!(read_capped_line(&mut input, 8).unwrap(), Line::Text(String::new()), "an empty line");
+        assert_eq!(read_capped_line(&mut input, 8).unwrap(), Line::Text("last".into()), "no newline at the end");
+        assert_eq!(read_capped_line(&mut input, 8).unwrap(), Line::Eof);
+        // Exactly at the cap is accepted; a tiny buffer splits the line into many reads.
+        let mut at_cap = std::io::BufReader::with_capacity(2, std::io::Cursor::new(b"12345678\n123456789".to_vec()));
+        assert_eq!(read_capped_line(&mut at_cap, 8).unwrap(), Line::Text("12345678".into()));
+        assert_eq!(read_capped_line(&mut at_cap, 8).unwrap(), Line::TooLong, "an oversized last line without a newline");
+        assert_eq!(read_capped_line(&mut at_cap, 8).unwrap(), Line::Eof);
+    }
+
+    #[test]
+    fn serve_answers_an_oversized_request_and_keeps_going() {
+        let mut backend = Fake { names: Vec::new() };
+        let mut input = vec![b'x'; MAX_REQUEST_BYTES + 1];
+        input.push(b'\n');
+        input.extend_from_slice(br#"{"jsonrpc":"2.0","id":7,"method":"ping"}"#);
+        input.push(b'\n');
+        let mut out = Vec::new();
+        serve(std::io::Cursor::new(input), &mut out, &mut backend).unwrap();
+        let replies: Vec<Value> = String::from_utf8(out).unwrap().lines().map(|l| serde_json::from_str(l).unwrap()).collect();
+        assert_eq!(replies.len(), 2);
+        assert_eq!(replies[0]["error"]["message"], "request too large");
+        assert_eq!(replies[1]["id"], 7);
     }
 }
