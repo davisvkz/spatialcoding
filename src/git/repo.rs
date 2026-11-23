@@ -53,6 +53,23 @@ impl GitRepo {
         })
     }
 
+    /// The repository's own directory and the one holding the refs shared by
+    /// every worktree, both absolute. They are the same for an ordinary
+    /// checkout; a linked worktree (like `docs/` here) keeps its `HEAD` and
+    /// index in the first and its branches in the second.
+    pub fn git_dirs(&self) -> Result<(PathBuf, PathBuf), String> {
+        let out = command(
+            &self.root,
+            &["rev-parse", "--path-format=absolute", "--git-dir", "--git-common-dir"],
+        )?;
+        let text = String::from_utf8(out).map_err(|e| e.to_string())?;
+        let mut lines = text.lines();
+        match (lines.next(), lines.next()) {
+            (Some(git_dir), Some(common_dir)) => Ok((PathBuf::from(git_dir), PathBuf::from(common_dir))),
+            _ => Err("Git did not report its directories".to_owned()),
+        }
+    }
+
     /// Resolve the revision once to an immutable commit, then read only blobs
     /// at the supplied paths. Missing paths are absent, not empty files.
     pub fn baseline(

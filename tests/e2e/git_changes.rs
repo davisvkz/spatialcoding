@@ -287,3 +287,108 @@ fn a_diff_over_the_scan_limit_waits_behind_the_large_diffs_card() {
     app.run();
     app.get_by_label("+     changed_line();");
 }
+
+// ---- Git state without polling (TASK-91) ----
+//
+// `git add`, `git commit` and `git checkout -b` change none of the working
+// tree's files, so only the Git state watcher can notice them before the
+// periodic refresh. These tests cap the simulated clock below it.
+
+use spatialcoding::git::repo::ChangeKind;
+
+fn git_in(dir: &std::path::Path, args: &[&str]) {
+    let out = Command::new("git")
+        .arg("-C")
+        .arg(dir)
+        .args(["-c", "user.name=T", "-c", "user.email=t@e"])
+        .args(args)
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&out.stderr));
+}
+
+/// Steps frames until `done`, failing if the simulated clock gets within a
+/// second of the periodic refresh that a build without the watcher would use.
+fn wait_before_polling(app: &mut App, done: impl Fn(&App) -> bool) {
+    let asked = app.app_state().changes.requested_at.expect("a status was asked");
+    let limit = asked + spatialcoding::git::changes::REFRESH_SECONDS - 1.0;
+    let real_deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+    loop {
+        if done(app) {
+            return;
+        }
+        let now = app.ctx.input(|i| i.time);
+        assert!(now < limit, "the periodic refresh would have run by now ({now:.1} >= {limit:.1})");
+        assert!(std::time::Instant::now() < real_deadline, "timed out");
+        std::thread::sleep(std::time::Duration::from_millis(40));
+        app.step();
+    }
+}
+
+fn kind_of(app: &App, rel: &str) -> Option<ChangeKind> {
+    let state = app.app_state();
+    let path = state.loaded_dir.as_ref().unwrap().join(rel);
+    state.changes.entries().iter().find(|(p, _)| *p == path).map(|(_, k)| *k)
+}
+
+#[test]
+fn git_add_shows_up_without_waiting_for_the_poll() {
+    let fx = git_fixture();
+    let mut app = app_with_git_status(&fx);
+    assert_eq!(kind_of(&app, "src/new.rs"), Some(ChangeKind::Untracked));
+    git_in(&fx.root, &["add", "src/new.rs"]);
+    wait_before_polling(&mut app, |a| kind_of(a, "src/new.rs") == Some(ChangeKind::Added));
+}
+
+#[test]
+fn a_commit_clears_the_changes_without_waiting_for_the_poll() {
+    let fx = git_fixture();
+    let mut app = app_with_git_status(&fx);
+    assert!(!app.app_state().changes.entries().is_empty());
+    git_in(&fx.root, &["add", "-A"]);
+    git_in(&fx.root, &["commit", "-qm", "second"]);
+    wait_before_polling(&mut app, |a| a.app_state().changes.is_known() && a.app_state().changes.entries().is_empty());
+}
+
+#[test]
+fn a_new_branch_changes_the_toolbar_without_waiting_for_the_poll() {
+    let fx = git_fixture();
+    let mut app = app_with_git_status(&fx);
+    app.get_by_label("Branch trunk");
+    git_in(&fx.root, &["checkout", "-q", "-b", "other"]);
+    wait_before_polling(&mut app, |a| a.app_state().changes.branch() == Some("other"));
+    app.run();
+    app.get_by_label("Branch other");
+}
+
+#[test]
+fn a_linked_worktree_follows_its_own_index_and_commits() {
+    let fx = git_fixture();
+    git_in(&fx.root, &["add", "-A"]);
+    git_in(&fx.root, &["commit", "-qm", "second"]);
+    let wt = fx.root.join("wt");
+    git_in(&fx.root, &["worktree", "add", "-q", wt.to_str().unwrap(), "-b", "feat"]);
+    let mut app = app();
+    app.state_mut().open_folder(wt.clone());
+    app.run();
+    wait_for(&mut app, |a| a.app_state().changes.is_known());
+    assert!(app.app_state().changes.entries().is_empty());
+
+    std::fs::write(wt.join("w.txt"), "w\n").unwrap();
+    git_in(&wt, &["add", "w.txt"]);
+    wait_before_polling(&mut app, |a| kind_of(a, "w.txt") == Some(ChangeKind::Added));
+    git_in(&wt, &["commit", "-qm", "w"]);
+    wait_before_polling(&mut app, |a| a.app_state().changes.entries().is_empty());
+}
+
+#[test]
+fn a_folder_inside_the_repository_follows_the_index_of_the_whole_repository() {
+    let fx = git_fixture();
+    let mut app = app();
+    app.state_mut().open_folder(fx.path("src"));
+    app.run();
+    wait_for(&mut app, |a| a.app_state().changes.is_known());
+    assert_eq!(kind_of(&app, "new.rs"), Some(ChangeKind::Untracked));
+    git_in(&fx.root, &["add", "src/new.rs"]);
+    wait_before_polling(&mut app, |a| kind_of(a, "new.rs") == Some(ChangeKind::Added));
+}

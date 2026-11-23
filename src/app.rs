@@ -37,6 +37,11 @@ pub struct SpatialCodingApp {
     /// Follows the loaded folder on disk; `None` until a folder is open or
     /// when the platform refused to watch it.
     watcher: Option<crate::fs::watcher::FileWatcher>,
+    /// Follows `HEAD`, the index and the branches of the loaded folder's
+    /// repository, which the file watcher cannot see; `None` until Git has
+    /// said where they are, outside a repository, or when the platform
+    /// refused.
+    git_watcher: Option<crate::git::watch::GitStateWatcher>,
     /// Wakes the UI from the watcher's thread.
     repaint: egui::Context,
     /// Tokens of the pinned symbol graphs painted this frame.
@@ -61,6 +66,7 @@ impl SpatialCodingApp {
             settings_checked_at: 0.0,
             layout_when_indexed: false,
             watcher: None,
+            git_watcher: None,
             repaint: cc.egui_ctx.clone(),
             pin_marks: Vec::new(),
             #[cfg(unix)]
@@ -167,6 +173,7 @@ impl SpatialCodingApp {
             }
         };
         self.watcher = start_watcher(&dir, &self.repaint);
+        self.git_watcher = None;
         let recents = &mut self.state.settings.recent_folders;
         recents.retain(|d| d != &dir);
         recents.insert(0, dir.clone());
@@ -183,6 +190,33 @@ impl SpatialCodingApp {
             self.state.ignore_set()
         };
         crate::fs::loader::load_directory_filtered(dir, dir, self.state.settings.show_dot_folders, &ignore)
+    }
+
+    /// Starts the Git state watcher once Git has said where the repository
+    /// is, and turns what it sees into a debounced refresh of the Changes.
+    fn follow_git_state(&mut self, ctx: &egui::Context, now: f64) {
+        match self.state.changes.git_dirs() {
+            Some((git_dir, common_dir)) => {
+                let watching_them = self.git_watcher.as_ref().is_some_and(|w| w.dirs() == (git_dir, common_dir));
+                if !watching_them {
+                    self.git_watcher = start_git_watcher(git_dir, common_dir, &self.repaint);
+                }
+            }
+            None if matches!(self.state.changes.status, crate::git::changes::ChangesStatus::Unavailable(_)) => {
+                self.git_watcher = None;
+            }
+            None => {}
+        }
+        if self.git_watcher.as_ref().is_some_and(|w| w.take_changed()) {
+            self.state.changes.schedule_refresh(now, crate::git::changes::GIT_STATE_DEBOUNCE_SECONDS);
+        }
+        // While a status runs the loading check already wakes the UI; the
+        // scheduled refresh is due as soon as it ends.
+        if !self.state.changes.is_loading()
+            && let Some(wait) = self.state.changes.scheduled_in(now)
+        {
+            ctx.request_repaint_after(std::time::Duration::from_secs_f64(wait.max(0.01)));
+        }
     }
 
     /// Applies what the watcher saw on disk to the canvas and the file tree.
@@ -279,6 +313,7 @@ impl SpatialCodingApp {
                     self.state.loaded_dir = None;
                     self.file_tree = None;
                     self.watcher = None;
+                    self.git_watcher = None;
                 }
             }
         }
@@ -1373,6 +1408,21 @@ impl SpatialCodingApp {
     }
 }
 
+fn start_git_watcher(
+    git_dir: &std::path::Path,
+    common_dir: &std::path::Path,
+    ctx: &egui::Context,
+) -> Option<crate::git::watch::GitStateWatcher> {
+    let ctx = ctx.clone();
+    match crate::git::watch::GitStateWatcher::new(git_dir, common_dir, move || ctx.request_repaint()) {
+        Ok(watcher) => Some(watcher),
+        Err(e) => {
+            log::warn!("Not watching {} for Git changes: {e}", git_dir.display());
+            None
+        }
+    }
+}
+
 fn start_watcher(dir: &std::path::Path, ctx: &egui::Context) -> Option<crate::fs::watcher::FileWatcher> {
     let ctx = ctx.clone();
     match crate::fs::watcher::FileWatcher::new(dir, move || ctx.request_repaint()) {
@@ -1416,11 +1466,8 @@ impl eframe::App for SpatialCodingApp {
             ctx.request_repaint_after(std::time::Duration::from_secs(1));
         }
         let now = ctx.input(|i| i.time);
-        let changes_due = self
-            .state
-            .changes
-            .requested_at
-            .is_none_or(|at| now - at >= crate::git::changes::REFRESH_SECONDS);
+        self.follow_git_state(ctx, now);
+        let changes_due = self.state.changes.is_due(now, self.git_watcher.is_some());
         if changes_due && !self.state.changes.is_loading() {
             workspace::refresh_working_tree_changes(&mut self.state, now);
         }

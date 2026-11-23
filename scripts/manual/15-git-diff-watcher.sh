@@ -19,6 +19,8 @@ checklist "15 · Git, diff e file watcher" \
   "Salvar por 'escrever arquivo temporário e renomear' (a maioria dos editores)|o nó também recarrega" \
   "Criar server/src/novo.rs no disco|o arquivo aparece na árvore Workspace sem reabrir a pasta, e na lista Untracked; as pastas abertas continuam abertas" \
   "Apagar web/src/utils/emoji.ts (com o nó aberto) e depois a pasta docs/|o nó some do canvas e da árvore; arquivos de docs/ abertos também fecham" \
+  "Com o painel Changes aberto, num terminal: git add server/src/novo.rs|em menos de um segundo o arquivo passa de Untracked para Added, sem esperar os 10 s de antes" \
+  "Num terminal: git commit -m teste, depois git checkout -b outra|o painel Changes esvazia e o pill da barra superior troca para 'outra', também sem demora" \
   "Criar ou alterar arquivos em node_modules/ ou server/target/|nada muda no app (pastas ignoradas)" \
   "Rodar o app com uma pasta que não é repositório Git|sem pill de branch; o painel Changes diz 'Git is unavailable here'"
 launch "$dir"
