@@ -915,6 +915,10 @@ pub fn apply_fs_changes(state: &mut AppState, batch: &crate::fs::watcher::WatchB
     let config_changed = batch.modified.iter().chain(&batch.created).chain(&batch.removed)
         .any(|path| path.file_name().and_then(|n| n.to_str()).is_some_and(crate::analysis::dependencies::local::is_config_name));
     applied.tree_stale = !batch.created.is_empty() || !batch.removed.is_empty();
+    if applied.tree_stale {
+        // The remembered links answered for the files that existed then.
+        state.deps.forget_local_analyses();
+    }
     if !applied.reloaded.is_empty() || config_changed {
         if grew_or_shrank {
             state.layout_dirty = true;

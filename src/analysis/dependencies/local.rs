@@ -16,10 +16,12 @@ use crate::edges::style::RelationshipType;
 mod exports;
 mod issues;
 mod js_config;
+mod lookups;
 mod rust_modules;
 pub(crate) use issues::{ImportIssue, ImportIssueReason, ImportIssues};
 pub(crate) use js_config::is_config_name;
 use js_config::{Package, TsPaths, TsTarget};
+use lookups::{Lookups, Presence};
 
 pub(crate) type ConfigSources = BTreeMap<PathBuf, String>;
 const MAX_CONFIG_BYTES: usize = 256 * 1024;
@@ -102,7 +104,7 @@ pub(crate) fn links_with_configs(
     analyze_with_configs(root, open, configs, &mut ParseCache::default()).links
 }
 
-#[derive(Default)]
+#[derive(Default, Clone)]
 pub(crate) struct LocalAnalysis {
     pub links: Vec<DependencyLink>,
     /// Imports that gave no link, and why.
@@ -111,42 +113,73 @@ pub(crate) struct LocalAnalysis {
     facts: exports::FileFacts,
 }
 
-/// The syntax tree of every open file, by path and content hash.
+/// The syntax tree of every open file, by path and content hash, and what
+/// the analysis of each file found.
 ///
 /// Parsing is most of the analysis (about 0.4 ms per KB), and the analysis
 /// runs again whenever the set of open files changes, so a file whose text did
 /// not change keeps its tree. The trees do not depend on the other open files,
-/// only the links resolved from them do.
+/// only the links resolved from them do; those are kept too, with the
+/// questions they asked about the other files (see [`lookups`]), and reused
+/// while every answer is the same.
 #[derive(Default)]
-pub(crate) struct ParseCache(HashMap<PathBuf, (u64, Parsed)>);
+pub(crate) struct ParseCache {
+    trees: HashMap<PathBuf, (u64, Parsed)>,
+    analyses: HashMap<PathBuf, Remembered>,
+    /// How many files were analysed (not reused), for the tests.
+    #[cfg(test)]
+    analysed: std::sync::atomic::AtomicUsize,
+}
 
 /// A file's language and tree; `None` for files without a bundled grammar.
 type Parsed = Option<(CstLanguage, Arc<Tree>)>;
 
+/// The result of analysing a file and what it depended on.
+struct Remembered {
+    text_hash: u64,
+    /// A hash of the configuration and the folder it was read for.
+    config_key: u64,
+    trace: lookups::Trace,
+    result: LocalAnalysis,
+}
+
 impl ParseCache {
-    /// The trees of `files`, in order. Files not seen with this text are
-    /// parsed in parallel; entries of files no longer listed are dropped.
-    fn trees(&mut self, files: &[(&Path, &str)]) -> Vec<Parsed> {
+    /// The trees of `files`, in order, with the hash of each text. Files not
+    /// seen with this text are parsed in parallel; entries of files no longer
+    /// listed are dropped, with what was found in them.
+    fn trees(&mut self, files: &[(&Path, &str)]) -> Vec<(u64, Parsed)> {
         profiling::function_scope!();
         let hashes: Vec<u64> = files.par_iter().map(|(_, text)| hash_text(text)).collect();
         let missing: Vec<usize> = (0..files.len())
-            .filter(|&i| self.0.get(files[i].0).is_none_or(|(hash, _)| *hash != hashes[i]))
+            .filter(|&i| self.trees.get(files[i].0).is_none_or(|(hash, _)| *hash != hashes[i]))
             .collect();
         let parsed: Vec<Parsed> = missing
             .par_iter()
             .map(|&i| parse_tree(files[i].0, files[i].1).map(|(language, tree)| (language, Arc::new(tree))))
             .collect();
         for (&i, tree) in missing.iter().zip(parsed) {
-            self.0.insert(files[i].0.to_path_buf(), (hashes[i], tree));
+            self.trees.insert(files[i].0.to_path_buf(), (hashes[i], tree));
         }
         let listed: std::collections::HashSet<&Path> = files.iter().map(|(path, _)| *path).collect();
-        self.0.retain(|path, _| listed.contains(path.as_path()));
-        files.iter().map(|(path, _)| self.0[*path].1.clone()).collect()
+        self.trees.retain(|path, _| listed.contains(path.as_path()));
+        self.analyses.retain(|path, _| listed.contains(path.as_path()));
+        files.iter().map(|(path, _)| (self.trees[*path].0, self.trees[*path].1.clone())).collect()
+    }
+
+    /// Forgets what the analysis found, keeping the trees: files appeared or
+    /// vanished, which a recorded answer may not show (a symbolic link).
+    pub(crate) fn forget_analyses(&mut self) {
+        self.analyses.clear();
     }
 
     #[cfg(test)]
     fn tree_of(&self, path: &Path) -> Option<Arc<Tree>> {
-        self.0.get(path)?.1.as_ref().map(|(_, tree)| tree.clone())
+        self.trees.get(path)?.1.as_ref().map(|(_, tree)| tree.clone())
+    }
+
+    #[cfg(test)]
+    fn analysed(&self) -> usize {
+        self.analysed.load(std::sync::atomic::Ordering::SeqCst)
     }
 }
 
@@ -178,13 +211,34 @@ fn analyze_with_configs(
     let packages = js_config::packages(configs);
     let files: Vec<(&Path, &str)> = open.iter().filter(|(p, _)| p.starts_with(root)).collect();
     let trees = cache.trees(&files);
-    // Each file is analysed on its own; only the targets it resolves to need
-    // the other open files, and those are read-only.
+    // What a file's links depend on besides its text: the configuration and
+    // the folder they were read for. Any change is a full run.
+    let config_key = {
+        let mut hasher = DefaultHasher::new();
+        root.hash(&mut hasher);
+        configs.hash(&mut hasher);
+        hasher.finish()
+    };
+    let remembered = &cache.analyses;
+    #[cfg(test)]
+    let analysed = &cache.analysed;
+    // Each file is analysed on its own, or its last result is kept when its
+    // text, the configuration and every answer it was given are the same.
     profiling::scope!("local links of every file");
-    let per_file: Vec<LocalAnalysis> = files
+    let outcomes: Vec<(LocalAnalysis, Option<Remembered>)> = files
         .par_iter()
         .zip(trees.par_iter())
-        .map(|(&(path, text), parsed)| {
+        .map(|(&(path, text), (text_hash, parsed))| {
+            let lookups = Lookups::new(open);
+            if let Some(known) = remembered.get(path)
+                && known.text_hash == *text_hash
+                && known.config_key == config_key
+                && lookups.replays(&known.trace)
+            {
+                return (known.result.clone(), None);
+            }
+            #[cfg(test)]
+            analysed.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             let mut result = LocalAnalysis::default();
             let nearest_tsconfig = ancestors(root, path)
                 .find_map(|dir| js_config::TS_CONFIG_NAMES.iter().find_map(|name| aliases.get(&dir.join(name))));
@@ -192,7 +246,7 @@ fn analyze_with_configs(
                 .find_map(|dir| js_config::VITE_CONFIG_NAMES.iter().find_map(|name| vite.get(&dir.join(name))));
             let mut cx = Ctx {
                 root,
-                open,
+                open: &lookups,
                 path,
                 text,
                 language: parsed.as_ref().map(|(language, _)| *language),
@@ -214,11 +268,11 @@ fn analyze_with_configs(
                         configs
                             .get_key_value(&manifest)
                             .map(|(path, text)| (path.as_path(), text.as_str()))
-                            .or_else(|| open.get(&manifest))
+                            .or_else(|| lookups.open_file(&manifest))
                     });
                 }
                 if language == CstLanguage::Rust {
-                    rust_modules::analyze(root, open, (path, text), tree.root_node(), &mut result);
+                    rust_modules::analyze(root, &lookups, (path, text), tree.root_node(), &mut result);
                     exports::record_rust_items(tree.root_node(), text, &mut result.facts);
                 }
                 let mut pending = vec![tree.root_node()];
@@ -235,9 +289,22 @@ fn analyze_with_configs(
                 Some("json") => json_links(&cx, &mut result),
                 _ => {}
             }
-            result
+            let remember = Remembered {
+                text_hash: *text_hash,
+                config_key,
+                trace: lookups.into_trace(),
+                result: result.clone(),
+            };
+            (result, Some(remember))
         })
         .collect();
+    let mut per_file = Vec::with_capacity(outcomes.len());
+    for ((result, fresh), (path, _)) in outcomes.into_iter().zip(&files) {
+        if let Some(fresh) = fresh {
+            cache.analyses.insert(path.to_path_buf(), fresh);
+        }
+        per_file.push(result);
+    }
     let mut result = LocalAnalysis::default();
     let mut facts: HashMap<PathBuf, exports::FileFacts> = HashMap::new();
     for (part, (path, _)) in per_file.into_iter().zip(&files) {
@@ -257,7 +324,7 @@ fn analyze_with_configs(
 /// configuration nearest to the file.
 struct Ctx<'a, 'o> {
     root: &'a Path,
-    open: &'a OpenFiles<'o>,
+    open: &'a Lookups<'a, 'o>,
     path: &'a Path,
     text: &'a str,
     /// `None` for Markdown and JSON.
@@ -419,7 +486,7 @@ fn normalize(path: &Path) -> Option<PathBuf> {
 }
 
 /// The one file `candidates` mean, or why there is not one.
-fn resolve(root: &Path, open: &OpenFiles<'_>, candidates: impl IntoIterator<Item = PathBuf>) -> Result<PathBuf, ImportIssueReason> {
+fn resolve(root: &Path, open: &Lookups<'_, '_>, candidates: impl IntoIterator<Item = PathBuf>) -> Result<PathBuf, ImportIssueReason> {
     match candidates_in(root, open, candidates) {
         RelationCandidates::One(target) => Ok(target),
         RelationCandidates::None => Err(ImportIssueReason::NotFound),
@@ -433,21 +500,21 @@ enum RelationCandidates {
     Many,
 }
 
-fn candidates_in(root: &Path, open: &OpenFiles<'_>, candidates: impl IntoIterator<Item = PathBuf>) -> RelationCandidates {
+fn candidates_in(root: &Path, open: &Lookups<'_, '_>, candidates: impl IntoIterator<Item = PathBuf>) -> RelationCandidates {
     let mut found: Option<PathBuf> = None;
     for candidate in candidates {
         let Some(candidate) = normalize(&candidate).filter(|p| p.starts_with(root)) else { continue };
-        let actual = match open.get(&candidate) {
-            Some((actual, _)) => {
+        let actual = match open.candidate(&candidate) {
+            Presence::Open(actual) => {
                 if let (Ok(root), Ok(real)) = (root.canonicalize(), actual.canonicalize())
                     && !real.starts_with(root) { continue; }
-                actual.to_path_buf()
+                actual
             }
             // A file of the folder that is not open. The index lists real
             // files below the root (symbolic links are not followed), so it
             // needs no check against the root.
-            None if open.is_indexed(&candidate) => candidate,
-            None => continue,
+            Presence::Indexed => candidate,
+            Presence::Absent => continue,
         };
         match found.as_deref() {
             Some(previous) if previous != actual => return RelationCandidates::Many,
@@ -1394,5 +1461,139 @@ mod ambiguous;
         // `models` is declared in a lib.rs that is not open: its module is unknown.
         let files = [("/p/src/app.rs", "use crate::models::Order;\n")];
         assert!(kinds(&files, &["/p/src/lib.rs", "/p/src/models/mod.rs"]).is_empty());
+    }
+
+    // ---- remembered analyses (TASK-96) ----
+
+    /// Runs the analysis with `cache` and returns what it did not reuse.
+    fn run(cache: &mut ParseCache, files: &[(&str, &str)], closed: &[&str], configs: &ConfigSources) -> (LocalAnalysis, usize) {
+        let open = OpenFiles::new(files.iter().map(|(p, t)| (Path::new(p), *t)));
+        let paths: Vec<PathBuf> = closed.iter().map(PathBuf::from).collect();
+        let index = crate::analysis::dependencies::WorkspaceIndex::new(&paths);
+        let open = open.with_index(&index);
+        let before = cache.analysed();
+        let result = analyze_with_configs(Path::new("/p"), &open, configs, cache);
+        (result, cache.analysed() - before)
+    }
+
+    #[test]
+    fn a_file_is_analysed_again_only_when_its_text_or_an_answer_it_was_given_changes() {
+        let none = ConfigSources::new();
+        let app = ("/p/app.ts", "import './x';\nimport './y';\n");
+        let other = ("/p/other.ts", "export const o = 1;\n");
+        let x = ("/p/x.ts", "export const x = 1;\n");
+        let mut cache = ParseCache::default();
+
+        assert_eq!(run(&mut cache, &[app, other], &[], &none).1, 2, "everything is new");
+        assert_eq!(run(&mut cache, &[app, other], &[], &none).1, 0, "nothing changed");
+
+        // x.ts opens: app asked about it, other did not.
+        assert_eq!(run(&mut cache, &[app, other, x], &[], &none).1, 2, "app (its answer changed) and x (new)");
+        assert_eq!(run(&mut cache, &[app, other, x], &[], &none).1, 0);
+        // y.ts shows up in the folder's files without being open.
+        assert_eq!(run(&mut cache, &[app, other, x], &["/p/y.ts"], &none).1, 1, "only app asked about y");
+        // An edit: that file only.
+        let edited = ("/p/other.ts", "export const o = 2;\n");
+        assert_eq!(run(&mut cache, &[app, edited, x], &["/p/y.ts"], &none).1, 1);
+        // Another file closes: only those that asked about it.
+        assert_eq!(run(&mut cache, &[app, edited], &["/p/y.ts"], &none).1, 1, "app asked about x");
+        // A change of configuration is a full run.
+        let tsconfig = ConfigSources::from([(PathBuf::from("/p/tsconfig.json"), r#"{"compilerOptions": {}}"#.to_string())]);
+        assert_eq!(run(&mut cache, &[app, edited], &["/p/y.ts"], &tsconfig).1, 2);
+        // Forgetting what was found (files appeared on disk) is a full run too, with the trees kept.
+        cache.forget_analyses();
+        assert_eq!(run(&mut cache, &[app, edited], &["/p/y.ts"], &tsconfig).1, 2);
+        assert!(cache.tree_of(Path::new("/p/app.ts")).is_some());
+    }
+
+    #[test]
+    fn a_closed_file_is_forgotten_with_what_was_found_in_it() {
+        let none = ConfigSources::new();
+        let (a, b) = (("/p/a.ts", "import './b';\n"), ("/p/b.ts", ""));
+        let mut cache = ParseCache::default();
+        run(&mut cache, &[a, b], &[], &none);
+        run(&mut cache, &[a], &[], &none);
+        assert_eq!(run(&mut cache, &[a, b], &[], &none).1, 2, "b was dropped and a asked about b");
+    }
+
+    /// A tiny deterministic generator, so a failure names its seed and step.
+    struct Xorshift(u64);
+
+    impl Xorshift {
+        fn next(&mut self, below: usize) -> usize {
+            self.0 ^= self.0 << 13;
+            self.0 ^= self.0 >> 7;
+            self.0 ^= self.0 << 17;
+            (self.0 % below as u64) as usize
+        }
+    }
+
+    /// Files that import each other across every language the analysis reads,
+    /// each with the texts it can have.
+    fn pool() -> Vec<(&'static str, Vec<&'static str>)> {
+        vec![
+            ("/p/t/app.ts", vec!["import './x';\nimport '@/lib';\nimport { A } from './hub';\n", "import './x.js';\nimport 'react';\n", "export {};\n"]),
+            ("/p/t/x.ts", vec!["export const x = 1;\n", "import './a';\n"]),
+            ("/p/t/x.js", vec!["exports.x = 1;\n"]),
+            ("/p/t/a.ts", vec!["export class A {}\n", "export * from './x';\n"]),
+            ("/p/t/hub.ts", vec!["export { A } from './a';\n", "export * from './a';\nexport * as ns from './x';\n"]),
+            ("/p/t/lib/index.ts", vec!["export {};\n"]),
+            ("/p/r/lib.rs", vec!["mod foo;\nmod bar;\n", "mod foo;\n#[cfg(test)] mod bar;\n"]),
+            ("/p/r/foo.rs", vec!["pub struct Foo;\n", "pub use crate::bar::Bar;\n"]),
+            ("/p/r/foo/mod.rs", vec!["pub struct Foo2;\n"]),
+            ("/p/r/bar.rs", vec!["pub struct Bar;\nuse crate::foo::Foo;\n", "pub struct Bar;\n"]),
+            ("/p/g/main.go", vec!["package main\nimport \"example.com/m/util\"\nimport \"fmt\"\n", "package main\nimport \"example.com/m/other\"\n"]),
+            ("/p/g/util/u1.go", vec!["package util\n"]),
+            ("/p/g/util/u2.go", vec!["package util\n"]),
+            ("/p/g/other/o.go", vec!["package other\n"]),
+            ("/p/g/go.mod", vec!["module example.com/m\n", "module other.org/m\n"]),
+            ("/p/py/a.py", vec!["from .b import f\nfrom .pkg import g\n", "from . import b\nfrom .nope import h\n"]),
+            ("/p/py/b.py", vec!["def f(): pass\n"]),
+            ("/p/py/pkg/__init__.py", vec!["from .m import g\n", "from .m import *\n"]),
+            ("/p/py/pkg/m.py", vec!["def g(): pass\n"]),
+            ("/p/doc.md", vec!["[a](./t/a.ts) and [b](./py/b.py)\n", "[none](./nowhere.md)\n"]),
+            ("/p/cfg.json", vec![r#"{"$ref": "./t/x.ts"}"#, r#"{"extends": "./cfg2.json"}"#]),
+            ("/p/cfg2.json", vec!["{}"]),
+        ]
+    }
+
+    /// What the analysis said, in a form that can be compared.
+    fn digest(analysis: &LocalAnalysis) -> (Vec<DependencyLink>, Vec<ImportIssue>, Vec<(ImportIssueReason, usize)>) {
+        (analysis.links.clone(), analysis.issues.items().to_vec(), analysis.issues.counts().collect())
+    }
+
+    /// Reusing what was found must give exactly what a full run gives, whatever
+    /// happens to the files, the folder and the configuration.
+    #[test]
+    fn remembered_results_equal_a_full_run_after_random_changes() {
+        let pool = pool();
+        let tsconfig = r#"{"compilerOptions": {"paths": {"@/*": ["t/*"]}}}"#;
+        for seed in 1..=12u64 {
+            let mut random = Xorshift(seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1);
+            let mut variant = vec![0usize; pool.len()];
+            let mut open = vec![false; pool.len()];
+            let mut listed = vec![false; pool.len()];
+            let mut with_tsconfig = false;
+            let mut cache = ParseCache::default();
+            for step in 0..80 {
+                match random.next(5) {
+                    0 => { let i = random.next(pool.len()); open[i] = !open[i]; }
+                    1 => { let i = random.next(pool.len()); variant[i] = random.next(pool[i].1.len()); }
+                    2 => { let i = random.next(pool.len()); listed[i] = !listed[i]; }
+                    3 => with_tsconfig = !with_tsconfig,
+                    _ => { let i = random.next(pool.len()); open[i] = true; }
+                }
+                let files: Vec<(&str, &str)> = (0..pool.len()).filter(|&i| open[i]).map(|i| (pool[i].0, pool[i].1[variant[i]])).collect();
+                let closed: Vec<&str> = (0..pool.len()).filter(|&i| listed[i] && !open[i]).map(|i| pool[i].0).collect();
+                let mut configs = ConfigSources::new();
+                if with_tsconfig {
+                    configs.insert(PathBuf::from("/p/tsconfig.json"), tsconfig.to_string());
+                }
+                let (incremental, _) = run(&mut cache, &files, &closed, &configs);
+                let (full, _) = run(&mut ParseCache::default(), &files, &closed, &configs);
+                assert!(digest(&incremental) == digest(&full), "seed {seed}, step {step}: a remembered result differs from a full run");
+            }
+            assert!(cache.analysed() > 0);
+        }
     }
 }

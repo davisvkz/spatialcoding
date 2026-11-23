@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use tree_sitter::Node;
 
 use super::{
-    candidates_in, normalize, push, ImportIssue, ImportIssueReason, LocalAnalysis, OpenFiles, RelationCandidates,
+    candidates_in, lookups::Lookups, normalize, push, ImportIssue, ImportIssueReason, LocalAnalysis, RelationCandidates,
     RelationshipType,
 };
 use super::exports::ModuleDecl;
@@ -86,7 +86,7 @@ type ModuleContext = Result<ModuleDirectory, ModuleIssueReason>;
 
 pub(super) fn analyze(
     root: &Path,
-    open: &OpenFiles<'_>,
+    open: &Lookups<'_, '_>,
     (path, text): (&Path, &str),
     source: Node<'_>,
     out: &mut LocalAnalysis,
@@ -159,7 +159,7 @@ pub(super) fn analyze(
 
 fn module_target(
     root: &Path,
-    open: &OpenFiles<'_>,
+    open: &Lookups<'_, '_>,
     dir: &ModuleDirectory,
     name: &str,
     explicit: Option<&str>,

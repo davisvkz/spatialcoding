@@ -174,6 +174,13 @@ impl DependencyIndexer {
         self.workspace_index = index;
     }
 
+    /// Forgets what the local analysis found of each file (not their syntax
+    /// trees): files appeared or vanished on disk, and a recorded answer does
+    /// not show what a symbolic link now points to.
+    pub(crate) fn forget_local_analyses(&mut self) {
+        self.parse_cache.forget_analyses();
+    }
+
     pub(crate) fn clear_local_snapshot(&mut self) {
         self.open_paths = OpenFilePaths::default();
         self.workspace_index = Default::default();
