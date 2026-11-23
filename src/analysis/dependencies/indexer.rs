@@ -101,6 +101,8 @@ pub struct DependencyIndexer {
     local: LocalAnalysis,
     parse_cache: local::ParseCache,
     open_paths: OpenFilePaths,
+    /// The folder's files, which local imports may resolve to.
+    workspace_index: std::sync::Arc<super::WorkspaceIndex>,
     root: Option<PathBuf>,
     files: HashMap<PathBuf, FileEntry>,
     queue: VecDeque<Job>,
@@ -159,12 +161,19 @@ impl DependencyIndexer {
     /// Recompute local evidence when canvas membership changes, independently of LSP jobs.
     pub(crate) fn refresh_local_snapshot(&mut self, root: &Path, files: &[(&Path, &str)]) {
         self.open_paths = OpenFilePaths::new(files.iter().map(|&(path, _)| path));
-        let open = OpenFiles::using_paths(files.iter().copied(), &self.open_paths);
+        let open = OpenFiles::using_paths(files.iter().copied(), &self.open_paths).with_index(&self.workspace_index);
         self.local = local::analyze(root, &open, &mut self.parse_cache);
+    }
+
+    /// The files of the folder the next local analysis may resolve imports to
+    /// (set before [`Self::rebuild`] or [`Self::refresh_local_snapshot`]).
+    pub(crate) fn set_workspace_index(&mut self, index: std::sync::Arc<super::WorkspaceIndex>) {
+        self.workspace_index = index;
     }
 
     pub(crate) fn clear_local_snapshot(&mut self) {
         self.open_paths = OpenFilePaths::default();
+        self.workspace_index = Default::default();
         self.local = LocalAnalysis::default();
         self.parse_cache = local::ParseCache::default();
     }
@@ -749,5 +758,23 @@ mod tests {
         let links = indexer.links(&open);
         let (_, start, end) = links[0].source_name_span.unwrap();
         assert_eq!(&source_text[start..end], "saluer", "edge carries the exact UTF-16 alias reference range");
+    }
+
+    #[test]
+    fn a_link_to_a_closed_file_is_kept_but_drawn_only_once_it_is_open() {
+        let root = Path::new("/p");
+        let folder = vec![PathBuf::from("/p/web/a.ts")];
+        let mut indexer = DependencyIndexer::default();
+        indexer.set_workspace_index(std::sync::Arc::new(crate::analysis::dependencies::WorkspaceIndex::new(&folder)));
+        let app = (Path::new("/p/web/app.ts"), "import { a } from './a';\n");
+        let a = (Path::new("/p/web/a.ts"), "export const a = 1;\n");
+
+        indexer.refresh_local_snapshot(root, &[app]);
+        assert_eq!(indexer.local.links.len(), 1, "the import resolves to the folder's a.ts");
+        assert!(indexer.links(&OpenFiles::new([app])).is_empty(), "but a.ts is not on the canvas");
+
+        indexer.refresh_local_snapshot(root, &[app, a]);
+        let links = indexer.links(&OpenFiles::new([app, a]));
+        assert_eq!((links.len(), links[0].target.as_path()), (1, a.0));
     }
 }

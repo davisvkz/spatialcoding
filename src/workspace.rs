@@ -305,6 +305,8 @@ pub fn remove_nodes(state: &mut AppState, ids: &[u64]) {
     if !ids.is_empty() {
         state.layout_dirty = true;
         if let Some(root) = &state.loaded_dir {
+            let index = workspace_index(state);
+            state.deps.set_workspace_index(index);
             let files: Vec<_> = state.node_store.file_nodes.values()
                 .map(|node| (node.path.as_path(), node.content.as_str()))
                 .collect();
@@ -375,6 +377,24 @@ fn find_file_node(state: &AppState, path: &Path) -> Option<u64> {
         .map(|n| n.id)
 }
 
+/// Analyses the local imports of the open files again, against the folder's
+/// current files, and redraws the edges. The language servers are not asked.
+pub fn refresh_local_links(state: &mut AppState) {
+    let Some(root) = state.loaded_dir.clone() else {
+        return;
+    };
+    let index = workspace_index(state);
+    state.deps.set_workspace_index(index);
+    let files: Vec<(&Path, &str)> = state
+        .node_store
+        .file_nodes
+        .values()
+        .map(|n| (n.path.as_path(), n.content.as_str()))
+        .collect();
+    state.deps.refresh_local_snapshot(&root, &files);
+    apply_dependency_edges(state);
+}
+
 /// Hands the open file nodes to the dependency indexer, which asks their
 /// language servers in the background, and redraws the edges known so far.
 /// New edges arrive through [`poll_lsp`].
@@ -384,6 +404,8 @@ pub fn rebuild_edges(state: &mut AppState) {
     let Some(root) = state.loaded_dir.clone() else {
         return;
     };
+    let index = workspace_index(state);
+    state.deps.set_workspace_index(index);
     let files: Vec<(&Path, &str)> = state
         .node_store
         .file_nodes
@@ -876,6 +898,9 @@ pub fn apply_fs_changes(state: &mut AppState, batch: &crate::fs::watcher::WatchB
         return applied;
     }
     let mut grew_or_shrank = false;
+    // The folder's files changed: the list local imports resolve against must
+    // be read again before anything below uses it.
+    state.folder_files_cache.replace(None);
     // A save through a temp file shows up as a created path.
     for path in batch.modified.iter().chain(&batch.created) {
         let Some(id) = find_file_node(state, path) else { continue };
@@ -898,16 +923,19 @@ pub fn apply_fs_changes(state: &mut AppState, batch: &crate::fs::watcher::WatchB
         remove_nodes(state, &gone);
     }
     let config_changed = batch.modified.iter().chain(&batch.created).chain(&batch.removed)
-        .any(|path| path.file_name().is_some_and(|name| name == "tsconfig.json"));
+        .any(|path| path.file_name().is_some_and(|name| name == "tsconfig.json" || name == "go.mod"));
+    applied.tree_stale = !batch.created.is_empty() || !batch.removed.is_empty();
     if !applied.reloaded.is_empty() || config_changed {
         if grew_or_shrank {
             state.layout_dirty = true;
         }
         rebuild_edges(state);
+    } else if applied.tree_stale {
+        // A file appeared or vanished: what an import resolves to may have
+        // changed, though no open text did. Only the local links need it.
+        refresh_local_links(state);
     }
-    applied.tree_stale = !batch.created.is_empty() || !batch.removed.is_empty();
     // Ask Git again as soon as no request is running.
-    state.folder_files_cache.replace(None);
     state.changes.requested_at = None;
     applied
 }
@@ -997,6 +1025,20 @@ pub fn folder_text_files(state: &AppState) -> std::rc::Rc<Vec<PathBuf>> {
     let paths = std::rc::Rc::new(paths);
     *state.folder_files_cache.borrow_mut() = Some(paths.clone());
     paths
+}
+
+/// The folder's files as an index for local import resolution, built from
+/// [`folder_text_files`] and kept for as long as that list is the same one.
+pub fn workspace_index(state: &AppState) -> std::sync::Arc<crate::analysis::dependencies::WorkspaceIndex> {
+    let files = folder_text_files(state);
+    if let Some((list, index)) = state.workspace_index_cache.borrow().as_ref()
+        && std::rc::Rc::ptr_eq(list, &files)
+    {
+        return index.clone();
+    }
+    let index = std::sync::Arc::new(crate::analysis::dependencies::WorkspaceIndex::new(&files));
+    *state.workspace_index_cache.borrow_mut() = Some((files, index.clone()));
+    index
 }
 
 /// The files of the loaded folder with the ignore list not applied (the Search

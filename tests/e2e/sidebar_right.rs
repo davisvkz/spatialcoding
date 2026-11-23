@@ -34,18 +34,24 @@ fn dependency_edges_explain_unresolved_rust_modules_without_lsp() {
     app.get_by_label("Rust modules (static)");
     app.get_by_label("3 unresolved Rust modules");
     app.get_by_label_contains("gated: Conditional");
-    app.get_by_label_contains("missing: Target not in the canvas snapshot");
-    app.get_by_label_contains("clash: Multiple targets");
+    app.get_by_label_contains("missing: No file for this module in the folder");
+    app.get_by_label_contains("clash: Multiple targets in the folder");
     assert_eq!(app.app_state().edge_store.all_edges().count(), 1);
 
     std::fs::write(fx.path("src/missing.rs"), "").unwrap();
     let target = app.open(&fx.path("src/missing.rs"));
     app.run();
     app.get_by_label("2 unresolved Rust modules");
+    // The folder's file list is read again when the watcher reports the new
+    // file; do it here so the test does not wait for it.
+    app.app_state().folder_files_cache.replace(None);
     spatialcoding::workspace::remove_nodes(app.app_state_mut(), &[target]);
     app.app_state_mut().edge_style.show_all = false;
     app.run();
-    app.get_by_label("3 unresolved Rust modules");
+    // The module file still exists in the folder, so closing it does not make
+    // the declaration unresolved; only the link to it is no longer drawn.
+    app.get_by_label("2 unresolved Rust modules");
+    assert!(app.query_by_label("3 unresolved Rust modules").is_none());
 
     spatialcoding::workspace::clear_canvas(app.app_state_mut());
     app.run();

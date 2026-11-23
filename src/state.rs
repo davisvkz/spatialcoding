@@ -38,6 +38,9 @@ pub enum RightPanel {
     Performance,
 }
 
+/// A file list and the index built from it (see `AppState::workspace_index_cache`).
+pub type IndexedFiles = (std::rc::Rc<Vec<PathBuf>>, std::sync::Arc<crate::analysis::dependencies::WorkspaceIndex>);
+
 pub struct AppState {
     pub viewport: Viewport,
     pub node_store: NodeStore,
@@ -91,6 +94,9 @@ pub struct AppState {
     /// (`workspace::folder_text_files`) and dropped when the folder changes
     /// or the Git change set is refreshed.
     pub folder_files_cache: std::cell::RefCell<Option<std::rc::Rc<Vec<PathBuf>>>>,
+    /// The [`crate::analysis::dependencies::WorkspaceIndex`] built from the
+    /// list above, kept while that list is the same one.
+    pub workspace_index_cache: std::cell::RefCell<Option<IndexedFiles>>,
     /// Screen rectangle of the canvas and the pointer on it (None off the
     /// canvas), set every frame for the commands that act under the mouse.
     pub canvas_rect: egui::Rect,
@@ -514,6 +520,7 @@ impl Default for AppState {
             top_level_highlights: HashMap::new(),
             last_opened_folders: Vec::new(),
             folder_files_cache: Default::default(),
+            workspace_index_cache: Default::default(),
             canvas_rect: egui::Rect::ZERO,
             hover_screen: None,
             pending_app_actions: Vec::new(),

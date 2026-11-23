@@ -178,3 +178,25 @@ fn kebab_reset_restores_the_edge_defaults() {
         Some(Toggled::True)
     );
 }
+
+#[test]
+fn an_import_of_a_closed_file_is_drawn_when_that_file_opens() {
+    let fx = fixture();
+    let mut app = app_with(&fx);
+    // `web/app.ts` imports `./a`, which is in the folder but not open.
+    app.open(&fx.path("web/app.ts"));
+    app.settle_edges();
+    assert_eq!(app.app_state().edge_store.all_edges().count(), 0, "no edge to a file that is not open");
+    app.open(&fx.path("web/a.ts"));
+    app.settle_edges();
+    // The import itself, and the use of `a` the (fake) server reports.
+    let imports: Vec<_> = app
+        .app_state()
+        .edge_store
+        .all_edges()
+        .filter(|e| e.relationship == spatialcoding::edges::style::RelationshipType::Imports)
+        .collect();
+    assert_eq!(imports.len(), 1, "the import appears with its target");
+    let path_of = |id| app.app_state().node_store.get_file(id).unwrap().path.clone();
+    assert_eq!((path_of(imports[0].source_node), path_of(imports[0].target_node)), (fx.path("web/app.ts"), fx.path("web/a.ts")));
+}

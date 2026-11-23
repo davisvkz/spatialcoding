@@ -293,7 +293,7 @@ fn rust_module_diagnostics(ui: &mut egui::Ui, issues: &[ModuleIssue]) {
         return;
     }
     Section::new("Rust modules (static)")
-        .info("File links from Rust module declarations, independent of the language server and visibility filters. Only open files are in the canvas snapshot.")
+        .info("File links from Rust module declarations, independent of the language server and visibility filters. A module resolves to any file of the folder; the link is drawn when both files are open.")
         .show(ui, |ui| {
             ui.label(match issues.len() {
                 1 => "1 unresolved Rust module".to_owned(),
@@ -304,8 +304,8 @@ fn rust_module_diagnostics(ui: &mut egui::Ui, issues: &[ModuleIssue]) {
                     ModuleIssueReason::Conditional => "Conditional module (cfg or cfg_attr)",
                     ModuleIssueReason::UnsupportedAttribute => "Unsupported module attribute",
                     ModuleIssueReason::OutsideWorkspace => "Path leaves the workspace",
-                    ModuleIssueReason::Missing => "Target not in the canvas snapshot",
-                    ModuleIssueReason::Ambiguous => "Multiple targets in the canvas snapshot",
+                    ModuleIssueReason::Missing => "No file for this module in the folder",
+                    ModuleIssueReason::Ambiguous => "Multiple targets in the folder",
                 };
                 ui.weak(format!(
                     "{}:{} · {}: {reason}",

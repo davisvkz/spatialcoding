@@ -25,10 +25,15 @@ pub(crate) fn config_paths<'a>(
     paths: impl IntoIterator<Item = &'a Path>,
 ) -> BTreeSet<PathBuf> {
     paths.into_iter()
-        .filter(|p| matches!(CstLanguage::from_path(p), Some(
-            CstLanguage::TypeScript | CstLanguage::Tsx | CstLanguage::JavaScript
-        )))
-        .flat_map(|p| ancestors(root, p).map(|dir| dir.join("tsconfig.json")))
+        .filter_map(|p| {
+            let config = match CstLanguage::from_path(p)? {
+                CstLanguage::TypeScript | CstLanguage::Tsx | CstLanguage::JavaScript => "tsconfig.json",
+                CstLanguage::Go => "go.mod",
+                _ => return None,
+            };
+            Some(ancestors(root, p).map(move |dir| dir.join(config)))
+        })
+        .flatten()
         .collect()
 }
 
@@ -128,6 +133,7 @@ fn analyze_with_configs(
     cache: &mut ParseCache,
 ) -> LocalAnalysis {
     let aliases: BTreeMap<_, _> = configs.iter()
+        .filter(|(path, _)| path.file_name().is_some_and(|name| name == "tsconfig.json"))
         .map(|(path, text)| (path, TsPaths::parse(path, text)))
         .collect();
     let files: Vec<(&Path, &str)> = open.iter().filter(|(p, _)| p.starts_with(root)).collect();
@@ -145,13 +151,26 @@ fn analyze_with_configs(
                 let paths = ancestors(root, path)
                     .find_map(|dir| aliases.get(&dir.join("tsconfig.json")))
                     .and_then(Option::as_ref);
+                // The module identity of Go code: the nearest go.mod, read from
+                // disk like a tsconfig, or the open one when it is on the canvas.
+                let go_mod = (language == CstLanguage::Go)
+                    .then(|| {
+                        ancestors(root, path).find_map(|dir| {
+                            let manifest = dir.join("go.mod");
+                            configs
+                                .get_key_value(&manifest)
+                                .map(|(path, text)| (path.as_path(), text.as_str()))
+                                .or_else(|| open.get(&manifest))
+                        })
+                    })
+                    .flatten();
                 if language == CstLanguage::Rust {
                     rust_modules::analyze(root, open, (path, text), tree.root_node(), &mut result);
                 }
                 let mut pending = vec![tree.root_node()];
                 while let Some(node) = pending.pop() {
                     if !node.has_error() {
-                        syntax_links(root, open, (path, text), language, node, paths, &mut result.links);
+                        syntax_links(root, open, (path, text), language, node, (paths, go_mod), &mut result.links);
                     }
                     let mut cursor = node.walk();
                     pending.extend(node.named_children(&mut cursor));
@@ -176,7 +195,7 @@ fn analyze_with_configs(
     result
 }
 
-fn syntax_links(root: &Path, open: &OpenFiles<'_>, (path, text): (&Path, &str), language: CstLanguage, node: Node, paths: Option<&TsPaths>, out: &mut Vec<DependencyLink>) {
+fn syntax_links(root: &Path, open: &OpenFiles<'_>, (path, text): (&Path, &str), language: CstLanguage, node: Node, (paths, go_mod): (Option<&TsPaths>, Option<(&Path, &str)>), out: &mut Vec<DependencyLink>) {
     let raw = |n: Node| n.utf8_text(text.as_bytes()).unwrap_or("").to_string();
     match language {
         CstLanguage::TypeScript | CstLanguage::Tsx | CstLanguage::JavaScript => {
@@ -227,14 +246,13 @@ fn syntax_links(root: &Path, open: &OpenFiles<'_>, (path, text): (&Path, &str), 
             if node.kind() == "import_spec"
                 && let Some(source) = node.child_by_field_name("path")
                 && let Some(value) = literal(&raw(source)) {
-                // The nearest open go.mod establishes the module identity.
-                let manifest = path.ancestors().skip(1).filter(|p| p.starts_with(root)).find_map(|p| open.get(&p.join("go.mod")));
-                let Some((manifest, content)) = manifest else { return };
+                // The nearest go.mod establishes the module identity.
+                let Some((manifest, content)) = go_mod else { return };
                 let module = content.lines().find_map(|l| l.trim().strip_prefix("module ").map(str::trim));
                 let Some(relative) = module.and_then(|m| value.strip_prefix(&format!("{m}/"))) else { return };
                 let Some(parent) = manifest.parent() else { return };
                 let directory = parent.join(relative);
-                let candidates = open.iter().filter(|(p, _)| p.parent() == Some(directory.as_path()) && p.extension().is_some_and(|e| e == "go") && !p.to_string_lossy().ends_with("_test.go")).map(|(p, _)| p.to_path_buf());
+                let candidates = open.files_in_dir(&directory).into_iter().filter(|p| p.extension().is_some_and(|e| e == "go") && !p.to_string_lossy().ends_with("_test.go"));
                 if let Some(target) = unique(root, open, candidates) {
                     push(path, text, &target, source.start_byte() + 1, source.end_byte() - 1, RelationshipType::Imports, out);
                 }
@@ -276,16 +294,25 @@ enum RelationCandidates {
 }
 
 fn candidates_in(root: &Path, open: &OpenFiles<'_>, candidates: impl IntoIterator<Item = PathBuf>) -> RelationCandidates {
-    let mut found = None;
+    let mut found: Option<PathBuf> = None;
     for candidate in candidates {
         let Some(candidate) = normalize(&candidate).filter(|p| p.starts_with(root)) else { continue };
-        let Some((actual, _)) = open.get(&candidate) else { continue };
-        if let (Ok(root), Ok(actual)) = (root.canonicalize(), actual.canonicalize())
-            && !actual.starts_with(root) { continue; }
+        let actual = match open.get(&candidate) {
+            Some((actual, _)) => {
+                if let (Ok(root), Ok(real)) = (root.canonicalize(), actual.canonicalize())
+                    && !real.starts_with(root) { continue; }
+                actual.to_path_buf()
+            }
+            // A file of the folder that is not open. The index lists real
+            // files below the root (symbolic links are not followed), so it
+            // needs no check against the root.
+            None if open.is_indexed(&candidate) => candidate,
+            None => continue,
+        };
         match found.as_deref() {
             Some(previous) if previous != actual => return RelationCandidates::Many,
             Some(_) => {}
-            None => found = Some(actual.to_path_buf()),
+            None => found = Some(actual),
         }
     }
     found.map_or(RelationCandidates::None, RelationCandidates::One)
@@ -655,5 +682,79 @@ mod ambiguous;
         assert_eq!(counts(Imports), 3, "{links:?}");
         assert_eq!(counts(References), 3, "{links:?}");
         assert!(links.iter().all(|l| l.source_name_span.is_some()));
+    }
+
+    /// Links of `files` (all open) when the folder also holds `closed`.
+    fn analyze_with_folder(files: &[(&str, &str)], closed: &[&str]) -> Vec<(PathBuf, PathBuf)> {
+        let open = OpenFiles::new(files.iter().map(|(p, t)| (Path::new(p), *t)));
+        let paths: Vec<PathBuf> = closed.iter().map(PathBuf::from).collect();
+        let index = crate::analysis::dependencies::WorkspaceIndex::new(&paths);
+        let open = open.with_index(&index);
+        let result = analyze_with_configs(Path::new("/p"), &open, &ConfigSources::new(), &mut ParseCache::default());
+        result.links.into_iter().map(|l| (l.source, l.target)).collect()
+    }
+
+    #[test]
+    fn an_import_resolves_to_a_file_of_the_folder_that_is_not_open() {
+        let app = ("/p/web/app.ts", "import { a } from './a';\nimport './sub';\n");
+        let only_app = analyze_files(&[app], &mut ParseCache::default());
+        assert!(only_app.is_empty(), "without the folder, nothing to resolve to");
+
+        let links = analyze_with_folder(&[app], &["/p/web/a.ts", "/p/web/sub/index.ts"]);
+        let targets: Vec<&str> = links.iter().map(|(_, t)| t.to_str().unwrap()).collect();
+        assert_eq!(targets, ["/p/web/a.ts", "/p/web/sub/index.ts"]);
+        assert!(links.iter().all(|(s, _)| s == Path::new("/p/web/app.ts")), "links still start in open files");
+
+        // Closed files are never sources.
+        assert!(analyze_with_folder(&[("/p/web/other.ts", "export {};\n")], &["/p/web/app.ts", "/p/web/a.ts"]).is_empty());
+    }
+
+    #[test]
+    fn the_whole_folder_decides_what_is_ambiguous() {
+        let app = ("/p/app.ts", "import './x';\n");
+        assert_eq!(analyze_with_folder(&[app, ("/p/x.ts", "")], &[]).len(), 1);
+        // x.js exists in the folder too, though it is not open: two targets.
+        assert!(analyze_with_folder(&[app, ("/p/x.ts", "")], &["/p/x.js"]).is_empty());
+        // A file open on the canvas and listed in the folder is one file.
+        assert_eq!(analyze_with_folder(&[app, ("/p/x.ts", "")], &["/p/x.ts"]).len(), 1);
+    }
+
+    #[test]
+    fn go_packages_and_python_modules_resolve_to_closed_files_too() {
+        let main = ("/p/cmd/main.go", "package main\nimport \"example.com/m/util\"\n");
+        let gomod = ("/p/go.mod", "module example.com/m\n");
+        let links = analyze_with_folder(&[main, gomod], &["/p/util/util.go", "/p/util/util_test.go"]);
+        assert_eq!(links, vec![("/p/cmd/main.go".into(), "/p/util/util.go".into())], "tests are not the package");
+
+        let py = ("/p/pkg/a.py", "from .b import f\n");
+        assert_eq!(analyze_with_folder(&[py], &["/p/pkg/b.py"]).len(), 1);
+    }
+
+    #[test]
+    fn go_mod_is_read_from_configs_without_being_open() {
+        let main = ("/p/cmd/main.go", "package main\nimport \"example.com/m/util\"\n");
+        let open = OpenFiles::new([(Path::new(main.0), main.1)]);
+        let paths = [PathBuf::from("/p/util/util.go")];
+        let index = crate::analysis::dependencies::WorkspaceIndex::new(&paths);
+        let open = open.with_index(&index);
+        let analyze = |configs: &ConfigSources| {
+            analyze_with_configs(Path::new("/p"), &open, configs, &mut ParseCache::default()).links.len()
+        };
+        assert_eq!(analyze(&ConfigSources::new()), 0, "no go.mod anywhere: no module identity");
+        let configs = ConfigSources::from([(PathBuf::from("/p/go.mod"), "module example.com/m\n".to_string())]);
+        assert_eq!(analyze(&configs), 1);
+        // A go.mod nearer the file wins over a farther one.
+        let nested = ConfigSources::from([
+            (PathBuf::from("/p/go.mod"), "module example.com/m\n".to_string()),
+            (PathBuf::from("/p/cmd/go.mod"), "module other.org/x\n".to_string()),
+        ]);
+        assert_eq!(analyze(&nested), 0);
+    }
+
+    #[test]
+    fn config_paths_name_the_go_mod_above_a_go_file() {
+        let paths = config_paths(Path::new("/p"), [Path::new("/p/cmd/main.go"), Path::new("/p/web/a.ts"), Path::new("/p/x.py")]);
+        let names: Vec<&str> = paths.iter().map(|p| p.to_str().unwrap()).collect();
+        assert_eq!(names, ["/p/cmd/go.mod", "/p/go.mod", "/p/tsconfig.json", "/p/web/tsconfig.json"], "every folder from the file up to the root");
     }
 }

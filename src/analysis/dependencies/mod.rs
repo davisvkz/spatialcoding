@@ -11,7 +11,7 @@ pub mod local;
 mod statements;
 
 use std::borrow::Cow;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use crate::analysis::lsp::{Location, LspSymbol, Range, SymbolKind};
@@ -130,10 +130,51 @@ impl OpenFilePaths {
     }
 }
 
+/// The files of the project folder, open on the canvas or not, as the file
+/// tree lists them. Local resolution looks its targets up here, so an import
+/// of a file that is not open still resolves (and a module that exists on
+/// disk is not reported missing); only links whose two ends are open are drawn.
+#[derive(Debug, Default)]
+pub struct WorkspaceIndex {
+    files: HashSet<PathBuf>,
+    by_dir: HashMap<PathBuf, Vec<PathBuf>>,
+}
+
+impl WorkspaceIndex {
+    pub fn new(paths: &[PathBuf]) -> Self {
+        let mut by_dir: HashMap<PathBuf, Vec<PathBuf>> = HashMap::new();
+        for path in paths {
+            if let Some(dir) = path.parent() {
+                by_dir.entry(dir.to_path_buf()).or_default().push(path.clone());
+            }
+        }
+        Self { files: paths.iter().cloned().collect(), by_dir }
+    }
+
+    pub fn contains(&self, path: &Path) -> bool {
+        self.files.contains(path)
+    }
+
+    /// The files directly in `dir`.
+    pub fn in_dir(&self, dir: &Path) -> &[PathBuf] {
+        self.by_dir.get(dir).map_or(&[], Vec::as_slice)
+    }
+
+    pub fn len(&self) -> usize {
+        self.files.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.files.is_empty()
+    }
+}
+
 /// The open paths and current content, including canonical-path aliases.
 pub struct OpenFiles<'a> {
     texts: HashMap<&'a Path, &'a str>,
     paths: Cow<'a, OpenFilePaths>,
+    /// The other files of the folder, when known.
+    index: Option<&'a WorkspaceIndex>,
 }
 
 impl<'a> OpenFiles<'a> {
@@ -141,14 +182,39 @@ impl<'a> OpenFiles<'a> {
     pub fn new(files: impl IntoIterator<Item = (&'a Path, &'a str)>) -> Self {
         let texts: HashMap<_, _> = files.into_iter().collect();
         let paths = OpenFilePaths::new(texts.keys().copied());
-        Self { texts, paths: Cow::Owned(paths) }
+        Self { texts, paths: Cow::Owned(paths), index: None }
     }
 
     pub(crate) fn using_paths(
         files: impl IntoIterator<Item = (&'a Path, &'a str)>,
         paths: &'a OpenFilePaths,
     ) -> Self {
-        Self { texts: files.into_iter().collect(), paths: Cow::Borrowed(paths) }
+        Self { texts: files.into_iter().collect(), paths: Cow::Borrowed(paths), index: None }
+    }
+
+    /// Also resolves to the files of the folder in `index`, not only to the
+    /// open ones. They are targets only: links still start in open files.
+    pub fn with_index(mut self, index: &'a WorkspaceIndex) -> Self {
+        self.index = Some(index);
+        self
+    }
+
+    /// Whether `path` is a file of the folder that is not open.
+    pub(crate) fn is_indexed(&self, path: &Path) -> bool {
+        self.index.is_some_and(|index| index.contains(path))
+    }
+
+    /// The files directly in `dir`: open ones and the folder's.
+    pub(crate) fn files_in_dir(&self, dir: &Path) -> Vec<PathBuf> {
+        let mut files: Vec<PathBuf> = self.texts.keys().filter(|p| p.parent() == Some(dir)).map(|p| p.to_path_buf()).collect();
+        if let Some(index) = self.index {
+            for path in index.in_dir(dir) {
+                if !files.contains(path) {
+                    files.push(path.clone());
+                }
+            }
+        }
+        files
     }
 
     /// The node path and content of the open file at `path`.
