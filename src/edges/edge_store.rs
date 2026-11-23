@@ -19,7 +19,7 @@ pub struct NameSpan {
 
 /// Classification of a dependency edge for the "Re-export & Barrel" toggles
 /// of the v2 Code Canvas Dependency Edges panel.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum EdgeKind {
     /// Ordinary reference: the source statement names the target symbol.
     #[default]

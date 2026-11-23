@@ -240,3 +240,70 @@ fn imports_resolve_through_extended_configs_and_workspace_packages_in_the_app() 
         "the alias comes from the extended base config and the package from its package.json"
     );
 }
+
+#[test]
+fn an_import_through_a_barrel_gets_a_barrel_edge_and_a_shortcut_in_the_app() {
+    use spatialcoding::edges::edge_store::EdgeKind;
+    let fx = fixture();
+    let write = |rel: &str, text: &str| {
+        let path = fx.path(rel);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, text).unwrap();
+    };
+    write("web/models/index.ts", "export { Order } from './Order';\n");
+    write("web/models/Order.ts", "export class Order {}\n");
+    write("web/shop.ts", "import { Order } from './models';\n");
+    let mut app = app_with(&fx);
+    app.app_state_mut().lsp.manager.set_launcher(std::sync::Arc::new(|_, _| Err("offline".into())));
+    for path in ["web/shop.ts", "web/models/index.ts", "web/models/Order.ts"] {
+        app.open(&fx.path(path));
+    }
+    app.settle_edges();
+    let name_of = |id| app.app_state().node_store.get_file(id).unwrap().path.file_name().unwrap().to_str().unwrap().to_owned();
+    let mut found: Vec<(String, String, EdgeKind)> = app
+        .app_state()
+        .edge_store
+        .all_edges()
+        .map(|e| (name_of(e.source_node), name_of(e.target_node), e.kind))
+        .collect();
+    found.sort_by(|a, b| (&a.0, &a.1).cmp(&(&b.0, &b.1)));
+    assert_eq!(
+        found,
+        vec![
+            ("index.ts".into(), "Order.ts".into(), EdgeKind::Direct),
+            ("shop.ts".into(), "Order.ts".into(), EdgeKind::ReExport),
+            ("shop.ts".into(), "index.ts".into(), EdgeKind::Barrel),
+        ],
+        "the hop to the barrel, the shortcut to the definition, and the barrel's own export"
+    );
+}
+
+#[test]
+fn a_rust_use_through_a_facade_gets_a_hop_and_a_shortcut_in_the_app() {
+    use spatialcoding::edges::edge_store::EdgeKind;
+    let fx = fixture();
+    let write = |rel: &str, text: &str| {
+        let path = fx.path(rel);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, text).unwrap();
+    };
+    write("src/main.rs", "mod models;\nmod util;\nuse crate::models::Order;\n\nfn main() {}\n");
+    write("src/models/mod.rs", "mod order;\npub use self::order::Order;\n");
+    write("src/models/order.rs", "pub struct Order;\n");
+    let mut app = app_with(&fx);
+    app.app_state_mut().lsp.manager.set_launcher(std::sync::Arc::new(|_, _| Err("offline".into())));
+    for path in ["src/main.rs", "src/models/mod.rs", "src/models/order.rs"] {
+        app.open(&fx.path(path));
+    }
+    app.settle_edges();
+    let path_of = |id| app.app_state().node_store.get_file(id).unwrap().path.clone();
+    let from_main: Vec<(std::path::PathBuf, EdgeKind)> = app
+        .app_state()
+        .edge_store
+        .all_edges()
+        .filter(|e| path_of(e.source_node) == fx.path("src/main.rs"))
+        .map(|e| (path_of(e.target_node), e.kind))
+        .collect();
+    assert!(from_main.contains(&(fx.path("src/models/mod.rs"), EdgeKind::Barrel)), "{from_main:?}");
+    assert!(from_main.contains(&(fx.path("src/models/order.rs"), EdgeKind::ReExport)), "{from_main:?}");
+}

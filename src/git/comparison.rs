@@ -33,6 +33,9 @@ struct RelationshipKey {
     source: PathBuf,
     target: PathBuf,
     relationship: RelationshipType,
+    /// An import through a barrel and the shortcut to its provider are two
+    /// relationships, and neither is the same as a direct import.
+    kind: EdgeKind,
 }
 
 impl RelationshipKey {
@@ -49,6 +52,7 @@ impl RelationshipKey {
                 .unwrap_or(&link.target)
                 .into(),
             relationship: link.relationship,
+            kind: link.kind,
         }
     }
 }
@@ -56,7 +60,6 @@ impl RelationshipKey {
 pub struct GraphDiff {
     pub commit: String,
     pub deleted: Vec<DependencyLink>,
-    pub deleted_kinds: Vec<EdgeKind>,
     root: PathBuf,
     states: HashMap<RelationshipKey, EdgeChange>,
 }
@@ -78,21 +81,6 @@ impl GraphDiff {
         };
         let before = analyze(baseline, configs.0);
         let after = analyze(current, configs.1);
-        use crate::analysis::dependencies::classify::{classify_link, promote_barrels};
-        let kinds: Vec<_> = before
-            .iter()
-            .map(|l| {
-                classify_link(
-                    l,
-                    baseline
-                        .get(&l.source)
-                        .map(String::as_str)
-                        .unwrap_or_default(),
-                )
-            })
-            .collect();
-        let sources: Vec<_> = before.iter().map(|l| l.source.as_path()).collect();
-        let kinds = promote_barrels(&kinds, &sources);
         let previous: HashSet<_> = before
             .iter()
             .map(|l| RelationshipKey::of(root, l))
@@ -110,20 +98,18 @@ impl GraphDiff {
             })
             .collect();
         let mut removed = HashSet::new();
-        let (deleted, deleted_kinds) = before
+        let deleted = before
             .into_iter()
-            .zip(kinds)
-            .filter(|(l, _)| {
+            .filter(|l| {
                 let key = RelationshipKey::of(root, l);
                 !states.contains_key(&key) && removed.insert(key)
             })
-            .unzip();
+            .collect();
         Self {
             commit,
             root: root.into(),
             states,
             deleted,
-            deleted_kinds,
         }
     }
 
@@ -476,18 +462,18 @@ mod tests {
     }
 
     #[test]
-    fn removed_reexports_keep_the_baselines_classification() {
+    fn removed_imports_through_a_barrel_keep_the_kind_they_had_in_the_baseline() {
         let root = Path::new("/p");
-        let mut before: BTreeMap<PathBuf, String> = ["a", "b", "c", "d"]
-            .map(|name| (root.join(format!("{name}.ts")), String::new()))
-            .into_iter()
-            .collect();
-        before.insert(root.join("index.ts"), "export * from './a';\nexport * from './b';\nexport * from './c';\nexport * from './d';\n".into());
+        let before: BTreeMap<PathBuf, String> = [
+            ("app.ts", "import { A } from './index';\n"),
+            ("index.ts", "export * from './a';\n"),
+            ("a.ts", "export const A = 1;\n"),
+        ]
+        .into_iter()
+        .map(|(path, text)| (root.join(path), text.to_owned()))
+        .collect();
         let mut after = before.clone();
-        after.insert(
-            root.join("index.ts"),
-            "export * from './a';\nexport * from './b';\n".into(),
-        );
+        after.insert(root.join("app.ts"), "// no import any more\n".into());
         let diff = GraphDiff::between(
             root,
             &before,
@@ -495,10 +481,42 @@ mod tests {
             (&Default::default(), &Default::default()),
             "baseline".into(),
         );
+        let mut deleted: Vec<_> = diff
+            .deleted
+            .iter()
+            .map(|l| (l.source.file_name().unwrap().to_str().unwrap(), l.target.file_name().unwrap().to_str().unwrap(), l.kind))
+            .collect();
+        deleted.sort_by_key(|(source, target, _)| (*source, *target));
         assert_eq!(
-            diff.deleted_kinds,
-            vec![crate::edges::edge_store::EdgeKind::Barrel; 2]
+            deleted,
+            [("app.ts", "a.ts", EdgeKind::ReExport), ("app.ts", "index.ts", EdgeKind::Barrel)],
+            "the hop and the shortcut are two relationships; the barrel's own export is unchanged"
         );
+        assert_eq!(diff.counts(), (0, 2, 1), "(added, removed, same): the hop and the shortcut went, index.ts to a.ts stayed");
+    }
+
+    /// The same import compared with itself: neither the hop nor the shortcut
+    /// is mistaken for a direct import of the same file.
+    #[test]
+    fn a_hop_and_a_direct_import_of_the_same_file_are_different_relationships() {
+        let root = Path::new("/p");
+        let files = |app: &str| -> BTreeMap<PathBuf, String> {
+            [("app.ts", app), ("index.ts", "export { A } from './a';\n"), ("a.ts", "export const A = 1;\n")]
+                .into_iter()
+                .map(|(path, text)| (root.join(path), text.to_owned()))
+                .collect()
+        };
+        // Before: A through the barrel. After: A straight from a.ts.
+        let diff = GraphDiff::between(
+            root,
+            &files("import { A } from './index';\n"),
+            &files("import { A } from './a';\n"),
+            (&Default::default(), &Default::default()),
+            "baseline".into(),
+        );
+        let (added, deleted, same) = diff.counts();
+        assert_eq!((added, deleted), (1, 2), "the direct import is new; the hop and the shortcut are gone");
+        assert_eq!(same, 1, "index.ts exporting from a.ts did not change");
     }
 
     #[test]

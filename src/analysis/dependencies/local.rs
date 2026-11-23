@@ -13,6 +13,7 @@ use super::{DependencyLink, LineSpan, OpenFiles};
 use crate::analysis::cst::{CstLanguage, parse_tree};
 use crate::edges::style::RelationshipType;
 
+mod exports;
 mod issues;
 mod js_config;
 mod rust_modules;
@@ -106,6 +107,8 @@ pub(crate) struct LocalAnalysis {
     pub links: Vec<DependencyLink>,
     /// Imports that gave no link, and why.
     pub issues: ImportIssues,
+    /// What this file imports by name and exports (see [`exports`]).
+    facts: exports::FileFacts,
 }
 
 /// The syntax tree of every open file, by path and content hash.
@@ -216,6 +219,7 @@ fn analyze_with_configs(
                 }
                 if language == CstLanguage::Rust {
                     rust_modules::analyze(root, open, (path, text), tree.root_node(), &mut result);
+                    exports::record_rust_items(tree.root_node(), text, &mut result.facts);
                 }
                 let mut pending = vec![tree.root_node()];
                 while let Some(node) = pending.pop() {
@@ -235,10 +239,14 @@ fn analyze_with_configs(
         })
         .collect();
     let mut result = LocalAnalysis::default();
-    for part in per_file {
+    let mut facts: HashMap<PathBuf, exports::FileFacts> = HashMap::new();
+    for (part, (path, _)) in per_file.into_iter().zip(&files) {
         result.links.extend(part.links);
         result.issues.extend(part.issues);
+        facts.insert(path.to_path_buf(), part.facts);
     }
+    // Imports through a re-exporting file: the barrel hop and the shortcut.
+    exports::apply(&mut result.links, &mut facts);
     result.links.sort_by(|a, b| (&a.source, a.usage.start, &a.target).cmp(&(&b.source, b.usage.start, &b.target)));
     result.links.dedup_by(|a, b| a.source == b.source && a.target == b.target && a.source_name_span == b.source_name_span && a.relationship == b.relationship);
     result.issues.finish();
@@ -300,7 +308,11 @@ fn syntax_links(cx: &Ctx<'_, '_>, node: Node, out: &mut LocalAnalysis) {
             if matches!(node.kind(), "import_statement" | "export_statement")
                 && let Some(source) = node.child_by_field_name("source")
                 && let Some(value) = literal(&raw(source)) {
-                add_js_import(cx, value, source.start_byte() + 1, out);
+                if let Some((target, specifier)) = add_js_import(cx, value, source.start_byte() + 1, out) {
+                    exports::record_js(node, text, &target, specifier, &mut out.facts);
+                }
+            } else if node.kind() == "export_statement" {
+                exports::record_js_local_exports(node, text, &mut out.facts);
             }
             // `import()` is a grammar keyword, unlike shadowable require().
             if node.kind() == "call_expression"
@@ -313,6 +325,9 @@ fn syntax_links(cx: &Ctx<'_, '_>, node: Node, out: &mut LocalAnalysis) {
             }
         }
         CstLanguage::Rust => {
+            if node.kind() == "use_declaration" {
+                exports::record_rust_use(node, text, &mut out.facts);
+            }
             if node.kind() == "macro_invocation"
                 && node.child_by_field_name("macro").is_some_and(|n| matches!(raw(n).as_str(), "include_str" | "include_bytes")) {
                 let mut cursor = node.walk();
@@ -345,7 +360,11 @@ fn syntax_links(cx: &Ctx<'_, '_>, node: Node, out: &mut LocalAnalysis) {
                 let base = base.join(module_path);
                 if !base.starts_with(root) { return cx.report(out, at, &value, ImportIssueReason::OutsideWorkspace); }
                 match resolve(root, open, [base.with_extension("py"), base.join("__init__.py")]) {
-                    Ok(target) => push(path, text, &target, module.start_byte(), module.end_byte(), RelationshipType::Imports, &mut out.links),
+                    Ok(target) => {
+                        let specifier = push(path, text, &target, module.start_byte(), module.end_byte(), RelationshipType::Imports, &mut out.links);
+                        let is_init = path.file_name().is_some_and(|n| n == "__init__.py");
+                        exports::record_python(node, text, &target, specifier, is_init, &mut out.facts);
+                    }
                     Err(reason) => cx.report(out, at, &value, reason),
                 }
             }
@@ -368,7 +387,9 @@ fn syntax_links(cx: &Ctx<'_, '_>, node: Node, out: &mut LocalAnalysis) {
                 let directory = parent.join(relative);
                 let candidates = open.files_in_dir(&directory).into_iter().filter(|p| p.extension().is_some_and(|e| e == "go") && !p.to_string_lossy().ends_with("_test.go"));
                 match resolve(root, open, candidates) {
-                    Ok(target) => push(path, text, &target, source.start_byte() + 1, source.end_byte() - 1, RelationshipType::Imports, &mut out.links),
+                    Ok(target) => {
+                        push(path, text, &target, source.start_byte() + 1, source.end_byte() - 1, RelationshipType::Imports, &mut out.links);
+                    }
                     // A package is a folder of files, and only one can be the target.
                     Err(ImportIssueReason::Ambiguous) => cx.report(out, at, value, ImportIssueReason::Unsupported),
                     Err(reason) => cx.report(out, at, value, reason),
@@ -437,19 +458,26 @@ fn candidates_in(root: &Path, open: &OpenFiles<'_>, candidates: impl IntoIterato
     found.map_or(RelationCandidates::None, RelationCandidates::One)
 }
 
-fn add_js_import(cx: &Ctx<'_, '_>, value: &str, offset: usize, out: &mut LocalAnalysis) {
+/// What an import resolved to, and the span its link records for it.
+type Hit = (PathBuf, Option<exports::Span>);
+
+fn add_js_import(cx: &Ctx<'_, '_>, value: &str, offset: usize, out: &mut LocalAnalysis) -> Option<Hit> {
     if value.starts_with('.') {
         return add_relative(cx, value, offset, true, out);
     }
-    if value.starts_with("node:") { return cx.report(out, offset, value, ImportIssueReason::External); }
+    if value.starts_with("node:") { cx.report(out, offset, value, ImportIssueReason::External); return None; }
     if value.contains([':', '?', '\\', '%', '#']) || value.starts_with('/') {
-        return cx.report(out, offset, value, ImportIssueReason::Unsupported);
+        cx.report(out, offset, value, ImportIssueReason::Unsupported);
+        return None;
     }
     // In the order a bundler tries them: the compiler's `paths`, the
     // bundler's own aliases, then the packages of this folder.
     match cx.config.paths.map(|paths| paths.target(value)) {
         Some(TsTarget::Paths(bases)) => return resolve_in_order(cx, value, offset, &bases, out),
-        Some(TsTarget::Unsupported) => return cx.report(out, offset, value, ImportIssueReason::Unsupported),
+        Some(TsTarget::Unsupported) => {
+            cx.report(out, offset, value, ImportIssueReason::Unsupported);
+            return None;
+        }
         Some(TsTarget::NoMatch) | None => {}
     }
     if let Some(base) = js_config::vite_base(cx.config.vite, value) {
@@ -457,56 +485,70 @@ fn add_js_import(cx: &Ctx<'_, '_>, value: &str, offset: usize, out: &mut LocalAn
     }
     match js_config::package_base(cx.config.packages, value) {
         Some(Ok(base)) => return resolve_in_order(cx, value, offset, &[base], out),
-        Some(Err(())) => return cx.report(out, offset, value, ImportIssueReason::NotFound),
+        Some(Err(())) => {
+            cx.report(out, offset, value, ImportIssueReason::NotFound);
+            return None;
+        }
         None => {}
     }
     // A package, unless an alias the config could not give us.
     let reason = if cx.config.tsconfig_unreadable { ImportIssueReason::MissingContext } else { ImportIssueReason::External };
     cx.report(out, offset, value, reason);
+    None
 }
 
 /// Resolves an import to the first of `bases` that exists. With a single
 /// place, nothing found is a missing file. With several, "not there" must be
 /// known to move to the next one, which needs the folder's file list.
-fn resolve_in_order(cx: &Ctx<'_, '_>, value: &str, offset: usize, bases: &[PathBuf], out: &mut LocalAnalysis) {
+fn resolve_in_order(cx: &Ctx<'_, '_>, value: &str, offset: usize, bases: &[PathBuf], out: &mut LocalAnalysis) -> Option<Hit> {
     for base in bases {
         match candidates_in(cx.root, cx.open, module_candidates(base)) {
             RelationCandidates::One(target) => {
-                return push(cx.path, cx.text, &target, offset, offset + value.len(), RelationshipType::Imports, &mut out.links);
+                let span = push(cx.path, cx.text, &target, offset, offset + value.len(), RelationshipType::Imports, &mut out.links);
+                return Some((target, span));
             }
-            RelationCandidates::Many => return cx.report(out, offset, value, ImportIssueReason::Ambiguous),
+            RelationCandidates::Many => {
+                cx.report(out, offset, value, ImportIssueReason::Ambiguous);
+                return None;
+            }
             RelationCandidates::None if bases.len() > 1 && !cx.open.has_index() => {
-                return cx.report(out, offset, value, ImportIssueReason::MissingContext);
+                cx.report(out, offset, value, ImportIssueReason::MissingContext);
+                return None;
             }
             RelationCandidates::None => {}
         }
     }
     cx.report(out, offset, value, ImportIssueReason::NotFound);
+    None
 }
 
 /// A relative path in code (`module`) or in a document. Only code reports
 /// what it could not resolve: documents link to anything.
-fn add_relative(cx: &Ctx<'_, '_>, value: &str, offset: usize, module: bool, out: &mut LocalAnalysis) {
+fn add_relative(cx: &Ctx<'_, '_>, value: &str, offset: usize, module: bool, out: &mut LocalAnalysis) -> Option<Hit> {
     let value = value.split('#').next().unwrap_or("");
-    if value.is_empty() { return; }
+    if value.is_empty() { return None; }
     if value.contains([':', '?', '\\', '%']) || value.starts_with('/') {
         if module { cx.report(out, offset, value, ImportIssueReason::Unsupported); }
-        return;
+        return None;
     }
-    if module && !value.starts_with('.') { return; }
-    let Some(parent) = cx.path.parent() else { return };
+    if module && !value.starts_with('.') { return None; }
+    let parent = cx.path.parent()?;
     let base = parent.join(value);
     if module && normalize(&base).is_none_or(|path| !path.starts_with(cx.root)) {
-        return cx.report(out, offset, value, ImportIssueReason::OutsideWorkspace);
+        cx.report(out, offset, value, ImportIssueReason::OutsideWorkspace);
+        return None;
     }
     let candidates = if module { module_candidates(&base) } else { vec![base] };
     match resolve(cx.root, cx.open, candidates) {
         Ok(target) => {
             let relationship = if module { RelationshipType::Imports } else { RelationshipType::References };
-            push(cx.path, cx.text, &target, offset, offset + value.len(), relationship, &mut out.links);
+            let span = push(cx.path, cx.text, &target, offset, offset + value.len(), relationship, &mut out.links);
+            Some((target, span))
         }
-        Err(reason) if module => cx.report(out, offset, value, reason),
-        Err(_) => {}
+        Err(reason) => {
+            if module { cx.report(out, offset, value, reason); }
+            None
+        }
     }
 }
 
@@ -522,17 +564,19 @@ fn module_candidates(base: &Path) -> Vec<PathBuf> {
     candidates
 }
 
-fn push(path: &Path, text: &str, target: &Path, start: usize, end: usize, relationship: RelationshipType, out: &mut Vec<DependencyLink>) {
-    if path == target || !text.is_char_boundary(start) || !text.is_char_boundary(end) { return; }
-    let line = text[..start].bytes().filter(|b| *b == b'\n').count();
-    let line_start = text[..start].rfind('\n').map_or(0, |i| i + 1);
-    if text[start..end].contains('\n') { return; }
+fn push(path: &Path, text: &str, target: &Path, start: usize, end: usize, relationship: RelationshipType, out: &mut Vec<DependencyLink>) -> Option<exports::Span> {
+    if path == target { return None; }
+    let span = exports::span_in(text, start, end)?;
+    let (line, from, to) = span;
+    let _ = (from, to);
     out.push(DependencyLink {
         evidence: super::LinkEvidence::LocalSyntax,
         relationship, source: path.into(), target: target.into(), label: "file".into(), source_label: None,
         usage: LineSpan { start: line, end: line }, definition: LineSpan { start: 0, end: 0 },
-        name_span: None, source_name_span: Some((line, start - line_start, end - line_start)),
+        name_span: None, source_name_span: Some(span),
+        kind: crate::edges::edge_store::EdgeKind::Direct,
     });
+    Some(span)
 }
 
 fn markdown_links(cx: &Ctx<'_, '_>, out: &mut LocalAnalysis) {
@@ -1146,5 +1190,209 @@ mod ambiguous;
         // Without the folder's files there are no packages to read.
         let alone = OpenFiles::new([(app.as_path(), text.as_str())]);
         assert!(!working_configs(&root, &alone).keys().any(|p| p.ends_with("package.json")));
+    }
+
+    // ---- barrels and re-exports (TASK-94) ----
+
+    use crate::edges::edge_store::EdgeKind;
+
+    /// `(source, target, kind)` of the links of `files` (open) with `closed`
+    /// in the folder, sorted.
+    fn kinds(files: &[(&str, &str)], closed: &[&str]) -> Vec<(String, String, EdgeKind)> {
+        let open = OpenFiles::new(files.iter().map(|(p, t)| (Path::new(p), *t)));
+        let paths: Vec<PathBuf> = closed.iter().map(PathBuf::from).collect();
+        let index = crate::analysis::dependencies::WorkspaceIndex::new(&paths);
+        let open = open.with_index(&index);
+        let mut found: Vec<_> = analyze_with_configs(Path::new("/p"), &open, &ConfigSources::new(), &mut ParseCache::default())
+            .links
+            .into_iter()
+            .map(|l| (l.source.to_str().unwrap().to_owned(), l.target.to_str().unwrap().to_owned(), l.kind))
+            .collect();
+        found.sort_by(|a, b| (&a.0, &a.1).cmp(&(&b.0, &b.1)));
+        found
+    }
+
+    fn k(source: &str, target: &str, kind: EdgeKind) -> (String, String, EdgeKind) {
+        (source.to_owned(), target.to_owned(), kind)
+    }
+
+    const A_TS: (&str, &str) = ("/p/models/A.ts", "export class A {}\n");
+
+    #[test]
+    fn an_import_through_a_barrel_is_a_hop_and_a_shortcut() {
+        let files = [
+            ("/p/app.ts", "import { A } from './models';\n"),
+            ("/p/models/index.ts", "export { A } from './A';\n"),
+            A_TS,
+        ];
+        assert_eq!(
+            kinds(&files, &[]),
+            [
+                k("/p/app.ts", "/p/models/A.ts", EdgeKind::ReExport),
+                k("/p/app.ts", "/p/models/index.ts", EdgeKind::Barrel),
+                k("/p/models/index.ts", "/p/models/A.ts", EdgeKind::Direct),
+            ],
+            "the barrel's own export stays a real import"
+        );
+        // One re-export is enough: no threshold, no file name.
+        let renamed = [("/p/app.ts", "import { A } from './hub';\n"), ("/p/hub.ts", "export { A } from './models/A';\n"), A_TS];
+        assert!(kinds(&renamed, &[]).contains(&k("/p/app.ts", "/p/hub.ts", EdgeKind::Barrel)));
+    }
+
+    #[test]
+    fn chains_of_barrels_are_followed_to_the_definition() {
+        let files = [
+            ("/p/app.ts", "import { A } from './all';\n"),
+            ("/p/all/index.ts", "export * from './models';\n"),
+            ("/p/all/models/index.ts", "export { A } from './A';\n"),
+            ("/p/all/models/A.ts", "export class A {}\n"),
+        ];
+        let found = kinds(&files, &[]);
+        assert!(found.contains(&k("/p/app.ts", "/p/all/index.ts", EdgeKind::Barrel)));
+        assert!(found.contains(&k("/p/app.ts", "/p/all/models/A.ts", EdgeKind::ReExport)), "{found:?}");
+        assert_eq!(found.iter().filter(|(s, _, _)| s == "/p/app.ts").count(), 2, "no link to the barrel in the middle");
+    }
+
+    #[test]
+    fn export_star_cycles_end_and_a_missing_name_gives_no_shortcut() {
+        let files = [
+            ("/p/app.ts", "import { Nope } from './a';\n"),
+            ("/p/a/index.ts", "export * from '../b';\n"),
+            ("/p/b/index.ts", "export * from '../a';\n"),
+        ];
+        let found = kinds(&files, &[]);
+        assert!(found.iter().all(|(_, _, kind)| *kind == EdgeKind::Direct), "{found:?}");
+    }
+
+    #[test]
+    fn namespace_exports_default_and_renamed_names_resolve() {
+        let files = [
+            ("/p/app.ts", "import { ns } from './hub';\nimport D from './hub';\nimport { B as C } from './hub';\n"),
+            ("/p/hub.ts", "export * as ns from './m';\nexport { default } from './d';\nexport { A as B } from './a';\n"),
+            ("/p/m.ts", "export const x = 1;\n"),
+            ("/p/d.ts", "export default 1;\n"),
+            ("/p/a.ts", "export const A = 1;\n"),
+        ];
+        let found = kinds(&files, &[]);
+        for provider in ["/p/m.ts", "/p/d.ts", "/p/a.ts"] {
+            assert!(found.contains(&k("/p/app.ts", provider, EdgeKind::ReExport)), "{provider} in {found:?}");
+        }
+        let hops: Vec<_> = found.iter().filter(|(s, t, _)| s == "/p/app.ts" && t == "/p/hub.ts").collect();
+        assert_eq!(hops.len(), 3, "one link per import statement");
+        assert!(hops.iter().all(|(_, _, kind)| *kind == EdgeKind::Barrel));
+    }
+
+    #[test]
+    fn import_then_export_makes_a_barrel_and_a_name_of_its_own_does_not() {
+        let files = [
+            ("/p/app.ts", "import { A } from './hub';\nimport { Own } from './hub';\nimport { A as Again, Own as Mine } from './hub';\n"),
+            ("/p/hub.ts", "import { A } from './a';\nexport { A };\nexport const Own = 1;\n"),
+            ("/p/a.ts", "export const A = 1;\n"),
+        ];
+        let found = kinds(&files, &[]);
+        assert!(found.contains(&k("/p/app.ts", "/p/a.ts", EdgeKind::ReExport)));
+        let hubs: Vec<_> = found.iter().filter(|(s, t, _)| s == "/p/app.ts" && t == "/p/hub.ts").map(|(_, _, kind)| *kind).collect();
+        // `A` only: a hop. `Own` only: a direct import. Both: a direct import
+        // that also has the shortcut for `A`.
+        assert_eq!(hubs.len(), 3);
+        assert_eq!(hubs.iter().filter(|kind| **kind == EdgeKind::Barrel).count(), 1, "{hubs:?}");
+        assert_eq!(hubs.iter().filter(|kind| **kind == EdgeKind::Direct).count(), 2, "{hubs:?}");
+    }
+
+    #[test]
+    fn a_namespace_import_of_a_barrel_and_a_closed_barrel_stay_direct() {
+        let files = [
+            ("/p/app.ts", "import * as all from './hub';\n"),
+            ("/p/hub.ts", "export { A } from './a';\n"),
+            ("/p/a.ts", "export const A = 1;\n"),
+        ];
+        assert_eq!(
+            kinds(&files, &[]).iter().filter(|(s, _, _)| s == "/p/app.ts").map(|l| l.2).collect::<Vec<_>>(),
+            [EdgeKind::Direct],
+            "a namespace takes the whole file"
+        );
+        // Nobody read the barrel (it is closed), so the chain stops there.
+        let closed = [("/p/app.ts", "import { A } from './hub';\n"), ("/p/a.ts", "export const A = 1;\n")];
+        assert_eq!(kinds(&closed, &["/p/hub.ts"]), [k("/p/app.ts", "/p/hub.ts", EdgeKind::Direct)]);
+    }
+
+    #[test]
+    fn a_python_package_re_exports_what_its_init_imports() {
+        let files = [
+            ("/p/app.py", "from .pkg import Order\nfrom .pkg import helper\n"),
+            ("/p/pkg/__init__.py", "from .models import Order\nfrom .util import helper as helper\n"),
+            ("/p/pkg/models.py", "class Order: pass\n"),
+            ("/p/pkg/util.py", "def helper(): pass\n"),
+        ];
+        let found = kinds(&files, &[]);
+        assert!(found.contains(&k("/p/app.py", "/p/pkg/models.py", EdgeKind::ReExport)), "{found:?}");
+        assert!(found.contains(&k("/p/app.py", "/p/pkg/util.py", EdgeKind::ReExport)), "{found:?}");
+        assert!(found.contains(&k("/p/app.py", "/p/pkg/__init__.py", EdgeKind::Barrel)));
+        // The same `from … import` in a module that is not an __init__ re-exports nothing.
+        let plain = [
+            ("/p/app.py", "from .mod import Order\n"),
+            ("/p/mod.py", "from .models import Order\n"),
+            ("/p/models.py", "class Order: pass\n"),
+        ];
+        assert!(kinds(&plain, &[]).iter().all(|(_, _, kind)| *kind == EdgeKind::Direct));
+    }
+
+    const RUST_LIB: (&str, &str) = ("/p/src/lib.rs", "mod app;\nmod models;\n");
+
+    #[test]
+    fn a_rust_use_through_a_facade_module_is_a_hop_and_a_shortcut() {
+        let files = [
+            RUST_LIB,
+            ("/p/src/app.rs", "use crate::models::Order;\nuse std::fmt;\nuse serde::Serialize;\n"),
+            ("/p/src/models/mod.rs", "mod order;\npub use self::order::Order;\n"),
+            ("/p/src/models/order.rs", "pub struct Order;\n"),
+        ];
+        let found = kinds(&files, &[]);
+        assert!(found.contains(&k("/p/src/app.rs", "/p/src/models/mod.rs", EdgeKind::Barrel)), "{found:?}");
+        assert!(found.contains(&k("/p/src/app.rs", "/p/src/models/order.rs", EdgeKind::ReExport)), "{found:?}");
+        assert!(found.contains(&k("/p/src/models/mod.rs", "/p/src/models/order.rs", EdgeKind::Direct)), "the `mod order;` link");
+        assert_eq!(found.iter().filter(|(s, _, _)| s == "/p/src/app.rs").count(), 2, "std and a dependency draw nothing");
+    }
+
+    #[test]
+    fn rust_globs_lists_and_direct_paths_resolve_through_the_module_tree() {
+        let files = [
+            RUST_LIB,
+            ("/p/src/app.rs", "use crate::models::{Order, Customer};\nuse crate::models::order::Order as Direct;\n"),
+            ("/p/src/models/mod.rs", "mod order;\nmod customer;\npub use order::*;\npub use self::customer::Customer;\n"),
+            ("/p/src/models/order.rs", "pub struct Order;\n"),
+            ("/p/src/models/customer.rs", "pub struct Customer;\n"),
+        ];
+        let found = kinds(&files, &[]);
+        let from_app: Vec<_> = found.iter().filter(|(s, _, _)| s == "/p/src/app.rs").collect();
+        assert!(from_app.contains(&&k("/p/src/app.rs", "/p/src/models/mod.rs", EdgeKind::Barrel)), "{from_app:?}");
+        assert!(from_app.contains(&&k("/p/src/app.rs", "/p/src/models/customer.rs", EdgeKind::ReExport)));
+        // `Order` comes through the glob; the direct `use` of its own module draws nothing.
+        assert!(from_app.iter().any(|l| l.1 == "/p/src/models/order.rs" && l.2 == EdgeKind::ReExport), "{from_app:?}");
+        assert!(from_app.iter().all(|l| l.2 != EdgeKind::Direct), "{from_app:?}");
+    }
+
+    #[test]
+    fn rust_self_super_crate_and_inline_modules_pick_the_right_module() {
+        let files = [
+            ("/p/src/lib.rs", "mod facade;\nmod real;\nmod user;\nmod user2;\n"),
+            ("/p/src/real.rs", "pub struct Thing;\n"),
+            ("/p/src/facade.rs", "pub use crate::real::Thing;\n"),
+            ("/p/src/user.rs", "use super::facade::Thing;\n"),
+            ("/p/src/user2.rs", "mod inner {\n    use super::super::facade::Thing;\n}\n"),
+        ];
+        let found = kinds(&files, &[]);
+        // `crate::` in the facade, `super::` in a file, and two `super::` out of an inline module.
+        for user in ["/p/src/user.rs", "/p/src/user2.rs"] {
+            assert!(found.contains(&k(user, "/p/src/facade.rs", EdgeKind::Barrel)), "{user}: {found:?}");
+            assert!(found.contains(&k(user, "/p/src/real.rs", EdgeKind::ReExport)), "{user}: {found:?}");
+        }
+    }
+
+    #[test]
+    fn a_rust_path_through_a_module_nobody_read_draws_nothing() {
+        // `models` is declared in a lib.rs that is not open: its module is unknown.
+        let files = [("/p/src/app.rs", "use crate::models::Order;\n")];
+        assert!(kinds(&files, &["/p/src/lib.rs", "/p/src/models/mod.rs"]).is_empty());
     }
 }

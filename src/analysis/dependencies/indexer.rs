@@ -462,6 +462,7 @@ impl DependencyIndexer {
                         definition: symbol.definition,
                         name_span,
                         source_name_span,
+                        kind: crate::edges::edge_store::EdgeKind::Direct,
                     });
                 }
             }

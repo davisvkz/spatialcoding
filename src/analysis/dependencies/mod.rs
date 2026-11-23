@@ -5,7 +5,6 @@
 //! A reference in another open file becomes a link from the statement around
 //! it ([`statements`]) to the symbol's definition.
 
-pub mod classify;
 pub mod indexer;
 pub mod local;
 mod statements;
@@ -65,6 +64,11 @@ pub struct DependencyLink {
     pub name_span: Option<(usize, usize, usize)>,
     /// Exact reference name in the source file, in line-relative UTF-8 bytes.
     pub source_name_span: Option<(usize, usize, usize)>,
+    /// `Barrel` for an import that reaches a name through a re-exporting file,
+    /// `ReExport` for the shortcut from the importer to where the name is
+    /// really defined, `Direct` for the rest. Decided by the local analysis
+    /// (`local::exports`), never from the text of a line.
+    pub kind: crate::edges::edge_store::EdgeKind,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

@@ -514,7 +514,6 @@ pub fn invalidate_git_comparison(state: &mut AppState) {
 /// Classifies each link as Direct / ReExport / Barrel for the v2-aligned
 /// Dependency Edges panel.
 fn apply_dependency_edges(state: &mut AppState) {
-    use crate::analysis::dependencies::classify::{classify_link, promote_barrels};
     use crate::edges::edge_store::NameSpan;
 
     // Explicit and polled refreshes both publish the latest indexer state.
@@ -525,22 +524,13 @@ fn apply_dependency_edges(state: &mut AppState) {
 
     let mut links = state.deps.links(&open);
     let mut changes: Vec<_> = links.iter().map(|l| state.git_comparison.diff.as_ref().map(|d| d.state_for(l)).unwrap_or_default()).collect();
-    // Per-link classification, then a barrel promotion pass.
-    let mut kinds: Vec<_> = links
-        .iter()
-        .map(|link| match open.get(&link.source) {
-            Some((_, text)) => classify_link(link, text),
-            None => crate::edges::edge_store::EdgeKind::Direct,
-        })
-        .collect();
-    let sources: Vec<&Path> = links.iter().map(|l| l.source.as_path()).collect();
-    kinds = promote_barrels(&kinds, &sources);
-    // Historical links retain historical classification and must not inflate
-    // the current file's re-export count into a barrel.
+    // The kind of each link was decided by the local analysis; links that no
+    // longer exist (a Git comparison) keep the one they had in the baseline.
+    let mut kinds: Vec<_> = links.iter().map(|link| link.kind).collect();
     if let Some(diff) = &state.git_comparison.diff {
         changes.extend(diff.deleted.iter().map(|_| crate::edges::edge_store::EdgeChange::Deleted));
+        kinds.extend(diff.deleted.iter().map(|link| link.kind));
         links.extend(diff.deleted.iter().cloned());
-        kinds.extend(diff.deleted_kinds.iter().copied());
     }
 
     state.edge_store.clear();

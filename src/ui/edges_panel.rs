@@ -33,12 +33,14 @@ pub fn progress_line(p: &ServerProgress) -> (String, bool) {
 
 /// v2's "Barrel and Re-export" info text, adapted to the languages this
 /// app classifies.
-const BARREL_HELP: &str = "Barrel files and Rust facade modules re-export symbols so they can be \
-imported from one place. Barrel edges trace that intermediate public binding. Re-export edges \
-connect the consumer directly to the original source.\n\nJavaScript and TypeScript use barrel \
-index files, both inline (export { x } from './x') and import-then-export. Rust uses pub use in \
-mod.rs, Python re-exports in __init__.py. A file counts as a barrel with at least 4 re-exports. \
-Facade hops do not affect layout or cycle detection.";
+const BARREL_HELP: &str = "A barrel (or a Rust facade module, or a Python __init__.py) re-exports names \
+so they can be imported from one place. An import that reaches a name through one gets two edges: a \
+barrel edge from the importer to the re-exporting file, and a re-export edge straight from the \
+importer to the file that defines the name.\n\nWhat counts is what the files say, not their name \
+or how many re-exports they have: export { x } from, export *, export * as ns and import-then-export \
+in JavaScript and TypeScript, pub use (with globs and lists) in Rust, and the imports of an \
+__init__.py in Python. Chains of re-exports are followed to the definition, and a file that is not \
+open ends the chain. Barrel edges do not affect layout; re-export edges do.";
 
 pub fn draw_edges_panel(ui: &mut egui::Ui, state: &mut AppState) {
     let comparison_ready = state.git_comparison.is_ready();

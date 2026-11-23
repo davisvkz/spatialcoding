@@ -57,13 +57,15 @@ struct Placement {
     sizes: HashMap<Group, Vec2>,
 }
 
-/// Whether an edge takes part in the layout. Barrel and re-export hops are
-/// routing: the layout follows the direct dependency on the provider, or a
-/// barrel would close false cycles through its crate or package root. Edges
-/// that exist only in a Git baseline are not dependencies of the current
-/// tree, so comparing against a revision must not move nodes.
+/// Whether an edge takes part in the layout. An import through a barrel is
+/// two links: the hop to the barrel (`Barrel`) and the shortcut to the file
+/// that defines the name (`ReExport`). The shortcut is the real dependency;
+/// counting the hop would push the provider one column further and, for a
+/// barrel that re-exports its importer, close a cycle. Edges that exist only in
+/// a Git baseline are not dependencies of the current tree, so comparing
+/// against a revision must not move nodes (decisions 108 and 119).
 fn feeds_layout(edge: &Edge) -> bool {
-    edge.kind == EdgeKind::Direct && edge.change != EdgeChange::Deleted
+    edge.kind != EdgeKind::Barrel && edge.change != EdgeChange::Deleted
 }
 
 pub fn apply_layout(nodes: &mut NodeStore, edges: &EdgeStore, settings: &LayoutSettings) {
@@ -665,25 +667,26 @@ mod tests {
         assert_eq!(pos(&nodes, ids[1]).x, COLUMN);
     }
 
-    /// A barrel hop `a -> index -> b` plus the shortcut `a -> b`: only the
-    /// shortcut is a dependency. Counting the hop would push `b` to a third
-    /// column, and a barrel that re-exports its importer would close a cycle.
+    /// An import through a barrel: the hop `a -> index` (Barrel), the
+    /// barrel's own export `index -> b` and the shortcut `a -> b` (ReExport).
+    /// The hop must not rank `index` after `a`, nor push `b` a column further.
     #[test]
-    fn barrel_and_reexport_edges_do_not_move_nodes() {
+    fn the_barrel_hop_does_not_move_nodes_but_the_shortcut_counts() {
         let (mut nodes, ids) = store(3);
-        let mut direct = EdgeStore::default();
-        direct.add(ids[0], ids[2], None);
-        apply_layout(&mut nodes, &direct, &settings(SortMode::Asc, VAlign::Top));
+        let (importer, barrel, provider) = (ids[0], ids[1], ids[2]);
+        let mut real = EdgeStore::default();
+        real.add(barrel, provider, None);
+        real.add_full(importer, provider, None, None, None, None, None, None, EdgeKind::ReExport);
+        apply_layout(&mut nodes, &real, &settings(SortMode::Asc, VAlign::Top));
         let expected: Vec<_> = ids.iter().map(|&id| pos(&nodes, id)).collect();
+        assert_eq!(pos(&nodes, importer).x, pos(&nodes, barrel).x, "both import the provider");
+        assert!(pos(&nodes, provider).x > pos(&nodes, importer).x, "the shortcut ranks the provider after its importer");
 
-        let mut edges = EdgeStore::default();
-        edges.add(ids[0], ids[2], None);
-        for (source, target, kind) in
-            [(ids[0], ids[1], EdgeKind::Barrel), (ids[1], ids[2], EdgeKind::ReExport)]
-        {
-            edges.add_full(source, target, None, None, None, None, None, None, kind);
-        }
-        apply_layout(&mut nodes, &edges, &settings(SortMode::Asc, VAlign::Top));
+        let mut with_hop = EdgeStore::default();
+        with_hop.add(barrel, provider, None);
+        with_hop.add_full(importer, provider, None, None, None, None, None, None, EdgeKind::ReExport);
+        with_hop.add_full(importer, barrel, None, None, None, None, None, None, EdgeKind::Barrel);
+        apply_layout(&mut nodes, &with_hop, &settings(SortMode::Asc, VAlign::Top));
 
         let actual: Vec<_> = ids.iter().map(|&id| pos(&nodes, id)).collect();
         assert_eq!(actual, expected);

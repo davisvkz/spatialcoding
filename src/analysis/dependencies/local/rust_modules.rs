@@ -8,6 +8,7 @@ use super::{
     candidates_in, normalize, push, ImportIssue, ImportIssueReason, LocalAnalysis, OpenFiles, RelationCandidates,
     RelationshipType,
 };
+use super::exports::ModuleDecl;
 use crate::analysis::cst::CstLanguage;
 
 /// Why a `mod` declaration gave no link; shown as an [`ImportIssueReason`].
@@ -93,8 +94,9 @@ pub(super) fn analyze(
     let Some(dir) = ModuleDirectory::of_file(path) else {
         return;
     };
-    let mut scopes = vec![(source, Ok(dir))];
-    while let Some((scope, directory)) = scopes.pop() {
+    // Each scope with the names of the inline modules that enclose it.
+    let mut scopes = vec![(source, Ok(dir), Vec::<String>::new())];
+    while let Some((scope, directory, inline)) = scopes.pop() {
         let mut cursor = scope.walk();
         let directory = if scope
             .named_children(&mut cursor)
@@ -117,15 +119,22 @@ pub(super) fn analyze(
             let raw_name = node_text(name, text);
             let module = raw_name.strip_prefix("r#").unwrap_or(raw_name);
             let context = module_context(&directory, item, text);
+            let mut names = inline.clone();
+            names.push(module.to_owned());
             if let Some(body) = item.child_by_field_name("body") {
+                // An inline module is a module of this very file.
+                out.facts.modules.push(ModuleDecl { names: names.clone(), declared_in: path.to_path_buf(), target: path.to_path_buf() });
                 scopes.push((
                     body,
                     context.and_then(|(dir, value)| dir.inline(root, module, value)),
+                    names,
                 ));
             } else if !item.has_error() {
                 match context.and_then(|(dir, value)| module_target(root, open, dir, module, value))
                 {
-                    Ok(target) => push(
+                    Ok(target) => {
+                        out.facts.modules.push(ModuleDecl { names, declared_in: path.to_path_buf(), target: target.clone() });
+                        push(
                         path,
                         text,
                         &target,
@@ -133,7 +142,8 @@ pub(super) fn analyze(
                         name.end_byte(),
                         RelationshipType::Imports,
                         &mut out.links,
-                    ),
+                    );
+                    }
                     Err(reason) => out.issues.report(ImportIssue {
                         path: path.strip_prefix(root).unwrap_or(path).to_path_buf(),
                         line: name.start_position().row + 1,
