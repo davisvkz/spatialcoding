@@ -361,10 +361,14 @@ pub fn folder_view(state: &AppState) -> FolderView {
         );
     }
     if folders.reveal_backwards {
-        // An edge whose source sits right of its target runs backwards.
+        // The canvas highlight, the Backwards scope and MCP use the same rule.
+        let (width, font) = (state.settings.node_width, state.settings.font_size);
         for edge in state.edge_store.all_edges() {
             if let (Some(src), Some(tgt)) = (store.get_file(edge.source_node), store.get_file(edge.target_node))
-                && src.position.x > tgt.position.x
+                && crate::edges::geometry::is_backwards(
+                    src.world_rect(width, font),
+                    tgt.world_rect(width, font),
+                )
             {
                 revealed_files.insert(src.id);
                 revealed_files.insert(tgt.id);
@@ -541,6 +545,26 @@ mod tests {
         FolderAction::ExpandAll.run(&mut state);
         assert!(collapsed(&state).is_empty());
         assert!(state.layout_dirty);
+    }
+
+    /// An importer that starts left of its target but still overlaps it
+    /// ends right of where the target starts: a backwards edge on the
+    /// canvas, though the importer's x is smaller.
+    #[test]
+    fn reveal_backwards_matches_the_canvas_rule_for_overlapping_nodes() {
+        let (_dir, mut state) = state();
+        let width = state.settings.node_width;
+        let ids = state.node_store.all_file_ids();
+        let (importer, target, other) = (ids[0], ids[1], ids[2]);
+        for (id, x) in [(importer, 0.0), (target, width / 2.0), (other, width * 3.0)] {
+            state.node_store.get_file_mut(id).unwrap().position = egui::pos2(x, 0.0);
+        }
+        state.edge_store.add(importer, target, None);
+        state.settings.folders.reveal_backwards = true;
+
+        let revealed = folder_view(&state).revealed_files;
+
+        assert_eq!(revealed, HashSet::from([importer, target]));
     }
 
     #[test]
