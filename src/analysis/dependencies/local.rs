@@ -6,7 +6,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::hash::{Hash, Hasher};
 use std::io::Read;
 use std::path::{Component, Path, PathBuf};
-use std::sync::{Arc, LazyLock};
+use std::sync::Arc;
 use tree_sitter::{Node, Tree};
 
 use super::{DependencyLink, LineSpan, OpenFiles};
@@ -14,25 +14,35 @@ use crate::analysis::cst::{CstLanguage, parse_tree};
 use crate::edges::style::RelationshipType;
 
 mod issues;
+mod js_config;
 mod rust_modules;
 pub(crate) use issues::{ImportIssue, ImportIssueReason, ImportIssues};
+pub(crate) use js_config::is_config_name;
+use js_config::{Package, TsPaths, TsTarget};
 
 pub(crate) type ConfigSources = BTreeMap<PathBuf, String>;
 const MAX_CONFIG_BYTES: usize = 256 * 1024;
 
-/// Candidate project configs, including absent paths that may exist in Git.
+/// Candidate project configs, including absent paths that may exist in Git:
+/// for each JS or TS file, the tsconfig, jsconfig and Vite config of every
+/// folder above it; for each Go file, the go.mod.
 pub(crate) fn config_paths<'a>(
     root: &'a Path,
     paths: impl IntoIterator<Item = &'a Path>,
 ) -> BTreeSet<PathBuf> {
     paths.into_iter()
         .filter_map(|p| {
-            let config = match CstLanguage::from_path(p)? {
-                CstLanguage::TypeScript | CstLanguage::Tsx | CstLanguage::JavaScript => "tsconfig.json",
-                CstLanguage::Go => "go.mod",
+            let names: Vec<&str> = match CstLanguage::from_path(p)? {
+                CstLanguage::TypeScript | CstLanguage::Tsx | CstLanguage::JavaScript => {
+                    js_config::TS_CONFIG_NAMES.iter().chain(&js_config::VITE_CONFIG_NAMES).copied().collect()
+                }
+                CstLanguage::Go => vec!["go.mod"],
                 _ => return None,
             };
-            Some(ancestors(root, p).map(move |dir| dir.join(config)))
+            let found: Vec<PathBuf> = ancestors(root, p)
+                .flat_map(|dir| names.iter().map(|name| dir.join(name)).collect::<Vec<_>>())
+                .collect();
+            Some(found)
         })
         .flatten()
         .collect()
@@ -43,12 +53,14 @@ fn ancestors<'a>(root: &'a Path, path: &'a Path) -> impl Iterator<Item = &'a Pat
 }
 
 /// Read closed configs, but prefer the snapshot for configs on the canvas.
+/// Besides the candidates of [`config_paths`], the local configs they extend
+/// (up to a few hops) and the `package.json` of the folder's packages are read.
 pub(crate) fn working_configs(root: &Path, open: &OpenFiles<'_>) -> ConfigSources {
     let Ok(canonical_root) = root.canonicalize() else { return ConfigSources::new() };
-    config_paths(root, open.iter().map(|(p, _)| p)).into_iter().filter_map(|path| {
+    let read = |path: &Path| -> Option<String> {
         let actual = path.canonicalize().ok()?;
         if !actual.starts_with(&canonical_root) || !actual.is_file() { return None; }
-        let text = if let Some((_, text)) = open.get(&path) {
+        let text = if let Some((_, text)) = open.get(path) {
             text.to_owned()
         } else {
             let mut text = String::new();
@@ -56,8 +68,25 @@ pub(crate) fn working_configs(root: &Path, open: &OpenFiles<'_>) -> ConfigSource
                 .read_to_string(&mut text).ok()?;
             text
         };
-        (text.len() <= MAX_CONFIG_BYTES).then_some((path, text))
-    }).collect()
+        (text.len() <= MAX_CONFIG_BYTES).then_some(text)
+    };
+    let mut configs = ConfigSources::new();
+    let mut queue: Vec<(PathBuf, usize)> =
+        config_paths(root, open.iter().map(|(p, _)| p)).into_iter().map(|p| (p, 0)).collect();
+    while let Some((path, depth)) = queue.pop() {
+        if configs.contains_key(&path) { continue; }
+        let Some(text) = read(&path) else { continue };
+        // A file reached through `extends` can have any name and extend another.
+        let is_ts = depth > 0 || path.file_name().and_then(|n| n.to_str()).is_some_and(js_config::is_ts_config_name);
+        if is_ts && depth < js_config::MAX_EXTENDS_DEPTH {
+            queue.extend(js_config::extended_paths(root, &path, &text).into_iter().map(|p| (p, depth + 1)));
+        }
+        configs.insert(path, text);
+    }
+    for path in open.indexed_named("package.json").into_iter().take(js_config::MAX_PACKAGES) {
+        if let Some(text) = read(&path) { configs.insert(path, text); }
+    }
+    configs
 }
 
 pub fn links(root: &Path, open: &OpenFiles<'_>) -> Vec<DependencyLink> {
@@ -134,10 +163,16 @@ fn analyze_with_configs(
     configs: &ConfigSources,
     cache: &mut ParseCache,
 ) -> LocalAnalysis {
-    let aliases: BTreeMap<_, _> = configs.iter()
-        .filter(|(path, _)| path.file_name().is_some_and(|name| name == "tsconfig.json"))
-        .map(|(path, text)| (path, TsPaths::parse(path, text)))
+    let name_of = |path: &Path| path.file_name().and_then(|n| n.to_str()).unwrap_or_default().to_owned();
+    let aliases: BTreeMap<_, _> = configs.keys()
+        .filter(|path| js_config::TS_CONFIG_NAMES.contains(&name_of(path).as_str()))
+        .map(|path| (path, TsPaths::parse(root, path, configs)))
         .collect();
+    let vite: BTreeMap<_, _> = configs.iter()
+        .filter(|(path, _)| js_config::VITE_CONFIG_NAMES.contains(&name_of(path).as_str()))
+        .map(|(path, text)| (path, js_config::vite_aliases(path, text)))
+        .collect();
+    let packages = js_config::packages(configs);
     let files: Vec<(&Path, &str)> = open.iter().filter(|(p, _)| p.starts_with(root)).collect();
     let trees = cache.trees(&files);
     // Each file is analysed on its own; only the targets it resolves to need
@@ -148,7 +183,10 @@ fn analyze_with_configs(
         .zip(trees.par_iter())
         .map(|(&(path, text), parsed)| {
             let mut result = LocalAnalysis::default();
-            let nearest_tsconfig = ancestors(root, path).find_map(|dir| aliases.get(&dir.join("tsconfig.json")));
+            let nearest_tsconfig = ancestors(root, path)
+                .find_map(|dir| js_config::TS_CONFIG_NAMES.iter().find_map(|name| aliases.get(&dir.join(name))));
+            let nearest_vite = ancestors(root, path)
+                .find_map(|dir| js_config::VITE_CONFIG_NAMES.iter().find_map(|name| vite.get(&dir.join(name))));
             let mut cx = Ctx {
                 root,
                 open,
@@ -159,6 +197,8 @@ fn analyze_with_configs(
                     paths: nearest_tsconfig.and_then(Option::as_ref),
                     tsconfig_unreadable: nearest_tsconfig.is_some_and(Option::is_none),
                     go_mod: None,
+                    vite: nearest_vite.map_or(&[], Vec::as_slice),
+                    packages: &packages,
                 },
             };
             if let Some((language, tree)) = parsed {
@@ -226,6 +266,10 @@ struct FileConfig<'a> {
     tsconfig_unreadable: bool,
     /// The nearest go.mod: its path and text.
     go_mod: Option<(&'a Path, &'a str)>,
+    /// `resolve.alias` of the nearest Vite config, longest alias first.
+    vite: &'a [(String, PathBuf)],
+    /// The packages of the folder, by their `package.json`.
+    packages: &'a [Package],
 }
 
 impl Ctx<'_, '_> {
@@ -393,79 +437,6 @@ fn candidates_in(root: &Path, open: &OpenFiles<'_>, candidates: impl IntoIterato
     found.map_or(RelationCandidates::None, RelationCandidates::One)
 }
 
-#[derive(serde::Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct TsCompilerOptions {
-    base_url: Option<PathBuf>,
-    #[serde(default)]
-    paths: BTreeMap<String, Vec<String>>,
-}
-
-struct TsPaths {
-    base: PathBuf,
-    paths: BTreeMap<String, Vec<String>>,
-}
-
-impl TsPaths {
-    fn parse(path: &Path, text: &str) -> Option<Self> {
-        if text.len() > MAX_CONFIG_BYTES { return None; }
-        // Preserve strings (including URL-like text) while removing JSONC
-        // comments and trailing commas. The result is still validated as JSON.
-        static COMMENTS: LazyLock<regex::Regex> = LazyLock::new(|| {
-            regex::Regex::new(r#"("(?:[^"\\]|\\.)*")|(?s:/\*.*?\*/)|//[^\r\n]*"#).unwrap()
-        });
-        static TRAILING: LazyLock<regex::Regex> = LazyLock::new(|| {
-            regex::Regex::new(r#"("(?:[^"\\]|\\.)*")|,\s*([}\]])"#).unwrap()
-        });
-        #[derive(serde::Deserialize)]
-        #[serde(rename_all = "camelCase")]
-        struct Config {
-            compiler_options: TsCompilerOptions,
-        }
-        let clean = COMMENTS.replace_all(text.trim_start_matches('\u{feff}'), "$1 ");
-        let clean = TRAILING.replace_all(&clean, "${1}${2}");
-        let options = serde_json::from_str::<Config>(&clean).ok()?.compiler_options;
-        let base = options.base_url.as_deref().unwrap_or(Path::new("."));
-        if !base.is_relative() { return None; }
-        Some(Self { base: path.parent()?.join(base), paths: options.paths })
-    }
-
-    fn target(&self, value: &str) -> TsTarget {
-        let (targets, capture) = if let Some(targets) = self.paths.get(value) {
-            (targets, "")
-        } else {
-            let Some((_, targets, capture)) = self.paths.iter().filter_map(|(key, targets)| {
-                let (prefix, suffix) = key.split_once('*')?;
-                if suffix.contains('*') { return None; }
-                let capture = value.strip_prefix(prefix)?.strip_suffix(suffix)?;
-                Some((prefix.len(), targets, capture))
-            }).max_by_key(|(prefix, _, _)| *prefix) else { return TsTarget::NoMatch };
-            (targets, capture)
-        };
-        // Ordered fallback lists would require knowing whether each target
-        // exists even when it isn't on the canvas or in this Git snapshot.
-        let [target] = targets.as_slice() else { return TsTarget::Several };
-        let target = target.replacen('*', capture, 1);
-        let target = Path::new(&target);
-        if target.is_relative() && !target.to_string_lossy().contains(['*', ':', '\\', '%']) {
-            TsTarget::Path(self.base.join(target))
-        } else {
-            TsTarget::Unsupported
-        }
-    }
-}
-
-/// What the `paths` of a tsconfig say about an import.
-enum TsTarget {
-    /// No key matches: a package, or a path the config does not know.
-    NoMatch,
-    /// The key lists several fallbacks, which need the disk to pick from.
-    Several,
-    /// The target is absolute or has a form that is not followed.
-    Unsupported,
-    Path(PathBuf),
-}
-
 fn add_js_import(cx: &Ctx<'_, '_>, value: &str, offset: usize, out: &mut LocalAnalysis) {
     if value.starts_with('.') {
         return add_relative(cx, value, offset, true, out);
@@ -474,20 +445,43 @@ fn add_js_import(cx: &Ctx<'_, '_>, value: &str, offset: usize, out: &mut LocalAn
     if value.contains([':', '?', '\\', '%', '#']) || value.starts_with('/') {
         return cx.report(out, offset, value, ImportIssueReason::Unsupported);
     }
-    let base = match cx.config.paths.map(|paths| paths.target(value)) {
-        // A package, unless an alias the config could not give us.
-        None | Some(TsTarget::NoMatch) if cx.config.tsconfig_unreadable => {
-            return cx.report(out, offset, value, ImportIssueReason::MissingContext);
-        }
-        None | Some(TsTarget::NoMatch) => return cx.report(out, offset, value, ImportIssueReason::External),
-        Some(TsTarget::Several) => return cx.report(out, offset, value, ImportIssueReason::MissingContext),
+    // In the order a bundler tries them: the compiler's `paths`, the
+    // bundler's own aliases, then the packages of this folder.
+    match cx.config.paths.map(|paths| paths.target(value)) {
+        Some(TsTarget::Paths(bases)) => return resolve_in_order(cx, value, offset, &bases, out),
         Some(TsTarget::Unsupported) => return cx.report(out, offset, value, ImportIssueReason::Unsupported),
-        Some(TsTarget::Path(base)) => base,
-    };
-    match resolve(cx.root, cx.open, module_candidates(&base)) {
-        Ok(target) => push(cx.path, cx.text, &target, offset, offset + value.len(), RelationshipType::Imports, &mut out.links),
-        Err(reason) => cx.report(out, offset, value, reason),
+        Some(TsTarget::NoMatch) | None => {}
     }
+    if let Some(base) = js_config::vite_base(cx.config.vite, value) {
+        return resolve_in_order(cx, value, offset, &[base], out);
+    }
+    match js_config::package_base(cx.config.packages, value) {
+        Some(Ok(base)) => return resolve_in_order(cx, value, offset, &[base], out),
+        Some(Err(())) => return cx.report(out, offset, value, ImportIssueReason::NotFound),
+        None => {}
+    }
+    // A package, unless an alias the config could not give us.
+    let reason = if cx.config.tsconfig_unreadable { ImportIssueReason::MissingContext } else { ImportIssueReason::External };
+    cx.report(out, offset, value, reason);
+}
+
+/// Resolves an import to the first of `bases` that exists. With a single
+/// place, nothing found is a missing file. With several, "not there" must be
+/// known to move to the next one, which needs the folder's file list.
+fn resolve_in_order(cx: &Ctx<'_, '_>, value: &str, offset: usize, bases: &[PathBuf], out: &mut LocalAnalysis) {
+    for base in bases {
+        match candidates_in(cx.root, cx.open, module_candidates(base)) {
+            RelationCandidates::One(target) => {
+                return push(cx.path, cx.text, &target, offset, offset + value.len(), RelationshipType::Imports, &mut out.links);
+            }
+            RelationCandidates::Many => return cx.report(out, offset, value, ImportIssueReason::Ambiguous),
+            RelationCandidates::None if bases.len() > 1 && !cx.open.has_index() => {
+                return cx.report(out, offset, value, ImportIssueReason::MissingContext);
+            }
+            RelationCandidates::None => {}
+        }
+    }
+    cx.report(out, offset, value, ImportIssueReason::NotFound);
 }
 
 /// A relative path in code (`module`) or in a document. Only code reports
@@ -868,7 +862,17 @@ mod ambiguous;
     fn config_paths_name_the_go_mod_above_a_go_file() {
         let paths = config_paths(Path::new("/p"), [Path::new("/p/cmd/main.go"), Path::new("/p/web/a.ts"), Path::new("/p/x.py")]);
         let names: Vec<&str> = paths.iter().map(|p| p.to_str().unwrap()).collect();
-        assert_eq!(names, ["/p/cmd/go.mod", "/p/go.mod", "/p/tsconfig.json", "/p/web/tsconfig.json"], "every folder from the file up to the root");
+        assert_eq!(
+            names,
+            [
+                "/p/cmd/go.mod", "/p/go.mod",
+                "/p/jsconfig.json", "/p/tsconfig.json",
+                "/p/vite.config.cjs", "/p/vite.config.js", "/p/vite.config.mjs", "/p/vite.config.ts",
+                "/p/web/jsconfig.json", "/p/web/tsconfig.json",
+                "/p/web/vite.config.cjs", "/p/web/vite.config.js", "/p/web/vite.config.mjs", "/p/web/vite.config.ts",
+            ],
+            "every folder from the file up to the root: go.mod for Go, the compiler and Vite configs for JS and TS"
+        );
     }
 
     // ---- why an import gave no link (TASK-92) ----
@@ -928,8 +932,8 @@ mod ambiguous;
         assert_eq!(external, 1, "lodash matches no alias");
         assert_eq!(
             listed,
-            vec![row("app.ts", 2, "@/gone", Why::NotFound), row("app.ts", 4, "multi/x", Why::MissingContext)],
-            "a key with several fallbacks needs the disk to pick"
+            vec![row("app.ts", 2, "@/gone", Why::NotFound), row("app.ts", 4, "multi/x", Why::NotFound)],
+            "both fallbacks are known not to exist, as the folder's files are known"
         );
 
         // A tsconfig that could not be read might hold the alias of a bare import.
@@ -1010,5 +1014,137 @@ mod ambiguous;
         sums.external();
         sums.external();
         assert_eq!((sums.count(Why::External), sums.unresolved(), sums.items().len()), (2, 0, 0), "packages are not listed");
+    }
+
+    // ---- project configuration (TASK-98) ----
+
+    fn ts_links(files: &[(&str, &str)], closed: &[&str], configs: &[(&str, &str)]) -> Vec<(String, String)> {
+        let configs: ConfigSources = configs.iter().map(|(p, t)| (PathBuf::from(p), (*t).to_owned())).collect();
+        let open = OpenFiles::new(files.iter().map(|(p, t)| (Path::new(p), *t)));
+        let paths: Vec<PathBuf> = closed.iter().map(PathBuf::from).collect();
+        let index = crate::analysis::dependencies::WorkspaceIndex::new(&paths);
+        let open = open.with_index(&index);
+        analyze_with_configs(Path::new("/p"), &open, &configs, &mut ParseCache::default())
+            .links
+            .into_iter()
+            .map(|l| (l.source.to_str().unwrap().to_owned(), l.target.to_str().unwrap().to_owned()))
+            .collect()
+    }
+
+    fn link(source: &str, target: &str) -> (String, String) {
+        (source.to_owned(), target.to_owned())
+    }
+
+    #[test]
+    fn the_first_existing_target_of_a_paths_key_wins() {
+        let config = [("/p/tsconfig.json", r#"{"compilerOptions": {"paths": {"@/*": ["gen/*", "src/*"]}}}"#)];
+        let app = [("/p/app.ts", "import '@/a';\n")];
+        // Only the second exists: the first is known to be absent.
+        assert_eq!(ts_links(&app, &["/p/src/a.ts"], &config), [link("/p/app.ts", "/p/src/a.ts")]);
+        // Both exist: the first one is the target.
+        assert_eq!(ts_links(&app, &["/p/gen/a.ts", "/p/src/a.ts"], &config), [link("/p/app.ts", "/p/gen/a.ts")]);
+        // Without the folder's files an absent target cannot be told from a closed one.
+        let open = OpenFiles::new([(Path::new("/p/app.ts"), "import '@/a';\n")]);
+        let configs: ConfigSources = config.iter().map(|(p, t)| (PathBuf::from(p), t.to_string())).collect();
+        let issues = analyze_with_configs(Path::new("/p"), &open, &configs, &mut ParseCache::default()).issues;
+        assert_eq!(issues.count(Why::MissingContext), 1);
+    }
+
+    #[test]
+    fn jsconfig_and_extends_resolve_aliases_and_the_nearest_config_wins() {
+        let configs = [
+            ("/p/tsconfig.base.json", r#"{"compilerOptions": {"baseUrl": ".", "paths": {"@/*": ["src/*"]}}}"#),
+            ("/p/apps/web/tsconfig.json", r#"{"extends": "../../tsconfig.base"}"#),
+            ("/p/apps/old/jsconfig.json", r#"{"compilerOptions": {"paths": {"~/*": ["lib/*"]}}}"#),
+        ];
+        let web = [("/p/apps/web/page.ts", "import '@/a';\n")];
+        assert_eq!(ts_links(&web, &["/p/src/a.ts"], &configs), [link("/p/apps/web/page.ts", "/p/src/a.ts")]);
+        let old = [("/p/apps/old/page.js", "import '~/b';\n")];
+        assert_eq!(ts_links(&old, &["/p/apps/old/lib/b.js"], &configs), [link("/p/apps/old/page.js", "/p/apps/old/lib/b.js")]);
+        // A tsconfig beats a jsconfig of the same folder.
+        let both = [
+            ("/p/apps/both/tsconfig.json", r#"{"compilerOptions": {"paths": {"@/*": ["ts/*"]}}}"#),
+            ("/p/apps/both/jsconfig.json", r#"{"compilerOptions": {"paths": {"@/*": ["js/*"]}}}"#),
+        ];
+        let page = [("/p/apps/both/p.ts", "import '@/x';\n")];
+        assert_eq!(ts_links(&page, &["/p/apps/both/ts/x.ts", "/p/apps/both/js/x.ts"], &both), [link("/p/apps/both/p.ts", "/p/apps/both/ts/x.ts")]);
+    }
+
+    #[test]
+    fn workspace_packages_resolve_to_their_source() {
+        let configs = [
+            ("/p/packages/ui/package.json", r#"{"name": "@acme/ui", "exports": {".": "./src/index.ts", "./*": "./src/*.ts"}}"#),
+            ("/p/packages/dist-only/package.json", r#"{"name": "built", "exports": {".": "./dist/index.js"}}"#),
+        ];
+        let app = ("/p/apps/web/app.ts", "import '@acme/ui';\nimport '@acme/ui/button';\nimport 'built';\nimport 'react';\n");
+        let closed = ["/p/packages/ui/src/index.ts", "/p/packages/ui/src/button.ts"];
+        assert_eq!(
+            ts_links(&[app], &closed, &configs),
+            [link("/p/apps/web/app.ts", "/p/packages/ui/src/index.ts"), link("/p/apps/web/app.ts", "/p/packages/ui/src/button.ts")]
+        );
+        let configs_map: ConfigSources = configs.iter().map(|(p, t)| (PathBuf::from(p), t.to_string())).collect();
+        let open = OpenFiles::new([(Path::new(app.0), app.1)]);
+        let paths: Vec<PathBuf> = closed.iter().map(PathBuf::from).collect();
+        let index = crate::analysis::dependencies::WorkspaceIndex::new(&paths);
+        let issues = analyze_with_configs(Path::new("/p"), &open.with_index(&index), &configs_map, &mut ParseCache::default()).issues;
+        assert_eq!(issues.count(Why::External), 1, "react is a package that is not in the folder");
+        assert_eq!(issues.items().iter().map(|i| (i.specifier.as_str(), i.reason)).collect::<Vec<_>>(), [("built", Why::NotFound)], "its dist was never built");
+    }
+
+    #[test]
+    fn vite_aliases_resolve_imports_after_the_compilers_paths() {
+        let configs = [
+            ("/p/web/vite.config.ts", "export default { resolve: { alias: { '@': path.resolve(__dirname, 'src'), '~ui': path.resolve(__dirname, 'ui') } } };"),
+            ("/p/web/tsconfig.json", r#"{"compilerOptions": {"paths": {"~ui/*": ["compiler/*"]}}}"#),
+        ];
+        let app = [("/p/web/app.ts", "import '@/a';\nimport '~ui/b';\n")];
+        let closed = ["/p/web/src/a.ts", "/p/web/compiler/b.ts", "/p/web/ui/b.ts"];
+        assert_eq!(
+            ts_links(&app, &closed, &configs),
+            [link("/p/web/app.ts", "/p/web/src/a.ts"), link("/p/web/app.ts", "/p/web/compiler/b.ts")],
+            "paths wins over the bundler's alias for the same import"
+        );
+    }
+
+    #[test]
+    fn working_configs_reads_extended_files_and_workspace_packages_from_disk() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        let write = |rel: &str, text: &str| {
+            let path = root.join(rel);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(&path, text).unwrap();
+            path
+        };
+        write("tsconfig.base.json", r#"{"compilerOptions": {"paths": {"@/*": ["src/*"]}}}"#);
+        write("configs/strict.json", r#"{"extends": "../tsconfig.base.json"}"#);
+        write("apps/web/tsconfig.json", r#"{"extends": "../../configs/strict"}"#);
+        write("packages/ui/package.json", r#"{"name": "@acme/ui", "main": "src/index.ts"}"#);
+        write("apps/web/package.json", r#"{"name": "web"}"#);
+        write("apps/web/src/app.ts", "import '@/a';\nimport '@acme/ui';\n");
+        write("src/a.ts", "export {};\n");
+        write("packages/ui/src/index.ts", "export {};\n");
+        let app = root.join("apps/web/src/app.ts");
+        let text = std::fs::read_to_string(&app).unwrap();
+        let listed: Vec<PathBuf> = ["src/a.ts", "packages/ui/src/index.ts", "packages/ui/package.json", "apps/web/package.json"]
+            .iter()
+            .map(|p| root.join(p))
+            .collect();
+        let index = crate::analysis::dependencies::WorkspaceIndex::new(&listed);
+        let open = OpenFiles::new([(app.as_path(), text.as_str())]).with_index(&index);
+
+        let configs = working_configs(&root, &open);
+        let keys: Vec<&str> = configs.keys().map(|p| p.strip_prefix(&root).unwrap().to_str().unwrap()).collect();
+        for expected in ["apps/web/tsconfig.json", "configs/strict.json", "tsconfig.base.json", "packages/ui/package.json", "apps/web/package.json"] {
+            assert!(keys.contains(&expected), "{expected} in {keys:?}");
+        }
+        // And what that reading is for: the imports resolve without any of those files open.
+        let links = analyze_with_configs(&root, &open, &configs, &mut ParseCache::default()).links;
+        let targets: Vec<PathBuf> = links.into_iter().map(|l| l.target).collect();
+        assert_eq!(targets, vec![root.join("src/a.ts"), root.join("packages/ui/src/index.ts")]);
+
+        // Without the folder's files there are no packages to read.
+        let alone = OpenFiles::new([(app.as_path(), text.as_str())]);
+        assert!(!working_configs(&root, &alone).keys().any(|p| p.ends_with("package.json")));
     }
 }

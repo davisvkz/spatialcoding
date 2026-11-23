@@ -200,3 +200,43 @@ fn an_import_of_a_closed_file_is_drawn_when_that_file_opens() {
     let path_of = |id| app.app_state().node_store.get_file(id).unwrap().path.clone();
     assert_eq!((path_of(imports[0].source_node), path_of(imports[0].target_node)), (fx.path("web/app.ts"), fx.path("web/a.ts")));
 }
+
+#[test]
+fn imports_resolve_through_extended_configs_and_workspace_packages_in_the_app() {
+    let fx = fixture();
+    let write = |rel: &str, text: &str| {
+        let path = fx.path(rel);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, text).unwrap();
+    };
+    write("tsconfig.base.json", r#"{"compilerOptions": {"paths": {"@/*": ["web/*"]}}}"#);
+    write("tsconfig.json", r#"{"extends": "./tsconfig.base.json"}"#);
+    write("packages/ui/package.json", r#"{"name": "@acme/ui", "exports": {".": "./src/index.ts"}}"#);
+    write("packages/ui/src/index.ts", "export const ui = 1;\n");
+    write("web/app.ts", "import '@/a';\nimport '@acme/ui';\nimport 'react';\n");
+    let mut app = app_with(&fx);
+    // No language server: the fake one would draw these edges from the words
+    // of the imports, and this test is about the static analysis.
+    app.app_state_mut().lsp.manager.set_launcher(std::sync::Arc::new(|_, _| Err("offline".into())));
+    for path in ["web/app.ts", "web/a.ts", "packages/ui/src/index.ts"] {
+        app.open(&fx.path(path));
+    }
+    app.settle_edges();
+    let path_of = |id| app.app_state().node_store.get_file(id).unwrap().path.clone();
+    let mut targets: Vec<_> = app
+        .app_state()
+        .edge_store
+        .all_edges()
+        .filter(|e| e.relationship == spatialcoding::edges::style::RelationshipType::Imports)
+        .map(|e| (path_of(e.source_node), path_of(e.target_node)))
+        .collect();
+    targets.sort();
+    assert_eq!(
+        targets,
+        vec![
+            (fx.path("web/app.ts"), fx.path("packages/ui/src/index.ts")),
+            (fx.path("web/app.ts"), fx.path("web/a.ts")),
+        ],
+        "the alias comes from the extended base config and the package from its package.json"
+    );
+}

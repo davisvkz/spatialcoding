@@ -173,7 +173,10 @@ pub fn compare(input: &GraphInput, baseline: &str) -> Result<GraphDiff, Comparis
             "Comparison limits: 512 files, 2 MiB/file, 32 MiB total.".into(),
         ));
     }
-    let config_paths = local::config_paths(&input.root, input.files.keys().map(PathBuf::as_path));
+    // The configs the current side read, too: what they extend and the
+    // packages of the folder have to be read from the baseline as well.
+    let mut config_paths = local::config_paths(&input.root, input.files.keys().map(PathBuf::as_path));
+    config_paths.extend(input.configs.keys().cloned());
     let paths: Vec<_> = input
         .files
         .keys()
@@ -345,6 +348,38 @@ mod tests {
             files,
             configs,
         };
+        let diff = compare(&input, "HEAD").unwrap();
+        assert_eq!(diff.counts(), (1, 1, 0));
+        assert_eq!(diff.deleted[0].target, root.join("a.ts"));
+    }
+
+    /// The alias lives in a config the tsconfig extends: the baseline has to
+    /// read that file from the revision too, not only the tsconfig.
+    #[test]
+    fn an_extended_config_is_read_from_each_revision() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        git(&root, &["init", "-q"]);
+        let base = |target: &str| format!(r#"{{"compilerOptions":{{"paths":{{"@value":["./{target}"]}}}}}}"#);
+        let base_path = root.join("tsconfig.base.json");
+        std::fs::write(&base_path, base("a")).unwrap();
+        std::fs::write(root.join("tsconfig.json"), r#"{"extends": "./tsconfig.base"}"#).unwrap();
+        let files: BTreeMap<_, _> = [("app.ts", "import '@value';"), ("a.ts", "export {};"), ("b.ts", "export {};")]
+            .into_iter()
+            .map(|(path, text)| (root.join(path), text.to_owned()))
+            .collect();
+        for (path, text) in &files {
+            std::fs::write(path, text).unwrap();
+        }
+        git(&root, &["add", "."]);
+        git(&root, &["-c", "user.name=T", "-c", "user.email=t@e", "commit", "-qm", "initial"]);
+        std::fs::write(&base_path, base("b")).unwrap();
+        let configs = local::working_configs(
+            &root,
+            &OpenFiles::new(files.iter().map(|(p, t)| (p.as_path(), t.as_str()))),
+        );
+        assert!(configs.contains_key(&base_path), "the extended file is read from disk: {:?}", configs.keys());
+        let input = GraphInput { root: root.clone(), files, configs };
         let diff = compare(&input, "HEAD").unwrap();
         assert_eq!(diff.counts(), (1, 1, 0));
         assert_eq!(diff.deleted[0].target, root.join("a.ts"));

@@ -155,6 +155,13 @@ impl WorkspaceIndex {
         self.files.contains(path)
     }
 
+    /// The files called `name`, nearest the folder root first.
+    pub fn named(&self, name: &str) -> Vec<&PathBuf> {
+        let mut found: Vec<&PathBuf> = self.files.iter().filter(|p| p.file_name().is_some_and(|n| n == name)).collect();
+        found.sort_by(|a, b| (a.components().count(), *a).cmp(&(b.components().count(), *b)));
+        found
+    }
+
     /// The files directly in `dir`.
     pub fn in_dir(&self, dir: &Path) -> &[PathBuf] {
         self.by_dir.get(dir).map_or(&[], Vec::as_slice)
@@ -197,6 +204,17 @@ impl<'a> OpenFiles<'a> {
     pub fn with_index(mut self, index: &'a WorkspaceIndex) -> Self {
         self.index = Some(index);
         self
+    }
+
+    /// Whether the folder's files are known, so that a path that is not in
+    /// them is known not to exist.
+    pub(crate) fn has_index(&self) -> bool {
+        self.index.is_some()
+    }
+
+    /// The folder's files called `name` that are not open, nearest the root first.
+    pub(crate) fn indexed_named(&self, name: &str) -> Vec<PathBuf> {
+        self.index.map(|index| index.named(name).into_iter().cloned().collect()).unwrap_or_default()
     }
 
     /// Whether `path` is a file of the folder that is not open.
