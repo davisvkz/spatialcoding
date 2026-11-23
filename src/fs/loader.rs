@@ -2,7 +2,7 @@ use std::fs;
 use std::io;
 use std::path::Path;
 
-use super::ignore::IgnoreSet;
+use super::ignore::{GitignoreRules, IgnoreSet};
 use super::tree::TreeNode;
 
 const ALWAYS_SKIP: &[&str] = &["target", "node_modules", ".git", "__pycache__", ".DS_Store"];
@@ -27,18 +27,31 @@ pub fn load_directory(root: &Path, show_dot_folders: bool) -> io::Result<TreeNod
 }
 
 /// [`load_directory`] leaving out what the repository's ignore list matches
-/// (paths are matched relative to `repo`).
+/// (paths are matched relative to `repo`): the user's patterns, and unless
+/// `ignore` is [`IgnoreSet::default`], the built-in defaults and the
+/// `.gitignore` of every folder on the way down.
 pub fn load_directory_filtered(
     root: &Path,
     repo: &Path,
     show_dot_folders: bool,
     ignore: &IgnoreSet,
 ) -> io::Result<TreeNode> {
+    load_dir(root, repo, show_dot_folders, ignore, &GitignoreRules::default())
+}
+
+fn load_dir(
+    root: &Path,
+    repo: &Path,
+    show_dot_folders: bool,
+    ignore: &IgnoreSet,
+    git_above: &GitignoreRules,
+) -> io::Result<TreeNode> {
     let name = root
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_else(|| root.to_string_lossy().into_owned());
 
+    let git = if ignore.filters() { git_above.below(root, repo) } else { GitignoreRules::default() };
     let mut children = Vec::new();
 
     for entry in fs::read_dir(root)? {
@@ -51,12 +64,12 @@ pub fn load_directory_filtered(
 
         let path = entry.path();
         let file_type = entry.file_type()?;
-        if !ignore.is_empty() && ignore.is_ignored_path(&path, repo, file_type.is_dir()) {
+        if ignore.filters() && ignore.hides_path(&git, &path, repo, file_type.is_dir()) {
             continue;
         }
 
         if file_type.is_dir() {
-            match load_directory_filtered(&path, repo, show_dot_folders, ignore) {
+            match load_dir(&path, repo, show_dot_folders, ignore, &git) {
                 Ok(child) => children.push(child),
                 Err(_) => continue,
             }
@@ -189,5 +202,29 @@ mod tests {
             read_file_content(&dir.path().join("missing")).unwrap_err().kind(),
             io::ErrorKind::NotFound
         );
+    }
+
+    #[test]
+    fn nested_gitignores_and_the_defaults_shape_the_tree() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        for d in ["src/gen", "src/lib", "dist", "pkg/gen"] {
+            fs::create_dir_all(root.join(d)).unwrap();
+        }
+        fs::write(root.join("src/.gitignore"), "gen/\n").unwrap();
+        for f in ["src/gen/a.rs", "src/lib/b.rs", "dist/out.js", "pkg/gen/c.rs", "package-lock.json", "app.rs"] {
+            fs::write(root.join(f), "").unwrap();
+        }
+
+        let tree = load_directory_filtered(root, root, false, &IgnoreSet::new(&[])).unwrap();
+        assert_eq!(child_names(&tree), ["pkg", "src", "app.rs"], "dist and the lockfile are default-hidden");
+        assert_eq!(child_names(tree.find_node(&root.join("src")).unwrap()), ["lib"], "src/.gitignore hides src/gen");
+        assert_eq!(child_names(tree.find_node(&root.join("pkg")).unwrap()), ["gen"], "but not pkg/gen");
+
+        let all = load_directory_filtered(root, root, false, &IgnoreSet::default()).unwrap();
+        assert_eq!(child_names(&all), ["dist", "pkg", "src", "app.rs", "package-lock.json"], "Show ignored files");
+        let back = IgnoreSet::new(&["!dist".to_string()]);
+        let tree = load_directory_filtered(root, root, false, &back).unwrap();
+        assert!(child_names(&tree).contains(&"dist"), "the user's list brings a default back");
     }
 }

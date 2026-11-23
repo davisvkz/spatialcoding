@@ -188,7 +188,12 @@ impl SpatialCodingApp {
     /// Applies what the watcher saw on disk to the canvas and the file tree.
     fn follow_disk(&mut self) {
         let Some(watcher) = &mut self.watcher else { return };
-        let batch = watcher.poll_changes(self.state.settings.show_dot_folders);
+        let ignore = if self.state.settings.show_ignored {
+            crate::fs::ignore::IgnoreSet::default()
+        } else {
+            self.state.ignore_set()
+        };
+        let batch = watcher.poll_changes(self.state.settings.show_dot_folders, &ignore);
         if batch.is_empty() {
             return;
         }
@@ -196,7 +201,7 @@ impl SpatialCodingApp {
         for path in &applied.reloaded {
             self.highlighter.invalidate(path);
         }
-        if applied.tree_stale
+        if (applied.tree_stale || batch.rules_changed)
             && let Some(dir) = self.state.loaded_dir.clone()
             && let Ok(mut tree) = self.load_tree(&dir)
         {

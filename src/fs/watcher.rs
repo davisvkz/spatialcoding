@@ -10,6 +10,7 @@ use std::sync::mpsc::{self, Receiver};
 use notify::event::{EventKind, ModifyKind};
 use notify::{RecommendedWatcher, RecursiveMode, Watcher};
 
+use super::ignore::{GitignoreCache, IgnoreSet};
 use super::loader::is_skipped_path;
 
 /// Paths touched since the last poll, as they are on disk now.
@@ -21,11 +22,14 @@ pub struct WatchBatch {
     pub created: Vec<PathBuf>,
     /// Files and folders that no longer exist.
     pub removed: Vec<PathBuf>,
+    /// A `.gitignore` changed: what the file tree lists may have changed
+    /// with it, though no listed file did.
+    pub rules_changed: bool,
 }
 
 impl WatchBatch {
     pub fn is_empty(&self) -> bool {
-        self.modified.is_empty() && self.created.is_empty() && self.removed.is_empty()
+        self.modified.is_empty() && self.created.is_empty() && self.removed.is_empty() && !self.rules_changed
     }
 }
 
@@ -66,14 +70,23 @@ impl FileWatcher {
     /// Everything that happened since the last call, merged per path and
     /// checked against the disk: an editor's save (write a temp file, rename
     /// it over the original) comes out as one modified or created file.
-    pub fn poll_changes(&mut self, show_dot_folders: bool) -> WatchBatch {
+    /// Paths the file tree leaves out (`ignore`, and the skip rules) are
+    /// dropped, so they never reload anything.
+    pub fn poll_changes(&mut self, show_dot_folders: bool, ignore: &IgnoreSet) -> WatchBatch {
         let mut modified = BTreeSet::new();
         let mut created = BTreeSet::new();
         let mut removed = BTreeSet::new();
+        let mut rules_changed = false;
+        let mut gitignores = GitignoreCache::default();
         while let Ok(event) = self.events.try_recv() {
             let Ok(event) = event else { continue };
             for path in event.paths {
-                if is_skipped_path(&path, &self.root, show_dot_folders) {
+                if path.file_name().is_some_and(|name| name == ".gitignore") && ignore.filters() {
+                    rules_changed = true;
+                }
+                if is_skipped_path(&path, &self.root, show_dot_folders)
+                    || ignore.hides_on_disk(&path, &self.root, &mut gitignores)
+                {
                     continue;
                 }
                 match event.kind {
@@ -98,7 +111,9 @@ impl FileWatcher {
                 }
             }
         }
-        settle(modified, created, removed)
+        let mut batch = settle(modified, created, removed);
+        batch.rules_changed = rules_changed;
+        batch
     }
 }
 
@@ -159,7 +174,7 @@ mod tests {
         let deadline = Instant::now() + Duration::from_secs(5);
         let mut all = WatchBatch::default();
         while Instant::now() < deadline {
-            let batch = watcher.poll_changes(false);
+            let batch = watcher.poll_changes(false, &IgnoreSet::default());
             all.modified.extend(batch.modified);
             all.created.extend(batch.created);
             all.removed.extend(batch.removed);
@@ -223,11 +238,42 @@ mod tests {
         let mut shown = WatchBatch::default();
         let deadline = Instant::now() + Duration::from_secs(5);
         while Instant::now() < deadline && shown.created.is_empty() && shown.modified.is_empty() {
-            let b = watcher.poll_changes(true);
+            let b = watcher.poll_changes(true, &IgnoreSet::default());
             shown.created.extend(b.created);
             shown.modified.extend(b.modified);
             std::thread::sleep(Duration::from_millis(20));
         }
         assert!(shown.created.iter().chain(&shown.modified).any(|p| p.ends_with(".other")), "{shown:?}");
+    }
+
+    #[test]
+    fn ignored_paths_produce_no_events_and_a_gitignore_edit_is_reported() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(dir.path()).unwrap();
+        std::fs::create_dir_all(root.join("dist")).unwrap();
+        std::fs::create_dir_all(root.join("pkg/gen")).unwrap();
+        std::fs::write(root.join("pkg/.gitignore"), "gen/\n").unwrap();
+        let ignore = IgnoreSet::new(&[]);
+        let mut watcher = FileWatcher::new(&root, || {}).unwrap();
+        let (hidden_default, hidden_git, visible) =
+            (root.join("dist/out.js"), root.join("pkg/gen/a.rs"), root.join("seen.txt"));
+        std::fs::write(&hidden_default, "x").unwrap();
+        std::fs::write(&hidden_git, "x").unwrap();
+        std::fs::write(root.join("pkg/.gitignore"), "gen/\n# edited\n").unwrap();
+        std::fs::write(&visible, "x").unwrap();
+
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let mut all = WatchBatch::default();
+        while Instant::now() < deadline && !(all.created.contains(&visible) || all.modified.contains(&visible)) {
+            let b = watcher.poll_changes(false, &ignore);
+            all.created.extend(b.created);
+            all.modified.extend(b.modified);
+            all.rules_changed |= b.rules_changed;
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        let seen: Vec<_> = all.created.iter().chain(&all.modified).collect();
+        assert!(seen.contains(&&visible), "{all:?}");
+        assert!(!seen.contains(&&hidden_default) && !seen.contains(&&hidden_git), "{all:?}");
+        assert!(all.rules_changed, "editing a .gitignore asks for a new tree: {all:?}");
     }
 }

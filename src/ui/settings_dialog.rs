@@ -136,6 +136,7 @@ pub fn draw_ignore_settings(ctx: &egui::Context, state: &mut AppState) {
                 None => ui.weak("Open a folder to keep an ignore list for it."),
             };
             ui.weak("gitignore syntax: node_modules, /dist/, *.log, **/gen/*.rs, !keep.js. Ignoring a configuration file only hides it.");
+            ui.weak("Also hidden: build output, vendored code and lockfiles (dist, build, out, vendor, coverage, *.lock…) and what each .gitignore lists. Add !name to bring one back, or use Show ignored files.");
             ui.add_space(4.0);
             for pattern in &patterns {
                 ui.horizontal(|ui| {
