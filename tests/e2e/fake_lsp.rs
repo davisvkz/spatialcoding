@@ -38,6 +38,28 @@ fn start(root: PathBuf) -> Connection {
     }
 }
 
+/// The capabilities the client declares in `initialize`: every request it
+/// sends (definition, typeDefinition, implementation, call hierarchy,
+/// references, document symbols, hover) with link support where it parses
+/// links, and `workspace/configuration`.
+fn check_declared_capabilities(params: &Value) -> Result<(), String> {
+    let text_document = &params["capabilities"]["textDocument"];
+    for request in ["documentSymbol", "references", "hover", "callHierarchy"] {
+        if !text_document[request].is_object() {
+            return Err(format!("textDocument.{request} is not declared"));
+        }
+    }
+    for request in ["definition", "typeDefinition", "implementation"] {
+        if text_document[request]["linkSupport"] != true {
+            return Err(format!("textDocument.{request}.linkSupport is not declared"));
+        }
+    }
+    if params["capabilities"]["workspace"]["configuration"] != true {
+        return Err("workspace.configuration is not declared".into());
+    }
+    Ok(())
+}
+
 fn serve(root: PathBuf, mut reader: BufReader<std::io::PipeReader>, mut writer: PipeWriter) {
     let mut open: HashMap<PathBuf, String> = HashMap::new();
     while let Ok(Some(msg)) = read_message(&mut reader) {
@@ -50,6 +72,13 @@ fn serve(root: PathBuf, mut reader: BufReader<std::io::PipeReader>, mut writer: 
         };
         let result = match msg["method"].as_str() {
             Some("initialize") => {
+                // A client that calls a request without declaring it fails every
+                // test that starts this server, with the reason as the error.
+                if let Err(missing) = check_declared_capabilities(params) {
+                    let error = json!({"code": -32600, "message": format!("initialize: {missing}")});
+                    let _ = write_message(&mut writer, &json!({"jsonrpc": "2.0", "id": msg["id"], "error": error}));
+                    continue;
+                }
                 json!({"capabilities": {
                     "documentSymbolProvider": true, "referencesProvider": true, "definitionProvider": true,
                     "callHierarchyProvider": true,

@@ -23,7 +23,7 @@ use super::protocol::{
     parse_document_symbols, parse_locations, path_to_uri, position_json, read_message,
     write_message,
 };
-use super::{Location, LspSymbol, Position};
+use super::{Location, LspSymbol, Position, ServerSettings};
 
 /// JSON-RPC error codes that mean "ask again later".
 const CONTENT_MODIFIED: i64 = -32801;
@@ -127,6 +127,18 @@ pub struct LspClient {
 impl LspClient {
     /// Connects and runs the `initialize` handshake for workspace `root`.
     pub fn start(conn: Connection, root: &Path, timeout: Duration) -> Result<Self, LspError> {
+        Self::start_with(conn, root, timeout, &ServerSettings::default())
+    }
+
+    /// [`Self::start`] telling the server `settings` too: its
+    /// `initializationOptions`, then `workspace/didChangeConfiguration`, and
+    /// the answers to its `workspace/configuration` requests.
+    pub fn start_with(
+        conn: Connection,
+        root: &Path,
+        timeout: Duration,
+        settings: &ServerSettings,
+    ) -> Result<Self, LspError> {
         let writer: SharedWriter = Arc::new(Mutex::new(conn.writer));
         let pending: Pending = Arc::default();
         let closed = Arc::new(AtomicBool::new(false));
@@ -137,6 +149,7 @@ impl LspClient {
             pending.clone(),
             closed.clone(),
             progress.clone(),
+            Arc::new(settings.configuration.clone()),
         );
 
         let mut client = LspClient {
@@ -155,27 +168,40 @@ impl LspClient {
             .file_name()
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_else(|| "workspace".into());
-        client.request(
-            "initialize",
-            json!({
-                "processId": std::process::id(),
-                "clientInfo": {"name": "SpatialCoding"},
-                "rootUri": root_uri,
-                "rootPath": root.to_string_lossy(),
-                "workspaceFolders": [{"uri": root_uri, "name": name}],
-                "capabilities": {
-                    "textDocument": {
-                        "synchronization": {"didSave": false},
-                        "documentSymbol": {"hierarchicalDocumentSymbolSupport": true},
-                        "references": {}
-                    },
-                    "window": {"workDoneProgress": true},
-                    "workspace": {"configuration": true, "workspaceFolders": true},
-                    "experimental": {"serverStatusNotification": true}
-                }
-            }),
-        )?;
+        let mut params = json!({
+            "processId": std::process::id(),
+            "clientInfo": {"name": "SpatialCoding"},
+            "rootUri": root_uri,
+            "rootPath": root.to_string_lossy(),
+            "workspaceFolders": [{"uri": root_uri, "name": name}],
+            "capabilities": {
+                "textDocument": {
+                    "synchronization": {"didSave": false},
+                    "documentSymbol": {"hierarchicalDocumentSymbolSupport": true},
+                    "references": {},
+                    "hover": {"contentFormat": ["markdown", "plaintext"]},
+                    "definition": {"linkSupport": true},
+                    "typeDefinition": {"linkSupport": true},
+                    "implementation": {"linkSupport": true},
+                    "callHierarchy": {}
+                },
+                "window": {"workDoneProgress": true},
+                "workspace": {
+                    "configuration": true,
+                    "workspaceFolders": true,
+                    "didChangeConfiguration": {}
+                },
+                "experimental": {"serverStatusNotification": true}
+            }
+        });
+        if let Some(options) = &settings.initialization_options {
+            params["initializationOptions"] = options.clone();
+        }
+        client.request("initialize", params)?;
         client.notify("initialized", json!({}))?;
+        if !settings.configuration.is_null() {
+            client.notify("workspace/didChangeConfiguration", json!({"settings": settings.configuration}))?;
+        }
         Ok(client)
     }
 
@@ -395,11 +421,12 @@ fn spawn_reader(
     pending: Pending,
     closed: Arc<AtomicBool>,
     progress: ProgressTokens,
+    configuration: Arc<Value>,
 ) {
     thread::spawn(move || {
         let mut reader = BufReader::new(reader);
         while let Ok(Some(msg)) = read_message(&mut reader) {
-            dispatch(&msg, &writer, &pending, &progress);
+            dispatch(&msg, &writer, &pending, &progress, &configuration);
         }
         closed.store(true, Ordering::SeqCst);
         for (_, tx) in pending.lock().unwrap().drain() {
@@ -408,7 +435,17 @@ fn spawn_reader(
     });
 }
 
-fn dispatch(msg: &Value, writer: &SharedWriter, pending: &Pending, progress: &ProgressTokens) {
+/// The part of the settings tree a `workspace/configuration` item asks for:
+/// the dotted `section`, or everything without one. `Null` when the tree has
+/// nothing there.
+fn configuration_section(tree: &Value, section: Option<&str>) -> Value {
+    match section.filter(|s| !s.is_empty()) {
+        None => tree.clone(),
+        Some(path) => path.split('.').try_fold(tree, |node, key| node.get(key)).cloned().unwrap_or(Value::Null),
+    }
+}
+
+fn dispatch(msg: &Value, writer: &SharedWriter, pending: &Pending, progress: &ProgressTokens, configuration: &Value) {
     let method = msg.get("method").and_then(Value::as_str);
     let id = msg.get("id");
     match (method, id) {
@@ -434,10 +471,17 @@ fn dispatch(msg: &Value, writer: &SharedWriter, pending: &Pending, progress: &Pr
         // A request from the server: answer so it doesn't wait on us.
         (Some(method), Some(id)) => {
             let result = match method {
-                "workspace/configuration" => {
-                    let n = msg["params"]["items"].as_array().map_or(0, Vec::len);
-                    Value::Array(vec![Value::Null; n])
-                }
+                "workspace/configuration" => Value::Array(
+                    msg["params"]["items"]
+                        .as_array()
+                        .map(|items| {
+                            items
+                                .iter()
+                                .map(|item| configuration_section(configuration, item["section"].as_str()))
+                                .collect()
+                        })
+                        .unwrap_or_default(),
+                ),
                 "workspace/workspaceFolders" => Value::Null,
                 _ => Value::Null,
             };
@@ -584,6 +628,65 @@ mod tests {
     }
 
     #[test]
+    fn initialize_declares_every_request_the_client_makes_and_forwards_the_settings() {
+        let (conn, server) = fake_server(|msg, w| match msg["method"].as_str() {
+            Some("initialize") => reply(w, msg, json!({"capabilities": {}})),
+            Some("shutdown") => reply(w, msg, Value::Null),
+            _ => {}
+        });
+        let settings = ServerSettings {
+            initialization_options: Some(json!({"linkedProjects": ["/proj/a/Cargo.toml"]})),
+            configuration: json!({"python": {"analysis": {"diagnosticMode": "openFilesOnly"}}}),
+        };
+        drop(LspClient::start_with(conn, Path::new("/proj"), SECOND, &settings).unwrap());
+
+        let seen = server.join().unwrap();
+        let methods: Vec<&str> = seen.iter().filter_map(|m| m["method"].as_str()).collect();
+        assert_eq!(
+            methods,
+            ["initialize", "initialized", "workspace/didChangeConfiguration", "shutdown", "exit"]
+        );
+        let params = &seen[0]["params"];
+        let text_document = &params["capabilities"]["textDocument"];
+        for link in ["definition", "typeDefinition", "implementation"] {
+            assert_eq!(text_document[link]["linkSupport"], true, "{link}");
+        }
+        assert!(text_document["hover"]["contentFormat"].as_array().unwrap().contains(&json!("markdown")));
+        assert!(text_document["callHierarchy"].is_object(), "call hierarchy is requested, so it is declared");
+        assert!(text_document["references"].is_object() && text_document["documentSymbol"].is_object());
+        assert_eq!(params["capabilities"]["workspace"]["configuration"], true);
+        assert_eq!(params["initializationOptions"], json!({"linkedProjects": ["/proj/a/Cargo.toml"]}));
+        assert_eq!(seen[2]["params"]["settings"], settings.configuration);
+    }
+
+    #[test]
+    fn workspace_configuration_is_answered_by_section() {
+        let (to_client, observed) = mpsc::channel::<Value>();
+        let (conn, _server) = fake_server(move |msg, w| match msg["method"].as_str() {
+            Some("initialize") => {
+                write_message(w, &json!({"jsonrpc": "2.0", "id": "cfg", "method": "workspace/configuration",
+                    "params": {"items": [{"section": "python.analysis"}, {"section": "python.nothing"}, {"section": "rust"}, {}]}}))
+                    .unwrap();
+                reply(w, msg, json!({"capabilities": {}}));
+            }
+            Some("shutdown") => reply(w, msg, Value::Null),
+            None => to_client.send(msg.clone()).unwrap(),
+            _ => {}
+        });
+        let settings = ServerSettings {
+            initialization_options: None,
+            configuration: json!({"python": {"analysis": {"diagnosticMode": "openFilesOnly"}}}),
+        };
+        let _client = LspClient::start_with(conn, Path::new("/proj"), SECOND, &settings).unwrap();
+        let answer = observed.recv_timeout(SECOND).unwrap();
+        assert_eq!(
+            answer["result"],
+            json!([{"diagnosticMode": "openFilesOnly"}, null, null, settings.configuration]),
+            "unknown sections are null; an item without a section gets the whole tree"
+        );
+    }
+
+    #[test]
     fn rust_analyzer_server_status_counts_as_progress() {
         let writer: SharedWriter = Arc::new(Mutex::new(Box::new(std::io::sink())));
         let (pending, progress): (Pending, ProgressTokens) = Default::default();
@@ -591,9 +694,9 @@ mod tests {
             json!({"jsonrpc": "2.0", "method": "experimental/serverStatus",
                 "params": {"health": "ok", "quiescent": quiescent}})
         };
-        dispatch(&status(false), &writer, &pending, &progress);
+        dispatch(&status(false), &writer, &pending, &progress, &Value::Null);
         assert!(progress.lock().unwrap().contains(NOT_QUIESCENT));
-        dispatch(&status(true), &writer, &pending, &progress);
+        dispatch(&status(true), &writer, &pending, &progress, &Value::Null);
         assert!(progress.lock().unwrap().is_empty());
     }
 
@@ -710,5 +813,44 @@ mod tests {
         assert!(found.contains(&(main_rs.clone(), 5)), "use in main.rs: {found:?}");
         assert!(found.contains(&(util_rs.clone(), 3)), "use in util.rs: {found:?}");
         assert!(found.contains(&(util_rs.clone(), 0)), "declaration: {found:?}");
+    }
+
+    /// A folder of crates has no manifest at its root: only the linked
+    /// projects of [`ServerSettings`] make rust-analyzer load them.
+    #[test]
+    #[ignore = "needs rust-analyzer on PATH and takes a few seconds"]
+    fn real_rust_analyzer_loads_the_crates_of_a_folder_without_a_root_manifest() {
+        use super::super::manager::spawn_server;
+        use super::super::ServerId;
+
+        let dir = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(dir.path()).unwrap();
+        let write = |rel: &str, text: &str| {
+            let p = root.join(rel);
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(&p, text).unwrap();
+            p
+        };
+        write("svc/a/Cargo.toml", "[package]\nname = \"a\"\nversion = \"0.1.0\"\nedition = \"2021\"\n");
+        let text = "pub fn hello() {}\n\npub fn twice() {\n    hello();\n}\n";
+        let lib = write("svc/a/src/lib.rs", text);
+
+        let settings = ServerId::Rust.settings(&root);
+        assert!(settings.initialization_options.is_some(), "the crate is linked");
+        let conn = spawn_server(ServerId::Rust, &root).expect("rust-analyzer starts");
+        let mut client = LspClient::start_with(conn, &root, Duration::from_secs(60), &settings).unwrap();
+        client.sync_document(&lib, "rust", text).unwrap();
+
+        let hello = Position { line: 0, character: 7 };
+        let deadline = Instant::now() + Duration::from_secs(90);
+        let refs = loop {
+            let refs = client.references(&lib, hello).unwrap_or_default();
+            if refs.iter().any(|l| l.range.start.line == 3) || Instant::now() > deadline {
+                break refs;
+            }
+            thread::sleep(Duration::from_millis(500));
+        };
+        let lines: Vec<usize> = refs.iter().map(|l| l.range.start.line).collect();
+        assert!(lines.contains(&3), "the call in twice(): {lines:?}");
     }
 }

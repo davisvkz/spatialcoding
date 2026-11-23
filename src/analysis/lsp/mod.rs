@@ -111,6 +111,62 @@ impl SymbolKind {
     }
 }
 
+/// What a server is told besides the workspace folder.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct ServerSettings {
+    /// `initializationOptions` of `initialize`; rust-analyzer reads its whole
+    /// configuration from there.
+    pub initialization_options: Option<serde_json::Value>,
+    /// A tree of settings: answers `workspace/configuration` by section
+    /// (`python.analysis` is `tree["python"]["analysis"]`) and is sent with
+    /// `workspace/didChangeConfiguration`. `Null` when there is nothing to say.
+    pub configuration: serde_json::Value,
+}
+
+/// Directories listed while looking for Cargo manifests, at most.
+const MANIFEST_SCAN_DIRS: usize = 10_000;
+/// How deep below the root manifests are looked for.
+const MANIFEST_SCAN_DEPTH: usize = 6;
+
+/// The `Cargo.toml` files rust-analyzer must be pointed at when `root` has no
+/// manifest of its own (a folder of crates). With a manifest or a
+/// `rust-project.json` in `root` its own discovery finds the workspace, and
+/// linking the members as well would load them twice. Only the outermost
+/// manifests count, since a workspace root lists its members itself.
+pub fn rust_linked_projects(root: &Path) -> Vec<PathBuf> {
+    if root.join("Cargo.toml").is_file() || root.join("rust-project.json").is_file() {
+        return Vec::new();
+    }
+    let mut found = Vec::new();
+    let mut queue = std::collections::VecDeque::from([(root.to_path_buf(), 0usize)]);
+    let mut listed = 0;
+    while let Some((dir, depth)) = queue.pop_front() {
+        listed += 1;
+        if listed > MANIFEST_SCAN_DIRS {
+            break;
+        }
+        let manifest = dir.join("Cargo.toml");
+        if dir != root && manifest.is_file() {
+            found.push(manifest);
+            continue;
+        }
+        if depth >= MANIFEST_SCAN_DEPTH {
+            continue;
+        }
+        let Ok(entries) = std::fs::read_dir(&dir) else { continue };
+        let mut children: Vec<PathBuf> = entries
+            .flatten()
+            .filter(|e| e.file_type().is_ok_and(|t| t.is_dir()))
+            .filter(|e| !crate::fs::loader::is_skipped_name(&e.file_name().to_string_lossy(), false))
+            .map(|e| e.path())
+            .collect();
+        children.sort();
+        queue.extend(children.into_iter().map(|c| (c, depth + 1)));
+    }
+    found.sort();
+    found
+}
+
 /// A language server the app knows how to start. One server may handle
 /// several languages (TypeScript also serves JavaScript).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -135,6 +191,31 @@ impl ServerId {
             ServerId::TypeScript => "TypeScript",
             ServerId::Python => "Python",
             ServerId::Go => "Go",
+        }
+    }
+
+    /// What to tell this server for the workspace `root`.
+    pub fn settings(self, root: &Path) -> ServerSettings {
+        use serde_json::json;
+        match self {
+            ServerId::Rust => {
+                let projects = rust_linked_projects(root);
+                ServerSettings {
+                    initialization_options: (!projects.is_empty()).then(|| json!({"linkedProjects": projects})),
+                    configuration: serde_json::Value::Null,
+                }
+            }
+            // Check the files that are open, not the whole workspace: the canvas
+            // shows a few files of a big repository. Other Python servers ignore
+            // these sections.
+            ServerId::Python => ServerSettings {
+                initialization_options: None,
+                configuration: json!({
+                    "python": {"analysis": {"diagnosticMode": "openFilesOnly"}},
+                    "basedpyright": {"analysis": {"diagnosticMode": "openFilesOnly"}},
+                }),
+            },
+            ServerId::TypeScript | ServerId::Go => ServerSettings::default(),
         }
     }
 
@@ -332,5 +413,64 @@ mod tests {
         assert_eq!(SymbolKind::from_lsp(2), SymbolKind::Module);
         assert_eq!(SymbolKind::from_lsp(99), SymbolKind::Other);
         assert_eq!(SymbolKind::Function.label(), "fn");
+    }
+
+    fn tree(files: &[&str]) -> tempfile::TempDir {
+        let dir = tempfile::tempdir().unwrap();
+        for f in files {
+            let path = dir.path().join(f);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, "").unwrap();
+        }
+        dir
+    }
+
+    #[test]
+    fn a_folder_of_crates_links_the_outermost_manifests_only() {
+        let dir = tree(&[
+            "svc/a/Cargo.toml",
+            "svc/a/crates/member/Cargo.toml", // a member: svc/a lists it itself
+            "svc/b/Cargo.toml",
+            "tools/c/Cargo.toml",
+            "svc/b/target/debug/stale/Cargo.toml", // build output
+            "node_modules/pkg/Cargo.toml",
+            "docs/readme.md",
+        ]);
+        let root = dir.path();
+        let linked: Vec<PathBuf> = rust_linked_projects(root);
+        let expected: Vec<PathBuf> =
+            ["svc/a/Cargo.toml", "svc/b/Cargo.toml", "tools/c/Cargo.toml"].iter().map(|p| root.join(p)).collect();
+        assert_eq!(linked, expected);
+        let settings = ServerId::Rust.settings(root);
+        assert_eq!(settings.initialization_options, Some(serde_json::json!({"linkedProjects": expected})));
+    }
+
+    #[test]
+    fn a_root_with_its_own_manifest_is_left_to_rust_analyzer() {
+        let workspace = tree(&["Cargo.toml", "crates/a/Cargo.toml"]);
+        assert!(rust_linked_projects(workspace.path()).is_empty(), "its discovery finds the members");
+        assert_eq!(ServerId::Rust.settings(workspace.path()), ServerSettings::default());
+        let project = tree(&["rust-project.json", "x/Cargo.toml"]);
+        assert!(rust_linked_projects(project.path()).is_empty());
+        let none = tree(&["README.md"]);
+        assert!(rust_linked_projects(none.path()).is_empty() && ServerId::Rust.settings(none.path()).initialization_options.is_none());
+    }
+
+    #[test]
+    fn manifests_deeper_than_the_scan_depth_are_not_looked_for() {
+        let shallow = tree(&["a/b/c/d/e/f/Cargo.toml"]);
+        assert_eq!(rust_linked_projects(shallow.path()).len(), 1, "six folders down is still found");
+        let deep = tree(&["a/b/c/d/e/f/g/Cargo.toml"]);
+        assert!(rust_linked_projects(deep.path()).is_empty());
+    }
+
+    #[test]
+    fn python_servers_check_open_files_only_and_the_others_need_nothing() {
+        let settings = ServerId::Python.settings(Path::new("/p"));
+        assert_eq!(settings.configuration["python"]["analysis"]["diagnosticMode"], "openFilesOnly");
+        assert_eq!(settings.configuration["basedpyright"]["analysis"]["diagnosticMode"], "openFilesOnly");
+        assert!(settings.initialization_options.is_none());
+        assert_eq!(ServerId::Go.settings(Path::new("/p")), ServerSettings::default());
+        assert_eq!(ServerId::TypeScript.settings(Path::new("/p")), ServerSettings::default());
     }
 }

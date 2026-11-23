@@ -204,7 +204,9 @@ fn start_worker(
                 }
             };
             let started = launcher(server, &root)
-                .and_then(|conn| LspClient::start(conn, &root, REQUEST_TIMEOUT).map_err(|e| e.to_string()));
+                .and_then(|conn| {
+                    LspClient::start_with(conn, &root, REQUEST_TIMEOUT, &server.settings(&root)).map_err(|e| e.to_string())
+                });
             let mut client = match started {
                 Ok(client) => client,
                 Err(err) => {
