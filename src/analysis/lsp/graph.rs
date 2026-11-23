@@ -132,12 +132,22 @@ pub struct GraphEntry {
     pub range: Range,
 }
 
+/// What the server says about the symbol (`textDocument/hover`): its
+/// signature and documentation, as the text the server sent.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Hover {
+    pub text: String,
+    /// The token the text is about, when the server said.
+    pub range: Option<Range>,
+}
+
 /// The graph of the symbol under `source`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SymbolGraph {
     /// The token the symbol was asked at (white at alpha .35).
     pub source: Location,
     pub entries: Vec<GraphEntry>,
+    pub hover: Option<Hover>,
 }
 
 impl SymbolGraph {
@@ -196,6 +206,24 @@ pub fn parse_links(result: &Value) -> Vec<Link> {
     links.sort_by(|a, b| (&a.path, a.selection).cmp(&(&b.path, b.selection)));
     links.dedup();
     links
+}
+
+/// Parses a `textDocument/hover` result: `MarkupContent`, a `MarkedString`
+/// (plain text or `{language, value}`) or an array of them. `None` when the
+/// server has nothing to say.
+pub fn parse_hover(result: &Value) -> Option<Hover> {
+    fn text(contents: &Value) -> String {
+        match contents {
+            Value::String(s) => s.clone(),
+            Value::Object(o) => o.get("value").and_then(Value::as_str).unwrap_or_default().to_string(),
+            Value::Array(items) => {
+                items.iter().map(text).filter(|t| !t.trim().is_empty()).collect::<Vec<_>>().join("\n\n")
+            }
+            _ => String::new(),
+        }
+    }
+    let text = text(result.get("contents")?).trim().to_string();
+    (!text.is_empty()).then(|| Hover { text, range: result.get("range").and_then(parse_range) })
 }
 
 /// A `CallHierarchyItem`: where a function lives.
@@ -261,6 +289,7 @@ pub fn parse_calls(result: &Value, field: &str) -> Vec<Call> {
 /// Everything the queries returned, for [`build`].
 #[derive(Debug, Default)]
 pub struct Answers {
+    pub hover: Option<Hover>,
     pub references: Vec<Location>,
     pub definitions: Vec<Link>,
     pub type_definitions: Vec<Link>,
@@ -310,7 +339,7 @@ pub fn build(source: Location, answers: Answers) -> SymbolGraph {
             push(Role::OutCallsite, &source.path, *site);
         }
     }
-    SymbolGraph { source, entries }
+    SymbolGraph { source, entries, hover: answers.hover }
 }
 
 #[cfg(test)]
@@ -371,6 +400,7 @@ mod tests {
                 implementations: vec![Link { path: "/p/i.rs".into(), selection: range(2, 4, 2, 9), context: Some(range(2, 0, 8, 1)) }],
                 incoming: vec![Call { item: caller, sites: vec![range(12, 4, 12, 9)] }],
                 outgoing: vec![Call { item: callee, sites: vec![range(6, 8, 6, 11)] }],
+                ..Default::default()
             },
         );
         let roles: Vec<Role> = graph.entries.iter().map(|e| e.role).collect();
@@ -415,5 +445,24 @@ mod tests {
         assert_eq!(Role::ImplCtx.fill_alpha(), 0.05);
         assert_eq!(Role::InCallsite.label(), "in callsite");
         assert!(Role::InCallerSel.is_token() && !Role::InCaller.is_token());
+    }
+
+    #[test]
+    fn hover_is_read_from_markup_marked_strings_and_arrays() {
+        let markup = json!({"contents": {"kind": "markdown", "value": "```rust\nfn main()\n```\nEntry point."},
+            "range": {"start": {"line": 2, "character": 3}, "end": {"line": 2, "character": 7}}});
+        let hover = parse_hover(&markup).unwrap();
+        assert!(hover.text.starts_with("```rust") && hover.text.ends_with("Entry point."));
+        assert_eq!(hover.range, Some(range(2, 3, 2, 7)));
+
+        assert_eq!(parse_hover(&json!({"contents": "plain"})).unwrap().text, "plain");
+        assert_eq!(parse_hover(&json!({"contents": {"language": "ts", "value": "let x: number"}})).unwrap().text, "let x: number");
+        let many = parse_hover(&json!({"contents": ["first", {"language": "ts", "value": "second"}, "  "]})).unwrap();
+        assert_eq!(many.text, "first\n\nsecond", "blank parts are skipped");
+        assert_eq!(many.range, None);
+
+        assert_eq!(parse_hover(&Value::Null), None, "a server with nothing to say answers null");
+        assert_eq!(parse_hover(&json!({"contents": "   "})), None);
+        assert_eq!(parse_hover(&json!({"contents": []})), None);
     }
 }

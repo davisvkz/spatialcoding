@@ -29,6 +29,10 @@ use super::{Location, LspSymbol, Position, ServerSettings};
 const CONTENT_MODIFIED: i64 = -32801;
 const SERVER_CANCELLED: i64 = -32802;
 const MAX_RETRIES: u32 = 8;
+
+/// How long one symbol-graph query may take in all: the requests go out
+/// together and whatever has not answered by then is cancelled and left out.
+pub const QUERY_DEADLINE: Duration = Duration::from_secs(30);
 const STDERR_TAIL_BYTES: usize = 2000;
 
 /// The pipes to a running server, and its process when there is one (tests
@@ -100,7 +104,9 @@ impl std::fmt::Display for LspError {
 }
 
 type Reply = Result<Value, LspError>;
-type Pending = Arc<Mutex<HashMap<u64, Sender<Reply>>>>;
+/// Waiting requests by id. The reply carries its id, so several requests can
+/// share one queue.
+type Pending = Arc<Mutex<HashMap<u64, Sender<(u64, Reply)>>>>;
 type SharedWriter = Arc<Mutex<Box<dyn Write + Send>>>;
 
 /// Active `$/progress` tokens; non-empty while the server is indexing.
@@ -266,42 +272,69 @@ impl LspClient {
         Ok(parse_locations(&result))
     }
 
-    /// The graph of the symbol at `position`: references, definitions, type
-    /// definitions, implementations and both directions of the call
-    /// hierarchy. Only the references must succeed; a server that does not
-    /// know the other requests just contributes nothing to them.
+    /// The graph of the symbol at `position`: hover, references, definitions,
+    /// type definitions, implementations and both directions of the call
+    /// hierarchy, asked together within [`QUERY_DEADLINE`]. What the server
+    /// does not know, or does not answer in time, is left out; the query only
+    /// fails when nothing answered.
     pub fn symbol_graph(
         &mut self,
         path: &Path,
         position: Position,
     ) -> Result<super::graph::SymbolGraph, LspError> {
-        use super::graph::{build, parse_calls, parse_call_items, parse_links, Answers, Call};
-        let references = self.references(path, position)?;
-        let params = json!({
+        self.symbol_graph_within(path, position, QUERY_DEADLINE)
+    }
+
+    /// [`Self::symbol_graph`] with its own time limit.
+    pub fn symbol_graph_within(
+        &mut self,
+        path: &Path,
+        position: Position,
+        within: Duration,
+    ) -> Result<super::graph::SymbolGraph, LspError> {
+        use super::graph::{build, parse_call_items, parse_calls, parse_hover, parse_links, Answers};
+        let deadline = Instant::now() + within;
+        let at = json!({
             "textDocument": {"uri": path_to_uri(path)},
             "position": position_json(position),
         });
-        let links = |client: &mut Self, method: &str| {
-            client.request_with_retry(method, params.clone()).map(|r| parse_links(&r)).unwrap_or_default()
-        };
-        let definitions = links(self, "textDocument/definition");
-        let type_definitions = links(self, "textDocument/typeDefinition");
-        let implementations = links(self, "textDocument/implementation");
+        let mut for_references = at.clone();
+        for_references["context"] = json!({"includeDeclaration": true});
+        let first = self.batch(
+            &[
+                ("textDocument/hover", at.clone()),
+                ("textDocument/definition", at.clone()),
+                ("textDocument/typeDefinition", at.clone()),
+                ("textDocument/references", for_references),
+                ("textDocument/implementation", at.clone()),
+                ("textDocument/prepareCallHierarchy", at),
+            ],
+            deadline,
+        );
+        if first.iter().all(Result::is_err) {
+            // The references are the answer people wait for: report their error.
+            return Err(first.into_iter().nth(3).and_then(Result::err).unwrap_or(LspError::Io("no answer".into())));
+        }
+        let ok = |i: usize| first[i].as_ref().ok();
+        let hover = ok(0).and_then(parse_hover);
+        let definitions = ok(1).map(parse_links).unwrap_or_default();
+        let type_definitions = ok(2).map(parse_links).unwrap_or_default();
+        let references = ok(3).map(parse_locations).unwrap_or_default();
+        let implementations = ok(4).map(parse_links).unwrap_or_default();
+        let items = ok(5).map(parse_call_items).unwrap_or_default();
 
-        let items = self
-            .request_with_retry("textDocument/prepareCallHierarchy", params.clone())
-            .map(|r| parse_call_items(&r))
-            .unwrap_or_default();
-        let mut incoming: Vec<Call> = Vec::new();
-        let mut outgoing: Vec<Call> = Vec::new();
-        for item in items.iter().take(1) {
-            let item_params = json!({"item": item.raw});
-            if let Ok(r) = self.request_with_retry("callHierarchy/incomingCalls", item_params.clone()) {
-                incoming = parse_calls(&r, "from");
-            }
-            if let Ok(r) = self.request_with_retry("callHierarchy/outgoingCalls", item_params) {
-                outgoing = parse_calls(&r, "to");
-            }
+        // The call hierarchy needs the item the first wave found.
+        let (mut incoming, mut outgoing) = (Vec::new(), Vec::new());
+        if let Some(item) = items.first() {
+            let for_item = json!({"item": item.raw});
+            let mut calls = self
+                .batch(
+                    &[("callHierarchy/incomingCalls", for_item.clone()), ("callHierarchy/outgoingCalls", for_item)],
+                    deadline,
+                )
+                .into_iter();
+            incoming = calls.next().and_then(Result::ok).map(|r| parse_calls(&r, "from")).unwrap_or_default();
+            outgoing = calls.next().and_then(Result::ok).map(|r| parse_calls(&r, "to")).unwrap_or_default();
         }
 
         // The token asked at: the reference or definition under `position`.
@@ -320,7 +353,10 @@ impl LspClient {
                 path: path.to_path_buf(),
                 range: super::Range { start: position, end: position },
             });
-        Ok(build(source, Answers { references, definitions, type_definitions, implementations, incoming, outgoing }))
+        Ok(build(
+            source,
+            Answers { hover, references, definitions, type_definitions, implementations, incoming, outgoing },
+        ))
     }
 
     /// Retries while the server says its state changed under the request
@@ -345,13 +381,29 @@ impl LspClient {
     }
 
     fn request_timeout(&mut self, method: &str, params: Value, timeout: Duration) -> Result<Value, LspError> {
+        let (tx, rx) = mpsc::channel();
+        let id = self.start_request(method, params, &tx)?;
+        // Only the pending entry keeps the queue open from here on.
+        drop(tx);
+        match rx.recv_timeout(timeout) {
+            Ok((_, Err(LspError::Closed(_)))) | Err(RecvTimeoutError::Disconnected) => Err(self.closed_error()),
+            Ok((_, reply)) => reply,
+            Err(RecvTimeoutError::Timeout) => {
+                self.pending.lock().unwrap().remove(&id);
+                Err(LspError::Timeout(method.to_string()))
+            }
+        }
+    }
+
+    /// Sends a request and returns its id; the reply arrives as `(id, reply)`
+    /// on `queue`.
+    fn start_request(&mut self, method: &str, params: Value, queue: &Sender<(u64, Reply)>) -> Result<u64, LspError> {
         if self.closed.load(Ordering::SeqCst) {
             return Err(self.closed_error());
         }
         self.next_id += 1;
         let id = self.next_id;
-        let (tx, rx) = mpsc::channel();
-        self.pending.lock().unwrap().insert(id, tx);
+        self.pending.lock().unwrap().insert(id, queue.clone());
         // The reader sets `closed` before failing the pending calls, so a call
         // registered after that is caught here instead of waiting for the timeout.
         if self.closed.load(Ordering::SeqCst) {
@@ -363,14 +415,98 @@ impl LspClient {
             self.pending.lock().unwrap().remove(&id);
             return Err(e);
         }
-        match rx.recv_timeout(timeout) {
-            Ok(Err(LspError::Closed(_))) | Err(RecvTimeoutError::Disconnected) => Err(self.closed_error()),
-            Ok(reply) => reply,
-            Err(RecvTimeoutError::Timeout) => {
-                self.pending.lock().unwrap().remove(&id);
-                Err(LspError::Timeout(method.to_string()))
+        Ok(id)
+    }
+
+    /// Gives up on a request: a late answer is dropped, and the server is
+    /// told it can stop working on it.
+    fn cancel(&mut self, id: u64) {
+        self.pending.lock().unwrap().remove(&id);
+        let _ = self.notify("$/cancelRequest", json!({"id": id}));
+    }
+
+    /// Sends every call at once and collects the answers, in the order of
+    /// `calls`, until all arrived or `deadline` passed. A server that says
+    /// the content changed under a request (rust-analyzer while it indexes)
+    /// gets it again after a short wait, without holding up the others; one
+    /// that exits fails everything left. What is still unanswered at the
+    /// deadline is cancelled and reported as a timeout.
+    fn batch(&mut self, calls: &[(&str, Value)], deadline: Instant) -> Vec<Reply> {
+        let (tx, queue) = mpsc::channel::<(u64, Reply)>();
+        let mut results: Vec<Option<Reply>> = calls.iter().map(|_| None).collect();
+        // id -> (call, attempt) for the requests on their way.
+        let mut in_flight: HashMap<u64, (usize, u32)> = HashMap::new();
+        // (when, call, attempt) of the requests to send again.
+        let mut retries: Vec<(Instant, usize, u32)> = Vec::new();
+        let send = |client: &mut Self,
+                        in_flight: &mut HashMap<u64, (usize, u32)>,
+                        results: &mut Vec<Option<Reply>>,
+                        call: usize,
+                        attempt: u32| {
+            let (method, params) = &calls[call];
+            match client.start_request(method, params.clone(), &tx) {
+                Ok(id) => {
+                    in_flight.insert(id, (call, attempt));
+                }
+                Err(e) => results[call] = Some(Err(e)),
+            }
+        };
+        for call in 0..calls.len() {
+            send(self, &mut in_flight, &mut results, call, 0);
+            // A server that is gone is gone for every call.
+            if matches!(results[call], Some(Err(LspError::Closed(_)))) {
+                let error = results[call].clone();
+                for later in &mut results[call + 1..] {
+                    *later = error.clone();
+                }
+                break;
             }
         }
+        while !in_flight.is_empty() || !retries.is_empty() {
+            let now = Instant::now();
+            let (due, later): (Vec<_>, Vec<_>) = retries.drain(..).partition(|(at, _, _)| *at <= now);
+            retries = later;
+            for (_, call, attempt) in due {
+                send(self, &mut in_flight, &mut results, call, attempt);
+            }
+            if now >= deadline {
+                break;
+            }
+            let next = retries.iter().map(|(at, _, _)| *at).min().map_or(deadline, |at| at.min(deadline));
+            let (id, reply) = match queue.recv_timeout(next.saturating_duration_since(now)) {
+                Ok(answer) => answer,
+                Err(RecvTimeoutError::Timeout) => continue,
+                Err(RecvTimeoutError::Disconnected) => break,
+            };
+            let Some((call, attempt)) = in_flight.remove(&id) else { continue };
+            match reply {
+                Err(LspError::Rpc { code, .. })
+                    if (code == CONTENT_MODIFIED || code == SERVER_CANCELLED) && attempt < MAX_RETRIES =>
+                {
+                    let wait = Duration::from_millis(100 * u64::from(attempt + 1));
+                    retries.push((Instant::now() + wait, call, attempt + 1));
+                }
+                Err(LspError::Closed(_)) => {
+                    let error = self.closed_error();
+                    results[call] = Some(Err(error.clone()));
+                    for (_, (other, _)) in in_flight.drain() {
+                        results[other] = Some(Err(error.clone()));
+                    }
+                    for (_, other, _) in retries.drain(..) {
+                        results[other] = Some(Err(error.clone()));
+                    }
+                }
+                other => results[call] = Some(other),
+            }
+        }
+        for (id, (call, _)) in std::mem::take(&mut in_flight) {
+            self.cancel(id);
+            results[call] = Some(Err(LspError::Timeout(calls[call].0.to_string())));
+        }
+        for (_, call, _) in retries {
+            results[call] = Some(Err(LspError::Timeout(calls[call].0.to_string())));
+        }
+        results.into_iter().map(|r| r.unwrap_or_else(|| Err(LspError::Io("no answer".into())))).collect()
     }
 
     pub fn notify(&mut self, method: &str, params: Value) -> Result<(), LspError> {
@@ -429,8 +565,8 @@ fn spawn_reader(
             dispatch(&msg, &writer, &pending, &progress, &configuration);
         }
         closed.store(true, Ordering::SeqCst);
-        for (_, tx) in pending.lock().unwrap().drain() {
-            let _ = tx.send(Err(LspError::Closed(String::new())));
+        for (id, tx) in pending.lock().unwrap().drain() {
+            let _ = tx.send((id, Err(LspError::Closed(String::new()))));
         }
     });
 }
@@ -466,7 +602,7 @@ fn dispatch(msg: &Value, writer: &SharedWriter, pending: &Pending, progress: &Pr
                 }),
                 None => Ok(msg.get("result").cloned().unwrap_or(Value::Null)),
             };
-            let _ = tx.send(reply);
+            let _ = tx.send((id, reply));
         }
         // A request from the server: answer so it doesn't wait on us.
         (Some(method), Some(id)) => {
@@ -686,6 +822,239 @@ mod tests {
         );
     }
 
+    // ---- symbol_graph: every query at once (TASK-90) ----
+
+    /// What the [`concurrent_server`] does with one request.
+    enum React {
+        Reply(Value),
+        /// Reply from another thread after a delay, so slow answers overlap.
+        After(Duration, Value),
+        Fail(i64, &'static str),
+        /// Never answer.
+        Silent,
+        /// The server process exits.
+        Exit,
+    }
+
+    /// Like [`fake_server`], but a request may be answered later or from
+    /// another thread, so requests in flight at once can be told apart from
+    /// requests one after another.
+    fn concurrent_server(
+        script: impl Fn(&Value) -> React + Send + 'static,
+    ) -> (Connection, thread::JoinHandle<Vec<Value>>) {
+        let (client_reader, server_writer) = std::io::pipe().unwrap();
+        let (server_reader, client_writer) = std::io::pipe().unwrap();
+        let handle = thread::spawn(move || {
+            let writer = Arc::new(Mutex::new(server_writer));
+            let send = |writer: &Arc<Mutex<PipeWriter>>, message: Value| {
+                let _ = write_message(&mut *writer.lock().unwrap(), &message);
+            };
+            let mut reader = BufReader::new(server_reader);
+            let mut seen = Vec::new();
+            while let Ok(Some(msg)) = read_message(&mut reader) {
+                let is_exit = msg["method"] == "exit";
+                let mut leave = is_exit;
+                if let (Some(id), Some(_)) = (msg.get("id").cloned(), msg.get("method")) {
+                    match script(&msg) {
+                        React::Reply(result) => send(&writer, json!({"jsonrpc": "2.0", "id": id, "result": result})),
+                        React::After(delay, result) => {
+                            let writer = writer.clone();
+                            thread::spawn(move || {
+                                thread::sleep(delay);
+                                send(&writer, json!({"jsonrpc": "2.0", "id": id, "result": result}));
+                            });
+                        }
+                        React::Fail(code, message) => send(
+                            &writer,
+                            json!({"jsonrpc": "2.0", "id": id, "error": {"code": code, "message": message}}),
+                        ),
+                        React::Silent => {}
+                        React::Exit => leave = true,
+                    }
+                }
+                seen.push(msg);
+                if leave {
+                    break;
+                }
+            }
+            seen
+        });
+        let conn = Connection { reader: Box::new(client_reader), writer: Box::new(client_writer), child: None, stderr: None };
+        (conn, handle)
+    }
+
+    fn span(line: usize, from: usize, to: usize) -> Value {
+        json!({"start": {"line": line, "character": from}, "end": {"line": line, "character": to}})
+    }
+
+    fn location(path: &str, line: usize) -> Value {
+        json!({"uri": format!("file://{path}"), "range": span(line, 3, 8)})
+    }
+
+    /// The answers of a server that knows everything about a symbol.
+    fn knowing(method: &str) -> Value {
+        match method {
+            "textDocument/hover" => json!({"contents": {"kind": "plaintext", "value": "fn hello()"}}),
+            "textDocument/references" => json!([location("/proj/a.rs", 0), location("/proj/b.rs", 4)]),
+            "textDocument/definition" => json!([location("/proj/a.rs", 0)]),
+            "textDocument/typeDefinition" | "textDocument/implementation" => json!([]),
+            "textDocument/prepareCallHierarchy" => json!([]),
+            _ => Value::Null,
+        }
+    }
+
+    const ASKED_AT: Position = Position { line: 0, character: 3 };
+
+    #[test]
+    fn a_symbol_graph_asks_everything_at_once_and_includes_the_hover() {
+        let (conn, server) = concurrent_server(|msg| match msg["method"].as_str().unwrap() {
+            "initialize" => React::Reply(json!({"capabilities": {}})),
+            "shutdown" => React::Reply(Value::Null),
+            method => React::After(Duration::from_millis(300), knowing(method)),
+        });
+        let mut client = LspClient::start(conn, Path::new("/proj"), SECOND).unwrap();
+        let started = Instant::now();
+        let graph = client.symbol_graph(Path::new("/proj/a.rs"), ASKED_AT).unwrap();
+        let took = started.elapsed();
+        // Six requests of 300 ms one after another would take 1.8 s.
+        assert!(took < Duration::from_millis(1000), "took {took:?}");
+        assert_eq!(graph.hover.as_ref().map(|h| h.text.as_str()), Some("fn hello()"));
+        assert!(graph.entries.iter().any(|e| e.path == Path::new("/proj/b.rs")), "{graph:?}");
+        drop(client);
+
+        let seen = server.join().unwrap();
+        let asked: Vec<&str> = seen.iter().filter_map(|m| m["method"].as_str()).collect();
+        for method in [
+            "textDocument/hover",
+            "textDocument/definition",
+            "textDocument/typeDefinition",
+            "textDocument/references",
+            "textDocument/implementation",
+            "textDocument/prepareCallHierarchy",
+        ] {
+            assert!(asked.contains(&method), "{method} in {asked:?}");
+        }
+        let references = seen.iter().find(|m| m["method"] == "textDocument/references").unwrap();
+        assert_eq!(references["params"]["context"]["includeDeclaration"], true);
+    }
+
+    #[test]
+    fn the_call_hierarchy_waits_for_its_item_but_shares_the_deadline() {
+        let item = json!({"name": "hello", "kind": 12, "uri": "file:///proj/a.rs",
+            "range": span(0, 0, 20), "selectionRange": span(0, 3, 8)});
+        let caller = json!({"name": "main", "kind": 12, "uri": "file:///proj/b.rs",
+            "range": span(4, 0, 9), "selectionRange": span(4, 3, 7)});
+        let (conn, _server) = concurrent_server(move |msg| match msg["method"].as_str().unwrap() {
+            "initialize" => React::Reply(json!({"capabilities": {}})),
+            "shutdown" => React::Reply(Value::Null),
+            "textDocument/prepareCallHierarchy" => React::Reply(json!([item])),
+            "callHierarchy/incomingCalls" => {
+                React::Reply(json!([{"from": caller, "fromRanges": [span(4, 4, 9)]}]))
+            }
+            "callHierarchy/outgoingCalls" => React::Silent,
+            method => React::Reply(knowing(method)),
+        });
+        let mut client = LspClient::start(conn, Path::new("/proj"), SECOND).unwrap();
+        let started = Instant::now();
+        let graph = client
+            .symbol_graph_within(Path::new("/proj/a.rs"), ASKED_AT, Duration::from_millis(600))
+            .unwrap();
+        assert!(started.elapsed() < Duration::from_millis(1500), "the unanswered outgoing calls end at the deadline");
+        let roles: Vec<_> = graph.entries.iter().map(|e| e.role).collect();
+        assert!(roles.contains(&super::super::graph::Role::InCaller), "incoming calls arrived: {roles:?}");
+        assert!(!roles.contains(&super::super::graph::Role::OutCallee), "outgoing never answered");
+    }
+
+    #[test]
+    fn what_has_not_answered_at_the_deadline_is_cancelled_and_the_rest_is_kept() {
+        let (conn, server) = concurrent_server(|msg| match msg["method"].as_str().unwrap() {
+            "initialize" => React::Reply(json!({"capabilities": {}})),
+            "shutdown" => React::Reply(Value::Null),
+            "textDocument/hover" => React::Silent,
+            method => React::Reply(knowing(method)),
+        });
+        let mut client = LspClient::start(conn, Path::new("/proj"), SECOND).unwrap();
+        let started = Instant::now();
+        let graph = client
+            .symbol_graph_within(Path::new("/proj/a.rs"), ASKED_AT, Duration::from_millis(400))
+            .unwrap();
+        assert!(started.elapsed() >= Duration::from_millis(400), "it waited for the deadline");
+        assert_eq!(graph.hover, None);
+        assert!(graph.entries.iter().any(|e| e.path == Path::new("/proj/b.rs")), "the references are kept");
+        drop(client);
+
+        let seen = server.join().unwrap();
+        let hover_id = seen.iter().find(|m| m["method"] == "textDocument/hover").unwrap()["id"].clone();
+        let cancelled: Vec<&Value> =
+            seen.iter().filter(|m| m["method"] == "$/cancelRequest").map(|m| &m["params"]["id"]).collect();
+        assert_eq!(cancelled, vec![&hover_id], "only the silent request is cancelled");
+    }
+
+    #[test]
+    fn the_query_fails_only_when_every_request_failed() {
+        let (conn, _server) = concurrent_server(|msg| match msg["method"].as_str().unwrap() {
+            "initialize" => React::Reply(json!({"capabilities": {}})),
+            "shutdown" => React::Reply(Value::Null),
+            "textDocument/references" => React::Fail(-32603, "references broke"),
+            _ => React::Fail(-32601, "unknown"),
+        });
+        let mut client = LspClient::start(conn, Path::new("/proj"), SECOND).unwrap();
+        let err = client.symbol_graph(Path::new("/proj/a.rs"), ASKED_AT).unwrap_err();
+        assert_eq!(err, LspError::Rpc { code: -32603, message: "references broke".into() }, "the references' error");
+
+        // One failing request is just left out: hover and the rest still arrive.
+        let (conn, _server) = concurrent_server(|msg| match msg["method"].as_str().unwrap() {
+            "initialize" => React::Reply(json!({"capabilities": {}})),
+            "shutdown" => React::Reply(Value::Null),
+            "textDocument/references" => React::Fail(-32603, "references broke"),
+            method => React::Reply(knowing(method)),
+        });
+        let mut client = LspClient::start(conn, Path::new("/proj"), SECOND).unwrap();
+        let graph = client.symbol_graph(Path::new("/proj/a.rs"), ASKED_AT).unwrap();
+        assert!(graph.hover.is_some() && !graph.entries.is_empty(), "{graph:?}");
+    }
+
+    #[test]
+    fn a_content_modified_request_is_asked_again_without_holding_up_the_others() {
+        let definitions = std::sync::atomic::AtomicUsize::new(0);
+        let (conn, server) = concurrent_server(move |msg| match msg["method"].as_str().unwrap() {
+            "initialize" => React::Reply(json!({"capabilities": {}})),
+            "shutdown" => React::Reply(Value::Null),
+            "textDocument/definition" if definitions.fetch_add(1, Ordering::SeqCst) < 2 => {
+                React::Fail(CONTENT_MODIFIED, "content modified")
+            }
+            method => React::Reply(knowing(method)),
+        });
+        let mut client = LspClient::start(conn, Path::new("/proj"), SECOND).unwrap();
+        let started = Instant::now();
+        let graph = client.symbol_graph(Path::new("/proj/a.rs"), ASKED_AT).unwrap();
+        // 100 ms then 200 ms of waiting, in parallel with everything else.
+        assert!(started.elapsed() < Duration::from_millis(1500));
+        assert!(
+            graph.entries.iter().any(|e| e.role == super::super::graph::Role::DefSel),
+            "the third attempt answered: {graph:?}"
+        );
+        drop(client);
+        let seen = server.join().unwrap();
+        assert_eq!(seen.iter().filter(|m| m["method"] == "textDocument/definition").count(), 3);
+    }
+
+    #[test]
+    fn a_server_that_exits_fails_every_request_at_once() {
+        let (conn, _server) = concurrent_server(|msg| match msg["method"].as_str().unwrap() {
+            "initialize" => React::Reply(json!({"capabilities": {}})),
+            "textDocument/references" => React::Exit,
+            _ => React::Silent,
+        });
+        let mut client = LspClient::start(conn, Path::new("/proj"), SECOND).unwrap();
+        let started = Instant::now();
+        let err = client
+            .symbol_graph_within(Path::new("/proj/a.rs"), ASKED_AT, Duration::from_secs(20))
+            .unwrap_err();
+        assert!(matches!(err, LspError::Closed(_)), "{err:?}");
+        assert!(started.elapsed() < Duration::from_secs(3), "it did not wait for the deadline");
+    }
+
     #[test]
     fn rust_analyzer_server_status_counts_as_progress() {
         let writer: SharedWriter = Arc::new(Mutex::new(Box::new(std::io::sink())));
@@ -813,6 +1182,14 @@ mod tests {
         assert!(found.contains(&(main_rs.clone(), 5)), "use in main.rs: {found:?}");
         assert!(found.contains(&(util_rs.clone(), 3)), "use in util.rs: {found:?}");
         assert!(found.contains(&(util_rs.clone(), 0)), "declaration: {found:?}");
+
+        // The whole graph at once, hover included, against the real server.
+        let started = Instant::now();
+        let graph = client.symbol_graph(&util_rs, hello).unwrap();
+        assert!(started.elapsed() < QUERY_DEADLINE, "answered before the deadline");
+        let hover = graph.hover.as_ref().map(|h| h.text.as_str()).unwrap_or_default();
+        assert!(hover.contains("hello"), "hover: {hover:?}");
+        assert!(graph.entries.iter().any(|e| e.path == main_rs), "the use in main.rs: {:?}", graph.entries);
     }
 
     /// A folder of crates has no manifest at its root: only the linked
