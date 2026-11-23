@@ -121,8 +121,11 @@ impl DependencyIndexer {
     /// the open file nodes) of the project at `root`.
     pub fn rebuild(&mut self, manager: &mut LspManager, root: &Path, files: &[(&Path, &str)]) {
         if self.root.as_deref() != Some(root) {
+            // A new project starts over, but the folder's files were handed in
+            // for it just before this call.
             *self = Self {
                 root: Some(root.to_path_buf()),
+                workspace_index: self.workspace_index.clone(),
                 ..Self::default()
             };
         }
@@ -776,5 +779,18 @@ mod tests {
         indexer.refresh_local_snapshot(root, &[app, a]);
         let links = indexer.links(&OpenFiles::new([app, a]));
         assert_eq!((links.len(), links[0].target.as_path()), (1, a.0));
+    }
+
+    #[test]
+    fn the_first_rebuild_of_a_project_keeps_the_folders_files_it_was_given() {
+        let root = Path::new("/p");
+        let folder = vec![PathBuf::from("/p/web/a.ts")];
+        let mut indexer = DependencyIndexer::default();
+        indexer.set_workspace_index(Arc::new(crate::analysis::dependencies::WorkspaceIndex::new(&folder)));
+        let mut manager = failing_manager();
+        let app = (Path::new("/p/web/app.ts"), "import { a } from './a';\n");
+        // The root is new here, which resets the indexer.
+        indexer.rebuild(&mut manager, root, &[app]);
+        assert_eq!(indexer.local.links.len(), 1, "the import still resolves to the folder's a.ts");
     }
 }
