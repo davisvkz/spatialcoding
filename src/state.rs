@@ -325,6 +325,9 @@ pub struct LspSettings {
     pub reveal_through_collapse: bool,
     /// Mark references outside the view on the canvas border.
     pub out_of_view: bool,
+    /// Start servers with the project's environment (login shell, direnv)
+    /// instead of the app's own; see `analysis::lsp::environment`.
+    pub load_project_env: bool,
 }
 
 impl Default for LspSettings {
@@ -339,6 +342,7 @@ impl Default for LspSettings {
             dim_pct: 0.8,
             reveal_through_collapse: false,
             out_of_view: false,
+            load_project_env: true,
         }
     }
 }

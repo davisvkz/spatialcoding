@@ -276,6 +276,12 @@ fn run(client: &mut LspClient, request: &LspRequest) -> LspResponse {
 /// suggests in `.codecanvas/settings.json` and the user allowed (an
 /// unanswered suggestion is queued for the dialog); then the defaults.
 pub fn server_command(server: ServerId, root: &Path) -> Result<Vec<String>, String> {
+    server_command_in(server, root, None)
+}
+
+/// [`server_command`] looking the defaults up in `path`, the project's `PATH`
+/// (see [`super::environment`]).
+pub fn server_command_in(server: ServerId, root: &Path, path: Option<&str>) -> Result<Vec<String>, String> {
     let suggested = if std::env::var_os(server.env_var()).is_some() {
         None
     } else {
@@ -283,15 +289,24 @@ pub fn server_command(server: ServerId, root: &Path) -> Result<Vec<String>, Stri
     };
     match suggested {
         Some(cmd) => Ok(cmd),
-        None => server.command(),
+        None => server.command_in(path),
     }
 }
 
 /// The default [`Launcher`]: runs [`ServerId::command`] in `root` with piped
 /// stdio.
 pub fn spawn_server(server: ServerId, root: &Path) -> Result<Connection, String> {
-    let cmd = server_command(server, root)?;
-    let mut child = Command::new(&cmd[0])
+    // The project's environment (login shell, direnv): the first server of a
+    // folder waits for it here, on its own worker thread, and the rest share it.
+    let project_env = super::environment::env_for(root);
+    let path = project_env.as_ref().and_then(|env| env.path());
+    let cmd = server_command_in(server, root, path)?;
+    let program = super::environment::which_in(&cmd[0], path).unwrap_or_else(|| PathBuf::from(&cmd[0]));
+    let mut command = Command::new(program);
+    if let Some(env) = &project_env {
+        env.apply(&mut command);
+    }
+    let mut child = command
         .args(&cmd[1..])
         .current_dir(root)
         .stdin(Stdio::piped())

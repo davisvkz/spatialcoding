@@ -6,7 +6,7 @@ use std::time::{Duration, Instant};
 use egui::{Modifiers, Pos2};
 use egui_kittest::kittest::Queryable;
 use spatialcoding::analysis::lsp::install::{Download, Downloader, Installer, Platform, Probe};
-use spatialcoding::analysis::lsp::resolve_command;
+use spatialcoding::analysis::lsp::{resolve_command, ServerId};
 use spatialcoding::nodes::file_node::{line_height, CODE_PADDING, HEADER_HEIGHT};
 use spatialcoding::state::RightPanel;
 use spatialcoding::ui::lsp_panel::LineHighlight;
@@ -429,7 +429,19 @@ fn language_servers_dialog_lists_servers_and_file_counts() {
     app.get_by_label("Repository files");
     app.get_by_label("Rust");
     app.get_by_label("TypeScript");
-    assert!(app.get_by_label("Load project environment").is_disabled());
+    // The project environment switch works: it is on by default and turning it
+    // off or on starts the servers again.
+    assert!(!app.get_by_label("Load project environment").is_disabled());
+    assert!(app.app_state().settings.lsp.load_project_env);
+    let root = fx.root.clone();
+    assert!(app.app_state().lsp.manager.status(ServerId::Rust, &root).is_some(), "a server is running");
+    app.get_by_label("Load project environment").click();
+    app.run();
+    assert!(!app.app_state().settings.lsp.load_project_env);
+    assert_eq!(app.app_state().lsp.manager.status(ServerId::Rust, &root), None, "the servers were restarted");
+    app.get_by_label("Load project environment").click();
+    app.run();
+    assert!(app.app_state().settings.lsp.load_project_env);
     app.get_by_label("Canvas").click();
     app.run();
     app.get_by_label("Canvas files");

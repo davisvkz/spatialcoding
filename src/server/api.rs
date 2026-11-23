@@ -281,11 +281,14 @@ fn search(state: &AppState, args: &Value) -> Result<Value, String> {
 
 fn lsp_servers(state: &AppState, action: &str) -> Result<Value, String> {
     use crate::analysis::lsp::ServerId;
+    // Only what is loaded already: asking never starts a shell.
+    let project_env = state.loaded_dir.as_deref().and_then(crate::analysis::lsp::environment::cached);
+    let project_path = project_env.as_ref().and_then(|env| env.path().map(str::to_owned));
     Ok(match action {
         "detect" => Value::Array(
             ServerId::ALL
                 .iter()
-                .map(|server| match server.command() {
+                .map(|server| match server.command_in(project_path.as_deref()) {
                     Ok(command) => json!({"language": server.name(), "found": true, "command": command}),
                     Err(e) => json!({"language": server.name(), "found": false, "error": e, "env": server.env_var()}),
                 })

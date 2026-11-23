@@ -398,6 +398,7 @@ pub fn rebuild_edges(state: &mut AppState) {
 /// indexer, and updates the edges when the indexer learned something. Called
 /// every frame.
 pub fn poll_lsp(state: &mut AppState) {
+    crate::analysis::lsp::environment::sync_enabled(state.settings.lsp.load_project_env);
     for (server, result) in state.lsp.installer.take_finished() {
         match result {
             Ok(()) => {

@@ -10,6 +10,7 @@
 //! `PATH`, else a copy downloaded by [`install`].
 
 pub mod client;
+pub mod environment;
 pub mod graph;
 pub mod install;
 pub mod manager;
@@ -247,8 +248,14 @@ impl ServerId {
     /// The command to start this server: the env override, else the first
     /// default found on `PATH`, else the copy [`install`] downloaded.
     pub fn command(self) -> Result<Vec<String>, String> {
+        self.command_in(None)
+    }
+
+    /// [`Self::command`] looking the default commands up in `path` (the
+    /// project's `PATH`, see [`environment`]) instead of the app's own.
+    pub fn command_in(self, path: Option<&str>) -> Result<Vec<String>, String> {
         let dir = install::install_dir();
-        resolve_command_with(self, |key| std::env::var(key).ok(), on_path, |server| {
+        resolve_command_with(self, |key| std::env::var(key).ok(), |program| on_path_in(program, path), |server| {
             install::managed_command(server, &dir)
         })
     }
@@ -326,10 +333,15 @@ pub fn resolve_command_with(
 
 /// True if `program` is an executable file in a `PATH` directory.
 fn on_path(program: &str) -> bool {
-    let Some(path) = std::env::var_os("PATH") else {
-        return false;
-    };
-    std::env::split_paths(&path).any(|dir| is_executable(&dir.join(program)))
+    on_path_in(program, None)
+}
+
+/// [`on_path`] in `path`, or in the process's `PATH` when `None`.
+fn on_path_in(program: &str, path: Option<&str>) -> bool {
+    match path.map(std::ffi::OsString::from).or_else(|| std::env::var_os("PATH")) {
+        Some(path) => std::env::split_paths(&path).any(|dir| is_executable(&dir.join(program))),
+        None => false,
+    }
 }
 
 #[cfg(unix)]
@@ -472,5 +484,21 @@ mod tests {
         assert!(settings.initialization_options.is_none());
         assert_eq!(ServerId::Go.settings(Path::new("/p")), ServerSettings::default());
         assert_eq!(ServerId::TypeScript.settings(Path::new("/p")), ServerSettings::default());
+    }
+
+    #[test]
+    fn default_commands_are_found_in_the_projects_path_not_only_the_apps() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let tool = dir.path().join("gopls");
+        std::fs::write(&tool, "#!/bin/sh\n").unwrap();
+        std::fs::set_permissions(&tool, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let project_path = dir.path().to_str().unwrap();
+        let resolve = |path: Option<&str>| {
+            resolve_command_with(ServerId::Go, |_| None, |p| on_path_in(p, path), |_| None)
+        };
+        assert_eq!(resolve(Some(project_path)), Ok(vec!["gopls".to_string()]));
+        assert!(resolve(Some("/nonexistent")).is_err(), "the app's own PATH is not consulted when one is given");
+        assert!(on_path_in("gopls", Some(project_path)) && !on_path_in("gopls", Some("")));
     }
 }

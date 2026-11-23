@@ -699,6 +699,9 @@ pub fn draw_language_servers(ctx: &egui::Context, state: &mut AppState) {
             });
             ui.separator();
             let root = state.loaded_dir.clone().unwrap_or_default();
+            // Only what is loaded already: the dialog never starts a shell.
+            let project_env = crate::analysis::lsp::environment::cached(&root);
+            let project_path = project_env.as_ref().and_then(|env| env.path().map(str::to_owned));
             let ctx = ui.ctx().clone();
             let mut to_install: Option<ServerId> = None;
             let mut to_remove: Option<ServerId> = None;
@@ -706,7 +709,7 @@ pub fn draw_language_servers(ctx: &egui::Context, state: &mut AppState) {
                 for server in ServerId::ALL {
                     let availability = state.lsp.installer.availability(server);
                     ui.label(egui::RichText::new(server.name()).strong());
-                    match server.command() {
+                    match server.command_in(project_path.as_deref()) {
                         Ok(cmd) => {
                             let text = cmd.join(" ");
                             ui.add(egui::Label::new(egui::RichText::new(&text).monospace()).truncate())
@@ -790,14 +793,20 @@ pub fn draw_language_servers(ctx: &egui::Context, state: &mut AppState) {
             }
             ui.weak("Override a server's command with its SPATIALCODING_LSP_* variable (see the docs).");
             ui.separator();
-            let mut env = false;
-            crate::ui::panel::disabled_switch(
-                ui,
-                &mut env,
-                "Load project environment",
-                "Servers start with SpatialCoding's own environment; loading the project's shell, \
-                 version managers or direnv is not supported here.",
-            );
+            let before = state.settings.lsp.load_project_env;
+            crate::ui::panel::switch(ui, &mut state.settings.lsp.load_project_env, "Load project environment")
+                .on_hover_text(
+                    "Start servers with the environment of your login shell in the project folder, plus \
+                     what direnv exports for an .envrc, so toolchains from rustup, mise, asdf or Nix are \
+                     found. SPATIALCODING_LSP_SHELL_ENV=0 turns it off for good.",
+                );
+            if state.settings.lsp.load_project_env != before {
+                // The servers start again, now with (or without) that environment.
+                state.lsp.manager.restart_servers();
+            }
+            if let Some(notice) = project_env.as_ref().and_then(|env| env.notice.as_deref()) {
+                ui.colored_label(ui.visuals().warn_fg_color, notice);
+            }
         });
     if !open {
         state.lsp.show_servers = false;
