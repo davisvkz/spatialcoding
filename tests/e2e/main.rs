@@ -22,6 +22,7 @@ mod git_changes;
 mod ignore;
 mod file_tree;
 mod layout_panel;
+mod layout_report;
 mod lsp_panel;
 mod manual_fixtures;
 mod mcp;

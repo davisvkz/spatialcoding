@@ -100,3 +100,49 @@ fn advanced_settings_controls_edit_the_layout_settings_and_reset_config_restores
     assert_eq!((s.folder_spacing, s.folder_padding, s.rank_breaking), (500.0, 80.0, 6));
     assert!(!s.auto_layout, "Reset Config keeps the Auto Layout toggle");
 }
+
+fn layout_panel_app(fx: &Fixture) -> App {
+    let mut app = app_with(fx);
+    app.app_state_mut().left_panel = None;
+    app.app_state_mut().right_panel = Some(RightPanel::Layout);
+    app.run();
+    app
+}
+
+#[test]
+fn the_barycenter_switch_is_off_by_default_and_reset_config_turns_it_off() {
+    let fx = fixture();
+    let mut app = layout_panel_app(&fx);
+    assert!(!app.app_state().layout_settings.barycenter, "off by default");
+
+    app.get_by_label("Barycenter").click();
+    app.run();
+    assert!(app.app_state().layout_settings.barycenter);
+
+    app.get_by_label("Reset Config").click();
+    app.run();
+    assert!(!app.app_state().layout_settings.barycenter);
+}
+
+#[test]
+fn apply_layout_uses_the_canvas_node_size_and_keeps_the_selected_file_still() {
+    let fx = fixture();
+    let mut app = layout_panel_app(&fx);
+    app.app_state_mut().layout_settings.auto_layout = false;
+    app.app_state_mut().settings.node_width = 900.0;
+    let util = app.open(&fx.path("src/util.rs"));
+    let main = app.open(&fx.path("src/main.rs"));
+    app.app_state_mut().selection.select(util);
+    let before = app.app_state().viewport.world_to_screen(app.node_center(util));
+
+    app.get_by_label("Apply Layout").click();
+    app.run();
+
+    let s = app.app_state();
+    assert_eq!(
+        app.node_position(util).x - app.node_position(main).x,
+        900.0 + s.layout_settings.file_spacing,
+        "the columns are as wide as the nodes on the canvas, not the default node width"
+    );
+    assert_close(s.viewport.world_to_screen(app.node_center(util)), before);
+}

@@ -4,13 +4,19 @@
 //! folder (and at the top level) its items, files and nested folders, are
 //! placed in columns by dependency rank: an item that uses another sits to
 //! its left. Cycles are broken by dropping DFS back edges, so every member
-//! of a cycle still gets its own column. Each column is ordered once by the
-//! barycenter of its predecessors to cut edge crossings.
+//! of a cycle still gets its own column.
 //!
-//! Rank Breaking splits a column that is much taller than it is wide into
-//! side-by-side sub-columns of the same rank; H Align places narrower items
-//! inside their column, and V Align places each column (Fill spreads its
-//! items over the tallest column's height).
+//! Items that only use each other, or nothing at all, are islands: they are
+//! ranked on their own and sit in columns after the ones that connect to the
+//! rest of the project. Within a column items are ordered by how connected
+//! they are (`in*4 + out*2 + in_siblings*3 + out_siblings`), and, when the
+//! Barycenter setting is on, by where their neighbours sit.
+//!
+//! Rank Breaking splits the tallest column of a folder in two, where no edge
+//! crosses the cut, until the folder is no taller than the level times the
+//! columns' width; H Align places narrower items inside their column, and V
+//! Align places each column (Fill spreads its items over the tallest
+//! column's height).
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 
@@ -28,6 +34,9 @@ const VERTICAL_GAP_RATIO: f32 = 0.5;
 /// A group wider than this many times its height is "too wide": v2 keeps
 /// folders roughly square, stacking sibling folders instead of chaining them.
 const MAX_GROUP_ASPECT: f32 = 1.6;
+
+/// How many times Rank Breaking cuts a folder's columns at most.
+const MAX_RANK_BREAKS: usize = 10;
 
 /// Gap between a collapsed folder's card and the revealed files under it.
 const REVEALED_GAP: f32 = 24.0;
@@ -49,6 +58,42 @@ impl Item {
 
 /// One level of the folder tree: the top level (`None`) or a folder.
 type Group = Option<u64>;
+
+/// How connected an item is, in file-to-file edges (each pair of files once,
+/// edges inside the item not counted). The `*_siblings` ones only count the
+/// edges whose other end is a sibling in the same group.
+#[derive(Debug, Default, Clone, Copy)]
+struct Degrees {
+    incoming: u32,
+    outgoing: u32,
+    incoming_siblings: u32,
+    outgoing_siblings: u32,
+}
+
+impl Degrees {
+    /// The key a column is ordered by.
+    fn score(self) -> u32 {
+        self.incoming * 4 + self.outgoing * 2 + self.incoming_siblings * 3 + self.outgoing_siblings
+    }
+}
+
+/// What laying out one group reads besides its own items and edges.
+#[derive(Clone, Copy)]
+struct Context<'a> {
+    nodes: &'a NodeStore,
+    settings: &'a LayoutSettings,
+    /// Revealed files of each collapsed card.
+    revealed: &'a HashMap<u64, Vec<u64>>,
+    connectivity: &'a Connectivity,
+}
+
+/// What the edges say about the items of one folder tree.
+#[derive(Default)]
+struct Connectivity {
+    degrees: HashMap<Item, Degrees>,
+    /// Items with an edge to something outside their group.
+    open: HashSet<Item>,
+}
 
 struct Placement {
     /// Item positions relative to their group's content origin.
@@ -141,6 +186,8 @@ pub fn apply_layout(nodes: &mut NodeStore, edges: &EdgeStore, settings: &LayoutS
     // files' chains part: the deepest group holding both.
     let mut group_edges: HashMap<Group, HashSet<(Item, Item)>> = HashMap::new();
     let mut chains: HashMap<u64, Vec<Item>> = HashMap::new();
+    let mut connectivity = Connectivity::default();
+    let mut counted: HashSet<(u64, u64)> = HashSet::new();
     for edge in edges.all_edges() {
         if !feeds_layout(edge)
             || edge.source_node == edge.target_node
@@ -155,6 +202,29 @@ pub fn apply_layout(nodes: &mut NodeStore, edges: &EdgeStore, settings: &LayoutS
         let (Some(&a), Some(&b)) = (cs.get(k), ct.get(k)) else { continue };
         let group = if k == 0 { None } else { Some(cs[k - 1].id()) };
         group_edges.entry(group).or_default().insert((a, b));
+        // Degrees: every item from the one where the chains part down to the
+        // file has this edge once. Below the meeting group the other end is
+        // outside the item's own group, which leaves it open.
+        if counted.insert((edge.source_node, edge.target_node)) {
+            for (j, &item) in cs.iter().enumerate().skip(k) {
+                let degrees = connectivity.degrees.entry(item).or_default();
+                degrees.outgoing += 1;
+                if j == k {
+                    degrees.outgoing_siblings += 1;
+                } else {
+                    connectivity.open.insert(item);
+                }
+            }
+            for (j, &item) in ct.iter().enumerate().skip(k) {
+                let degrees = connectivity.degrees.entry(item).or_default();
+                degrees.incoming += 1;
+                if j == k {
+                    degrees.incoming_siblings += 1;
+                } else {
+                    connectivity.open.insert(item);
+                }
+            }
+        }
     }
 
     // Bottom-up: deepest groups first, so a folder's size is known before
@@ -176,7 +246,7 @@ pub fn apply_layout(nodes: &mut NodeStore, edges: &EdgeStore, settings: &LayoutS
     for group in groups {
         let items = &children[&group];
         let item_edges = group_edges.get(&group).unwrap_or(&empty);
-        layout_group(group, items, item_edges, nodes, settings, &revealed, &mut placement);
+        layout_group(group, items, item_edges, Context { nodes, settings, revealed: &revealed, connectivity: &connectivity }, &mut placement);
     }
 
     // Top-down: absolute positions.
@@ -222,15 +292,19 @@ fn layout_group(
     group: Group,
     items: &[Item],
     item_edges: &HashSet<(Item, Item)>,
-    nodes: &NodeStore,
-    settings: &LayoutSettings,
-    revealed: &HashMap<u64, Vec<u64>>,
+    cx: Context<'_>,
     placement: &mut Placement,
 ) {
+    let Context { nodes, settings, revealed, connectivity } = cx;
     if items.is_empty() {
         placement.sizes.insert(group, Vec2::ZERO);
         return;
     }
+    // The order the items were collected in depends on hash maps: sort them,
+    // so the same project always gets the same layout.
+    let mut items = items.to_vec();
+    items.sort();
+    let items = items.as_slice();
     let pad = settings.folder_padding;
     let size_of = |item: Item, sizes: &HashMap<Group, Vec2>| -> Vec2 {
         match item {
@@ -262,20 +336,34 @@ fn layout_group(
         .map(|&it| (it, size_of(it, &placement.sizes)))
         .collect();
     let v_gap = settings.file_spacing * VERTICAL_GAP_RATIO;
+    let islands = islands(items, item_edges, &connectivity.open);
     let arrange = |stack_folders: bool, max_columns: usize| -> Vec<Vec<Item>> {
         let edges = item_edges;
         let ranks = rank_items(items, edges, stack_folders);
         let last = max_columns - 1;
-        let max_rank = ranks.values().map(|&r| r.min(last)).max().unwrap_or(0);
+        // Islands come after the columns of what connects to the project.
+        let first_island = items
+            .iter()
+            .filter(|it| !islands.contains(it))
+            .map(|it| ranks[it].min(last) + 1)
+            .max()
+            .unwrap_or(0);
+        let column_of = |item: Item| -> usize {
+            let rank = ranks[&item];
+            if islands.contains(&item) { (first_island + rank).min(last) } else { rank.min(last) }
+        };
+        let max_rank = items.iter().map(|&it| column_of(it)).max().unwrap_or(0);
         let mut columns: Vec<Vec<Item>> = vec![Vec::new(); max_rank + 1];
         for &item in items {
-            columns[ranks[&item].min(last)].push(item);
+            columns[column_of(item)].push(item);
         }
         for column in &mut columns {
-            sort_column(column, settings.sort);
+            sort_column(column, settings.sort, |it| connectivity.degrees.get(&it).copied().unwrap_or_default().score());
         }
-        order_by_barycenter(&mut columns, edges);
-        break_ranks(columns, &item_size, v_gap, settings.rank_breaking)
+        if settings.barycenter {
+            order_by_barycenter(&mut columns, edges);
+        }
+        break_ranks(columns, &item_size, v_gap, settings.rank_breaking, edges)
     };
     let mut columns = arrange(false, usize::MAX);
 
@@ -396,43 +484,113 @@ fn column_height(sizes: &[Vec2], v_gap: f32) -> f32 {
     sizes.iter().map(|s| s.y).sum::<f32>() + sizes.len().saturating_sub(1) as f32 * v_gap
 }
 
-/// Rank Breaking: a column taller than `level` times its width is split into
-/// `ceil(height / (level * width))` side-by-side columns of balanced height,
-/// keeping its order. Lower levels split sooner; `0` (Off) keeps one column
-/// per rank.
-fn break_ranks(columns: Vec<Vec<Item>>, size: &HashMap<Item, Vec2>, v_gap: f32, level: u32) -> Vec<Vec<Item>> {
+/// Rank Breaking. While the tallest column of a group is more than `level`
+/// times as tall as all the columns are wide together (at most
+/// [`MAX_RANK_BREAKS`] times), the tallest column that has a legal cut is cut
+/// in two, near the middle of its height, and the second half becomes the
+/// column next to it. A cut is legal when no edge between two items of the
+/// column crosses it. `0` (Off) keeps one column per rank.
+fn break_ranks(
+    mut columns: Vec<Vec<Item>>,
+    size: &HashMap<Item, Vec2>,
+    v_gap: f32,
+    level: u32,
+    item_edges: &HashSet<(Item, Item)>,
+) -> Vec<Vec<Item>> {
     if level == 0 {
         return columns;
     }
-    let mut out = Vec::with_capacity(columns.len());
-    for column in columns {
-        let sizes: Vec<Vec2> = column.iter().map(|it| size[it]).collect();
-        let width = sizes.iter().map(|s| s.x).fold(0.0, f32::max).max(1.0);
-        let height = column_height(&sizes, v_gap);
-        let limit = level as f32 * width;
-        let parts = ((height / limit).ceil() as usize).clamp(1, column.len().max(1));
-        if parts <= 1 {
-            out.push(column);
-            continue;
+    let heights = |columns: &[Vec<Item>]| -> Vec<f32> {
+        columns.iter().map(|c| column_height(&c.iter().map(|it| size[it]).collect::<Vec<_>>(), v_gap)).collect()
+    };
+    for _ in 0..MAX_RANK_BREAKS {
+        let used = columns.iter().filter(|c| !c.is_empty()).count();
+        let width = columns
+            .iter()
+            .flatten()
+            .map(|it| size[it].x)
+            .fold(0.0, f32::max)
+            .max(1.0);
+        let column_heights = heights(&columns);
+        let tallest = column_heights.iter().copied().fold(0.0, f32::max);
+        if tallest <= level as f32 * used as f32 * width {
+            break;
         }
-        let target = height / parts as f32;
-        let mut current: Vec<Item> = Vec::new();
-        let mut current_h = 0.0;
-        let mut left = parts;
-        for (i, item) in column.iter().enumerate() {
-            let h = sizes[i].y;
-            let remaining_items = column.len() - i;
-            if !current.is_empty() && left > 1 && (current_h + h > target || remaining_items < left) {
-                out.push(std::mem::take(&mut current));
-                current_h = 0.0;
-                left -= 1;
-            }
-            current_h += h + v_gap;
-            current.push(*item);
-        }
-        out.push(current);
+        let mut by_height: Vec<usize> = (0..columns.len()).filter(|&c| columns[c].len() >= 2).collect();
+        by_height.sort_by(|&a, &b| column_heights[b].total_cmp(&column_heights[a]).then(a.cmp(&b)));
+        let cut = by_height
+            .into_iter()
+            .find_map(|c| middle_cut(&columns[c], size, v_gap, item_edges).map(|at| (c, at)));
+        let Some((c, at)) = cut else { break };
+        let tail = columns[c].split_off(at);
+        columns.insert(c + 1, tail);
     }
-    out
+    columns
+}
+
+/// Where to cut `column` in two: the number of items that stay in the first
+/// half, the one nearest to half of the column's height such that no edge of
+/// `item_edges` between two items of the column crosses it. `None` when every
+/// cut would separate the two ends of an edge.
+fn middle_cut(column: &[Item], size: &HashMap<Item, Vec2>, v_gap: f32, item_edges: &HashSet<(Item, Item)>) -> Option<usize> {
+    let position: HashMap<Item, usize> = column.iter().enumerate().map(|(i, &it)| (it, i)).collect();
+    // `crossing[i]` counts the edges that a cut after `i` items would split.
+    let mut crossing = vec![0i32; column.len() + 1];
+    for &(a, b) in item_edges {
+        if let (Some(&p), Some(&q)) = (position.get(&a), position.get(&b)) {
+            let (low, high) = (p.min(q), p.max(q));
+            crossing[low + 1] += 1;
+            crossing[high + 1] -= 1;
+        }
+    }
+    let total = column_height(&column.iter().map(|it| size[it]).collect::<Vec<_>>(), v_gap);
+    let mut open = 0;
+    let mut above = 0.0;
+    let mut best: Option<(f32, usize)> = None;
+    for (i, item) in column.iter().enumerate().take(column.len() - 1) {
+        above += size[item].y + if i > 0 { v_gap } else { 0.0 };
+        open += crossing[i + 1];
+        if open == 0 {
+            let distance = (above - total / 2.0).abs();
+            if best.is_none_or(|(d, _)| distance < d) {
+                best = Some((distance, i + 1));
+            }
+        }
+    }
+    best.map(|(_, at)| at)
+}
+
+/// The items that only use each other: every connected component of the
+/// group's items (by its edges, in any direction) in which no item has an
+/// edge to something outside the group. An item with no edge at all is one.
+fn islands(items: &[Item], item_edges: &HashSet<(Item, Item)>, open: &HashSet<Item>) -> HashSet<Item> {
+    let index: HashMap<Item, usize> = items.iter().enumerate().map(|(i, &it)| (it, i)).collect();
+    let mut parent: Vec<usize> = (0..items.len()).collect();
+    fn root(parent: &mut [usize], mut i: usize) -> usize {
+        while parent[i] != i {
+            parent[i] = parent[parent[i]];
+            i = parent[i];
+        }
+        i
+    }
+    for &(a, b) in item_edges {
+        if let (Some(&a), Some(&b)) = (index.get(&a), index.get(&b)) {
+            let (ra, rb) = (root(&mut parent, a), root(&mut parent, b));
+            parent[ra] = rb;
+        }
+    }
+    let mut connected: HashSet<usize> = HashSet::new();
+    for (i, item) in items.iter().enumerate() {
+        if open.contains(item) {
+            connected.insert(root(&mut parent, i));
+        }
+    }
+    items
+        .iter()
+        .enumerate()
+        .filter(|&(i, _)| !connected.contains(&root(&mut parent, i)))
+        .map(|(_, &item)| item)
+        .collect()
 }
 
 /// Longest-path rank of each item after dropping the back edges a DFS finds
@@ -507,16 +665,20 @@ fn rank_items(items: &[Item], item_edges: &HashSet<(Item, Item)>, stack_folders:
     rank
 }
 
-fn sort_column(column: &mut [Item], mode: SortMode) {
+/// Orders a column by `score` (how connected an item is), and by id among
+/// equal ones. Desc puts the most connected on top; Alt and Alt Rev deal the
+/// sorted items out alternately; Off keeps the order the items came in.
+fn sort_column(column: &mut [Item], mode: SortMode, score: impl Fn(Item) -> u32) {
+    let key = |it: &Item| (score(*it), it.id());
     match mode {
-        SortMode::Asc => column.sort_by_key(|it| it.id()),
-        SortMode::Desc => column.sort_by_key(|it| std::cmp::Reverse(it.id())),
+        SortMode::Asc => column.sort_by_key(key),
+        SortMode::Desc => column.sort_by_key(|it| std::cmp::Reverse(key(it))),
         SortMode::Alt => {
-            column.sort_by_key(|it| it.id());
+            column.sort_by_key(key);
             interleave(column);
         }
         SortMode::AltRev => {
-            column.sort_by_key(|it| std::cmp::Reverse(it.id()));
+            column.sort_by_key(|it| std::cmp::Reverse(key(it)));
             interleave(column);
         }
         SortMode::Off => {}
@@ -860,8 +1022,13 @@ mod tests {
         let mut edges = EdgeStore::default();
         edges.add(ids[0], ids[3], None); // a -> d
         edges.add(ids[1], ids[2], None); // b -> c
-        apply_layout(&mut nodes, &edges, &settings(SortMode::Asc, VAlign::Top));
+        let mut s = settings(SortMode::Asc, VAlign::Top);
+        // By score alone c and d tie and c comes first; the sweep follows the importers.
+        apply_layout(&mut nodes, &edges, &s);
+        assert!(pos(&nodes, ids[2]).y < pos(&nodes, ids[3]).y, "off: the order of equal scores is by id");
 
+        s.barycenter = true;
+        apply_layout(&mut nodes, &edges, &s);
         assert!(pos(&nodes, ids[3]).y < pos(&nodes, ids[2]).y, "d follows a, c follows b");
     }
 
@@ -898,21 +1065,222 @@ mod tests {
         }
     }
 
+    /// The columns of `ids` as their distinct x positions, left to right.
+    fn columns_of(nodes: &NodeStore, ids: &[u64]) -> Vec<f32> {
+        let mut xs: Vec<f32> = ids.iter().map(|&id| pos(nodes, id).x).collect();
+        xs.sort_by(f32::total_cmp);
+        xs.dedup();
+        xs
+    }
+
+    /// Tallest column over the width of all the columns together, as Rank Breaking measures it.
+    fn aspect_of(nodes: &NodeStore, ids: &[u64]) -> f32 {
+        let xs = columns_of(nodes, ids);
+        let tallest = xs
+            .iter()
+            .map(|&x| {
+                let column: Vec<u64> = ids.iter().copied().filter(|&id| pos(nodes, id).x == x).collect();
+                column.iter().map(|&id| height(nodes, id)).sum::<f32>() + (column.len() - 1) as f32 * SPACING * VERTICAL_GAP_RATIO
+            })
+            .fold(0.0, f32::max);
+        tallest / (xs.len() as f32 * NODE_WIDTH)
+    }
+
     #[test]
-    fn split_columns_keep_balanced_order() {
-        let level = 2;
+    fn rank_breaking_cuts_a_group_only_until_it_is_square_enough() {
         let (mut nodes, ids) = tall_store(6, 120);
         let mut s = settings(SortMode::Asc, VAlign::Top);
-        s.rank_breaking = level;
+        for level in [1u32, 2, 4] {
+            s.rank_breaking = level;
+            apply_layout(&mut nodes, &EdgeStore::default(), &s);
+            let xs: Vec<f32> = ids.iter().map(|&id| pos(&nodes, id).x).collect();
+            assert!(xs.windows(2).all(|w| w[0] <= w[1]), "level {level}: order kept across the columns: {xs:?}");
+            let aspect = aspect_of(&nodes, &ids);
+            let columns = columns_of(&nodes, &ids).len();
+            assert!(columns > 1, "level {level}: the column was cut");
+            assert!(aspect <= level as f32 || columns == 6, "level {level}: {columns} columns, aspect {aspect}");
+        }
+    }
+
+    #[test]
+    fn rank_breaking_cuts_near_the_middle_and_at_most_ten_times() {
+        let (mut nodes, ids) = tall_store(4, 120);
+        let mut s = settings(SortMode::Asc, VAlign::Top);
+        s.rank_breaking = 4;
         apply_layout(&mut nodes, &EdgeStore::default(), &s);
+        let xs = columns_of(&nodes, &ids);
+        assert_eq!(xs.len(), 2, "one cut was enough: {xs:?}");
+        let counts: Vec<usize> = xs.iter().map(|&x| ids.iter().filter(|&&id| pos(&nodes, id).x == x).count()).collect();
+        assert_eq!(counts, vec![2, 2], "the cut is in the middle of four equal files");
+
+        let (mut nodes, ids) = tall_store(40, 200);
+        s.rank_breaking = 1;
+        apply_layout(&mut nodes, &EdgeStore::default(), &s);
+        assert_eq!(columns_of(&nodes, &ids).len(), 11, "ten cuts of one column make eleven");
+    }
+
+    #[test]
+    fn a_cut_never_separates_the_two_ends_of_an_edge() {
+        let item = |i: u64| Item::File(i);
+        let column: Vec<Item> = (0..4).map(item).collect();
+        let size: HashMap<Item, Vec2> = column.iter().map(|&it| (it, Vec2::new(10.0, 100.0))).collect();
+        let none = HashSet::new();
+        assert_eq!(middle_cut(&column, &size, 0.0, &none), Some(2), "the middle");
+        // 1 and 2 are linked: a cut after two items would split them.
+        let linked: HashSet<(Item, Item)> = [(item(1), item(2))].into();
+        assert_eq!(middle_cut(&column, &size, 0.0, &linked), Some(1), "the nearest legal cut; 1 and 3 tie and the first wins");
+        // A chain: every cut splits an edge.
+        let chain: HashSet<(Item, Item)> = [(item(0), item(1)), (item(1), item(2)), (item(2), item(3))].into();
+        assert_eq!(middle_cut(&column, &size, 0.0, &chain), None);
+        // An edge to a file in another column does not matter.
+        let outside: HashSet<(Item, Item)> = [(item(1), item(9))].into();
+        assert_eq!(middle_cut(&column, &size, 0.0, &outside), Some(2));
+    }
+
+    #[test]
+    fn files_that_connect_to_nothing_leave_the_first_column_to_the_ones_that_do() {
+        // lib/a -> lib/b is used from outside (app/main -> lib/a); lib/lone has no edge.
+        let (mut nodes, ids) = tree(&["r/app/main.rs", "r/lib/a.rs", "r/lib/b.rs", "r/lib/lone.rs"]);
+        let mut edges = EdgeStore::default();
+        edges.add(ids[0], ids[1], None);
+        edges.add(ids[1], ids[2], None);
+        apply_layout(&mut nodes, &edges, &LayoutSettings::default());
+
+        let (a, b, lone) = (pos(&nodes, ids[1]).x, pos(&nodes, ids[2]).x, pos(&nodes, ids[3]).x);
+        assert!(a < b, "a uses b");
+        assert!(lone > b, "the loose file comes after every column that is linked to the rest: {a} {b} {lone}");
+    }
+
+    #[test]
+    fn a_group_that_only_uses_itself_is_an_island_and_one_that_reaches_out_is_not() {
+        // lib: a -> b (island: nothing outside touches them), c -> d, and d is used from outside.
+        let (mut nodes, ids) = tree(&["r/app/main.rs", "r/lib/a.rs", "r/lib/b.rs", "r/lib/c.rs", "r/lib/d.rs"]);
+        let mut edges = EdgeStore::default();
+        edges.add(ids[1], ids[2], None);
+        edges.add(ids[3], ids[4], None);
+        edges.add(ids[0], ids[4], None);
+        apply_layout(&mut nodes, &edges, &LayoutSettings::default());
+
+        let x = |i: usize| pos(&nodes, ids[i]).x;
+        assert!(x(3) < x(4), "c uses d");
+        assert!(x(1) > x(4), "the island a -> b follows the linked columns: {} vs {}", x(1), x(4));
+        assert!(x(1) < x(2), "inside the island a still comes before b");
+    }
+
+    #[test]
+    fn at_the_top_level_everything_is_laid_out_as_before() {
+        // Two separate pairs and a loose file, none of them "open": islands side by side by depth.
+        let (mut nodes, ids) = store(5);
+        let mut edges = EdgeStore::default();
+        edges.add(ids[0], ids[1], None);
+        edges.add(ids[2], ids[3], None);
+        apply_layout(&mut nodes, &edges, &settings(SortMode::Asc, VAlign::Top));
         let xs: Vec<f32> = ids.iter().map(|&id| pos(&nodes, id).x).collect();
-        assert!(xs.windows(2).all(|w| w[0] <= w[1]), "order kept across sub-columns: {xs:?}");
-        assert!(xs.last().unwrap() > &0.0, "the column was split: {xs:?}");
-        for &id in &ids {
-            let column: Vec<u64> = ids.iter().copied().filter(|&o| pos(&nodes, o).x == pos(&nodes, id).x).collect();
-            let h: f32 = column.iter().map(|&o| height(&nodes, o)).sum::<f32>()
-                + (column.len() - 1) as f32 * SPACING * VERTICAL_GAP_RATIO;
-            assert!(h <= level as f32 * NODE_WIDTH + height(&nodes, id), "sub-column of {id} too tall: {h}");
+        assert_eq!(xs, vec![0.0, COLUMN, 0.0, COLUMN, 0.0], "depth decides the column, not the component");
+    }
+
+    #[test]
+    fn a_column_is_ordered_by_how_connected_its_files_are() {
+        // p, q -> x and r -> y: x and y share a column; x is the more connected one.
+        let (mut nodes, ids) = store(5);
+        let (p, q, r, x, y) = (ids[0], ids[1], ids[2], ids[3], ids[4]);
+        let mut edges = EdgeStore::default();
+        edges.add(p, x, None);
+        edges.add(q, x, None);
+        edges.add(r, y, None);
+        apply_layout(&mut nodes, &edges, &settings(SortMode::Desc, VAlign::Top));
+        assert_eq!(pos(&nodes, x).x, pos(&nodes, y).x);
+        assert!(pos(&nodes, x).y < pos(&nodes, y).y, "desc: the more connected file is on top");
+        apply_layout(&mut nodes, &edges, &settings(SortMode::Asc, VAlign::Top));
+        assert!(pos(&nodes, y).y < pos(&nodes, x).y, "asc: the less connected file is on top");
+    }
+
+    #[test]
+    fn the_score_weighs_edges_to_siblings_and_to_the_outside_differently() {
+        let degrees = |incoming, outgoing, incoming_siblings, outgoing_siblings| {
+            Degrees { incoming, outgoing, incoming_siblings, outgoing_siblings }.score()
+        };
+        assert_eq!(degrees(1, 0, 0, 0), 4);
+        assert_eq!(degrees(0, 1, 0, 0), 2);
+        assert_eq!(degrees(0, 0, 1, 0), 3);
+        assert_eq!(degrees(0, 0, 0, 1), 1);
+        // An edge between siblings counts in both of its ends' totals and in its sibling counters.
+        assert_eq!(degrees(1, 0, 1, 0), 7);
+    }
+
+    #[test]
+    fn the_same_project_always_gets_the_same_layout() {
+        let paths: Vec<String> = (0..24).map(|i| format!("r/d{}/f{i}.rs", i % 4)).collect();
+        let refs: Vec<&str> = paths.iter().map(String::as_str).collect();
+        let mut seen: Option<Vec<egui::Pos2>> = None;
+        for sort in [SortMode::Off, SortMode::Desc, SortMode::Alt] {
+            seen = None;
+            for _ in 0..6 {
+                let (mut nodes, ids) = tree(&refs);
+                let mut edges = EdgeStore::default();
+                let mut again = Xorshift(11);
+                for _ in 0..40 {
+                    let (a, b) = (again.next(ids.len()), again.next(ids.len()));
+                    if a != b {
+                        edges.add(ids[a], ids[b], None);
+                    }
+                }
+                apply_layout(&mut nodes, &edges, &settings(sort, VAlign::Center));
+                let now: Vec<egui::Pos2> = ids.iter().map(|&id| pos(&nodes, id)).collect();
+                if let Some(before) = &seen {
+                    assert_eq!(*before, now, "{sort:?}: two runs on the same project differ");
+                }
+                seen = Some(now);
+            }
+        }
+        assert!(seen.is_some());
+    }
+
+    /// A tiny deterministic generator for the invariants below.
+    struct Xorshift(u64);
+
+    impl Xorshift {
+        fn next(&mut self, below: usize) -> usize {
+            self.0 ^= self.0 << 13;
+            self.0 ^= self.0 >> 7;
+            self.0 ^= self.0 << 17;
+            (self.0 % below as u64) as usize
+        }
+    }
+
+    #[test]
+    fn random_projects_never_overlap_and_dependencies_point_right() {
+        for seed in 1..=20u64 {
+            let mut random = Xorshift(seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1);
+            let count = 6 + random.next(24);
+            let paths: Vec<String> = (0..count).map(|i| format!("r/{}/{}/f{i}.rs", random.next(3), random.next(2))).collect();
+            let refs: Vec<&str> = paths.iter().map(String::as_str).collect();
+            let (mut nodes, ids) = tree(&refs);
+            let mut edges = EdgeStore::default();
+            let mut pairs = Vec::new();
+            for _ in 0..random.next(40) {
+                // Edges only run from a lower to a higher index: no cycles.
+                let (a, b) = (random.next(count), random.next(count));
+                if a < b {
+                    edges.add(ids[a], ids[b], None);
+                    pairs.push((ids[a], ids[b]));
+                }
+            }
+            let s = LayoutSettings { barycenter: random.next(2) == 1, rank_breaking: random.next(9) as u32, ..Default::default() };
+            apply_layout(&mut nodes, &edges, &s);
+
+            for (i, &a) in ids.iter().enumerate() {
+                for &b in &ids[i + 1..] {
+                    assert!(!file_rect(&nodes, a).intersects(file_rect(&nodes, b)), "seed {seed}: {a} and {b} overlap");
+                }
+            }
+            // Files in the same folder: the importer is left of what it imports.
+            let folder = |id: u64| nodes.file_folder(id);
+            for (a, b) in pairs {
+                if folder(a) == folder(b) {
+                    assert!(pos(&nodes, a).x < pos(&nodes, b).x, "seed {seed}: {a} -> {b} points left");
+                }
+            }
         }
     }
 

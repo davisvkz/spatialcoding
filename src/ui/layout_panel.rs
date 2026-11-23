@@ -4,20 +4,20 @@
 
 use crate::layout::settings::{HAlign, SortMode, VAlign};
 use crate::state::AppState;
-use crate::ui::panel::{cta_button, section, segmented, slider_row};
+use crate::ui::panel::{cta_button, section, segmented, slider_row, switch};
 
 /// v2's tooltip for Rank Breaking.
 const RANK_BREAKING_HELP: &str = "Splits tall columns so nodes can spread horizontally. \
 Lower values break columns more aggressively. Off keeps all nodes in a single column per rank.";
 
+const BARYCENTER_HELP: &str = "Orders each column by where the files it is linked to sit in \
+the columns before it, to cut crossings. Off orders a column by how connected each file is.";
+
 pub fn draw_layout_panel(ui: &mut egui::Ui, state: &mut AppState) {
     if cta_button(ui, "Apply Layout", true).clicked() {
-        crate::layout::hierarchical::apply_layout(
-            &mut state.node_store,
-            &state.edge_store,
-            &state.layout_settings,
-        );
-        state.layout_dirty = false;
+        // The same as the `1` shortcut: the canvas' node geometry, and the
+        // selected file stays where it is on screen.
+        crate::workspace::apply_layout_keeping_selection(state);
     }
     if !state.layout_settings.auto_layout {
         ui.label(
@@ -51,6 +51,7 @@ pub fn draw_layout_panel(ui: &mut egui::Ui, state: &mut AppState) {
                 (VAlign::Fill, "Fill"),
             ],
         );
+        switch(ui, &mut settings.barycenter, "Barycenter").on_hover_text(BARYCENTER_HELP);
         ui.label("Sort");
         segmented(
             ui,

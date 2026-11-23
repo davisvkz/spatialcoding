@@ -12,10 +12,12 @@ checklist "07 · Layout hierárquico" \
   "Arquivos que se importam em ciclo|ficam em colunas diferentes, não empilhados na mesma" \
   "Arrastar um nó para fora|a caixa da pasta dele (e das pastas acima) cresce junto" \
   "Painel direito → Layout → Advanced Settings: mudar File Spacing e clicar Apply Layout|a distância entre colunas e entre nós muda; o valor aparece à direita do rótulo (padrões 500 / 500 / 80)" \
-  "Sort Off / Desc / Asc / Alt / Alt Rev + Apply Layout|a ordem vertical dos nós dentro de cada coluna muda" \
+  "Sort Off / Desc / Asc / Alt / Alt Rev + Apply Layout|a ordem vertical dos nós dentro de cada coluna muda; Desc põe no topo o arquivo mais ligado aos outros (pontuação: entradas×4 + saídas×2 + entradas de irmãos×3 + saídas para irmãos)" \
+  "Switch Barycenter + Apply Layout (desligado por padrão)|ligado, cada coluna segue a posição dos arquivos a que se liga nas colunas anteriores; Reset Config desliga de novo" \
   "V Align Top / Center / Bottom / Fill + Apply Layout|as colunas alinham pelo topo, centro ou base; Fill espalha os nós de cada coluna pela altura da coluna mais alta" \
   "H Align Left / Center / Right + Apply Layout numa coluna com pasta e arquivo|o arquivo mais estreito encosta à esquerda, centraliza ou encosta à direita da coluna" \
-  "Rank Breaking: passar o mouse; ir de 8 para 1 e Apply Layout com --open-all|tooltip explica; valores menores dividem colunas altas em várias subcolunas lado a lado; 0 mostra Off e mantém uma coluna por rank" \
+  "Rank Breaking: passar o mouse; ir de 8 para 1 e Apply Layout com --open-all|tooltip explica; valores menores cortam a coluna mais alta de cada pasta (perto do meio, sem separar quem se importa) até a pasta não passar de N vezes a largura das colunas, no máximo 10 cortes; 0 mostra Off e mantém uma coluna por rank" \
   "Reset Config e ⋮ → Reset Layout settings|voltam aos padrões; Reset Config não mexe no Auto Layout" \
-  "Arquivos sem relação entre si|ficam todos na primeira coluna (rank 0)"
+  "Arquivos sem relação entre si no nível de cima|ficam todos na primeira coluna (rank 0)" \
+  "Dentro de uma pasta: arquivos sem aresta, ou que só se ligam entre si|ficam em colunas depois das que se ligam ao resto do projeto"
 launch "$dir" --open-all

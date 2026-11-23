@@ -30,8 +30,13 @@ pub struct LayoutSettings {
     /// Lay out again whenever files are opened or removed (kebab "Disable
     /// Auto Layout" turns it off).
     pub auto_layout: bool,
-    /// 0 (Off) to 8: split columns taller than this many times their width.
+    /// 0 (Off) to 8: a folder's columns are split (the tallest first, where no
+    /// edge crosses the cut) until the tallest is at most this many times as
+    /// tall as the folder's columns are wide, all together.
     pub rank_breaking: u32,
+    /// Orders each column after the previous one by where its neighbours
+    /// are, to cut crossings, instead of by the score alone. Off by default.
+    pub barycenter: bool,
     pub h_align: HAlign,
     pub v_align: VAlign,
     pub sort: SortMode,
@@ -51,6 +56,7 @@ impl Default for LayoutSettings {
         Self {
             auto_layout: true,
             rank_breaking: 6,
+            barycenter: false,
             h_align: HAlign::Right,
             v_align: VAlign::Center,
             sort: SortMode::Desc,
