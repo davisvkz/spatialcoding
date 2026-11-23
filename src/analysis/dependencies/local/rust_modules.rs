@@ -5,11 +5,14 @@ use std::path::{Path, PathBuf};
 use tree_sitter::Node;
 
 use super::{
-    candidates_in, normalize, push, LocalAnalysis, OpenFiles, RelationCandidates, RelationshipType,
+    candidates_in, normalize, push, ImportIssue, ImportIssueReason, LocalAnalysis, OpenFiles, RelationCandidates,
+    RelationshipType,
 };
+use crate::analysis::cst::CstLanguage;
 
+/// Why a `mod` declaration gave no link; shown as an [`ImportIssueReason`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum ModuleIssueReason {
+enum ModuleIssueReason {
     Conditional,
     UnsupportedAttribute,
     OutsideWorkspace,
@@ -17,12 +20,16 @@ pub(crate) enum ModuleIssueReason {
     Ambiguous,
 }
 
-#[derive(Debug)]
-pub(crate) struct ModuleIssue {
-    pub path: PathBuf,
-    pub line: usize,
-    pub name: String,
-    pub reason: ModuleIssueReason,
+impl From<ModuleIssueReason> for ImportIssueReason {
+    fn from(reason: ModuleIssueReason) -> Self {
+        match reason {
+            ModuleIssueReason::Conditional => Self::Conditional,
+            ModuleIssueReason::UnsupportedAttribute => Self::Unsupported,
+            ModuleIssueReason::OutsideWorkspace => Self::OutsideWorkspace,
+            ModuleIssueReason::Missing => Self::NotFound,
+            ModuleIssueReason::Ambiguous => Self::Ambiguous,
+        }
+    }
 }
 
 struct ModuleDirectory {
@@ -127,11 +134,12 @@ pub(super) fn analyze(
                         RelationshipType::Imports,
                         &mut out.links,
                     ),
-                    Err(reason) => out.rust_issues.push(ModuleIssue {
+                    Err(reason) => out.issues.report(ImportIssue {
                         path: path.strip_prefix(root).unwrap_or(path).to_path_buf(),
                         line: name.start_position().row + 1,
-                        name: raw_name.to_owned(),
-                        reason,
+                        specifier: raw_name.to_owned(),
+                        language: Some(CstLanguage::Rust),
+                        reason: reason.into(),
                     }),
                 }
             }

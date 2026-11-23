@@ -13,8 +13,9 @@ use super::{DependencyLink, LineSpan, OpenFiles};
 use crate::analysis::cst::{CstLanguage, parse_tree};
 use crate::edges::style::RelationshipType;
 
+mod issues;
 mod rust_modules;
-pub(crate) use rust_modules::{ModuleIssue, ModuleIssueReason};
+pub(crate) use issues::{ImportIssue, ImportIssueReason, ImportIssues};
 
 pub(crate) type ConfigSources = BTreeMap<PathBuf, String>;
 const MAX_CONFIG_BYTES: usize = 256 * 1024;
@@ -74,7 +75,8 @@ pub(crate) fn links_with_configs(
 #[derive(Default)]
 pub(crate) struct LocalAnalysis {
     pub links: Vec<DependencyLink>,
-    pub rust_issues: Vec<ModuleIssue>,
+    /// Imports that gave no link, and why.
+    pub issues: ImportIssues,
 }
 
 /// The syntax tree of every open file, by path and content hash.
@@ -146,39 +148,47 @@ fn analyze_with_configs(
         .zip(trees.par_iter())
         .map(|(&(path, text), parsed)| {
             let mut result = LocalAnalysis::default();
+            let nearest_tsconfig = ancestors(root, path).find_map(|dir| aliases.get(&dir.join("tsconfig.json")));
+            let mut cx = Ctx {
+                root,
+                open,
+                path,
+                text,
+                language: parsed.as_ref().map(|(language, _)| *language),
+                config: FileConfig {
+                    paths: nearest_tsconfig.and_then(Option::as_ref),
+                    tsconfig_unreadable: nearest_tsconfig.is_some_and(Option::is_none),
+                    go_mod: None,
+                },
+            };
             if let Some((language, tree)) = parsed {
                 let language = *language;
-                let paths = ancestors(root, path)
-                    .find_map(|dir| aliases.get(&dir.join("tsconfig.json")))
-                    .and_then(Option::as_ref);
                 // The module identity of Go code: the nearest go.mod, read from
                 // disk like a tsconfig, or the open one when it is on the canvas.
-                let go_mod = (language == CstLanguage::Go)
-                    .then(|| {
-                        ancestors(root, path).find_map(|dir| {
-                            let manifest = dir.join("go.mod");
-                            configs
-                                .get_key_value(&manifest)
-                                .map(|(path, text)| (path.as_path(), text.as_str()))
-                                .or_else(|| open.get(&manifest))
-                        })
-                    })
-                    .flatten();
+                if language == CstLanguage::Go {
+                    cx.config.go_mod = ancestors(root, path).find_map(|dir| {
+                        let manifest = dir.join("go.mod");
+                        configs
+                            .get_key_value(&manifest)
+                            .map(|(path, text)| (path.as_path(), text.as_str()))
+                            .or_else(|| open.get(&manifest))
+                    });
+                }
                 if language == CstLanguage::Rust {
                     rust_modules::analyze(root, open, (path, text), tree.root_node(), &mut result);
                 }
                 let mut pending = vec![tree.root_node()];
                 while let Some(node) = pending.pop() {
                     if !node.has_error() {
-                        syntax_links(root, open, (path, text), language, node, (paths, go_mod), &mut result.links);
+                        syntax_links(&cx, node, &mut result);
                     }
                     let mut cursor = node.walk();
                     pending.extend(node.named_children(&mut cursor));
                 }
             }
             match path.extension().and_then(|e| e.to_str()) {
-                Some("md" | "mdx") => markdown_links(root, open, path, text, &mut result.links),
-                Some("json") => json_links(root, open, path, text, &mut result.links),
+                Some("md" | "mdx") => markdown_links(&cx, &mut result),
+                Some("json") => json_links(&cx, &mut result),
                 _ => {}
             }
             result
@@ -187,22 +197,66 @@ fn analyze_with_configs(
     let mut result = LocalAnalysis::default();
     for part in per_file {
         result.links.extend(part.links);
-        result.rust_issues.extend(part.rust_issues);
+        result.issues.extend(part.issues);
     }
     result.links.sort_by(|a, b| (&a.source, a.usage.start, &a.target).cmp(&(&b.source, b.usage.start, &b.target)));
     result.links.dedup_by(|a, b| a.source == b.source && a.target == b.target && a.source_name_span == b.source_name_span && a.relationship == b.relationship);
-    result.rust_issues.sort_by(|a, b| (&a.path, a.line, &a.name).cmp(&(&b.path, b.line, &b.name)));
+    result.issues.finish();
     result
 }
 
-fn syntax_links(root: &Path, open: &OpenFiles<'_>, (path, text): (&Path, &str), language: CstLanguage, node: Node, (paths, go_mod): (Option<&TsPaths>, Option<(&Path, &str)>), out: &mut Vec<DependencyLink>) {
+/// What an import is resolved with: the file it is in, the folder, and the
+/// configuration nearest to the file.
+struct Ctx<'a, 'o> {
+    root: &'a Path,
+    open: &'a OpenFiles<'o>,
+    path: &'a Path,
+    text: &'a str,
+    /// `None` for Markdown and JSON.
+    language: Option<CstLanguage>,
+    config: FileConfig<'a>,
+}
+
+#[derive(Clone, Copy, Default)]
+struct FileConfig<'a> {
+    /// `compilerOptions.paths` of the nearest tsconfig, when it could be read.
+    paths: Option<&'a TsPaths>,
+    /// A tsconfig exists but could not be read (no `compilerOptions`, invalid):
+    /// a bare import might be one of its aliases.
+    tsconfig_unreadable: bool,
+    /// The nearest go.mod: its path and text.
+    go_mod: Option<(&'a Path, &'a str)>,
+}
+
+impl Ctx<'_, '_> {
+    /// Records that the import written at byte `at` gave no link. A package
+    /// is only counted.
+    fn report(&self, out: &mut LocalAnalysis, at: usize, specifier: &str, reason: ImportIssueReason) {
+        if reason == ImportIssueReason::External {
+            out.issues.external();
+            return;
+        }
+        let line = self.text.get(..at).map_or(1, |before| before.bytes().filter(|b| *b == b'\n').count() + 1);
+        out.issues.report(ImportIssue {
+            path: self.path.strip_prefix(self.root).unwrap_or(self.path).to_path_buf(),
+            line,
+            specifier: specifier.to_owned(),
+            language: self.language,
+            reason,
+        });
+    }
+}
+
+fn syntax_links(cx: &Ctx<'_, '_>, node: Node, out: &mut LocalAnalysis) {
+    let Some(language) = cx.language else { return };
+    let (root, open, path, text) = (cx.root, cx.open, cx.path, cx.text);
     let raw = |n: Node| n.utf8_text(text.as_bytes()).unwrap_or("").to_string();
     match language {
         CstLanguage::TypeScript | CstLanguage::Tsx | CstLanguage::JavaScript => {
             if matches!(node.kind(), "import_statement" | "export_statement")
                 && let Some(source) = node.child_by_field_name("source")
                 && let Some(value) = literal(&raw(source)) {
-                add_js_import(root, open, (path, text), value, source.start_byte() + 1, paths, out);
+                add_js_import(cx, value, source.start_byte() + 1, out);
             }
             // `import()` is a grammar keyword, unlike shadowable require().
             if node.kind() == "call_expression"
@@ -211,7 +265,7 @@ fn syntax_links(root: &Path, open: &OpenFiles<'_>, (path, text): (&Path, &str), 
                 && args.named_child_count() == 1
                 && let Some(source) = args.named_child(0)
                 && let Some(value) = literal(&raw(source)) {
-                add_js_import(root, open, (path, text), value, source.start_byte() + 1, paths, out);
+                add_js_import(cx, value, source.start_byte() + 1, out);
             }
         }
         CstLanguage::Rust => {
@@ -222,7 +276,7 @@ fn syntax_links(root: &Path, open: &OpenFiles<'_>, (path, text): (&Path, &str), 
                     && tokens.named_child_count() == 1
                     && let Some(source) = tokens.named_child(0)
                     && let Some(value) = literal(&raw(source)) {
-                    add_relative(root, open, (path, text), value, source.start_byte() + 1, false, out);
+                    add_relative(cx, value, source.start_byte() + 1, false, out);
                 }
             }
         }
@@ -230,15 +284,25 @@ fn syntax_links(root: &Path, open: &OpenFiles<'_>, (path, text): (&Path, &str), 
             if node.kind() == "import_from_statement"
                 && let Some(module) = node.child_by_field_name("module_name") {
                 let value = raw(module);
+                let at = module.start_byte();
                 let dots = value.bytes().take_while(|b| *b == b'.').count();
-                if dots == 0 { return; } // absolute packages require environment evidence
+                // An absolute package is a library, or needs the environment to tell.
+                if dots == 0 { return cx.report(out, at, &value, ImportIssueReason::External); }
                 let Some(mut base) = path.parent() else { return };
-                for _ in 1..dots { let Some(parent) = base.parent() else { return }; base = parent; }
+                for _ in 1..dots {
+                    let Some(parent) = base.parent() else {
+                        return cx.report(out, at, &value, ImportIssueReason::OutsideWorkspace);
+                    };
+                    base = parent;
+                }
                 let module_path = value[dots..].replace('.', "/");
-                if module_path.is_empty() { return; }
+                // `from . import x` names the package itself, not a file.
+                if module_path.is_empty() { return cx.report(out, at, &value, ImportIssueReason::Unsupported); }
                 let base = base.join(module_path);
-                if let Some(target) = unique(root, open, [base.with_extension("py"), base.join("__init__.py")]) {
-                    push(path, text, &target, module.start_byte(), module.end_byte(), RelationshipType::Imports, out);
+                if !base.starts_with(root) { return cx.report(out, at, &value, ImportIssueReason::OutsideWorkspace); }
+                match resolve(root, open, [base.with_extension("py"), base.join("__init__.py")]) {
+                    Ok(target) => push(path, text, &target, module.start_byte(), module.end_byte(), RelationshipType::Imports, &mut out.links),
+                    Err(reason) => cx.report(out, at, &value, reason),
                 }
             }
         }
@@ -246,15 +310,24 @@ fn syntax_links(root: &Path, open: &OpenFiles<'_>, (path, text): (&Path, &str), 
             if node.kind() == "import_spec"
                 && let Some(source) = node.child_by_field_name("path")
                 && let Some(value) = literal(&raw(source)) {
+                let at = source.start_byte() + 1;
                 // The nearest go.mod establishes the module identity.
-                let Some((manifest, content)) = go_mod else { return };
+                let Some((manifest, content)) = cx.config.go_mod else {
+                    return cx.report(out, at, value, ImportIssueReason::MissingContext);
+                };
                 let module = content.lines().find_map(|l| l.trim().strip_prefix("module ").map(str::trim));
-                let Some(relative) = module.and_then(|m| value.strip_prefix(&format!("{m}/"))) else { return };
+                // Anything outside the module is the standard library or a dependency.
+                let Some(relative) = module.and_then(|m| value.strip_prefix(&format!("{m}/"))) else {
+                    return cx.report(out, at, value, ImportIssueReason::External);
+                };
                 let Some(parent) = manifest.parent() else { return };
                 let directory = parent.join(relative);
                 let candidates = open.files_in_dir(&directory).into_iter().filter(|p| p.extension().is_some_and(|e| e == "go") && !p.to_string_lossy().ends_with("_test.go"));
-                if let Some(target) = unique(root, open, candidates) {
-                    push(path, text, &target, source.start_byte() + 1, source.end_byte() - 1, RelationshipType::Imports, out);
+                match resolve(root, open, candidates) {
+                    Ok(target) => push(path, text, &target, source.start_byte() + 1, source.end_byte() - 1, RelationshipType::Imports, &mut out.links),
+                    // A package is a folder of files, and only one can be the target.
+                    Err(ImportIssueReason::Ambiguous) => cx.report(out, at, value, ImportIssueReason::Unsupported),
+                    Err(reason) => cx.report(out, at, value, reason),
                 }
             }
         }
@@ -280,10 +353,12 @@ fn normalize(path: &Path) -> Option<PathBuf> {
     Some(out)
 }
 
-fn unique(root: &Path, open: &OpenFiles<'_>, candidates: impl IntoIterator<Item = PathBuf>) -> Option<PathBuf> {
+/// The one file `candidates` mean, or why there is not one.
+fn resolve(root: &Path, open: &OpenFiles<'_>, candidates: impl IntoIterator<Item = PathBuf>) -> Result<PathBuf, ImportIssueReason> {
     match candidates_in(root, open, candidates) {
-        RelationCandidates::One(target) => Some(target),
-        RelationCandidates::None | RelationCandidates::Many => None,
+        RelationCandidates::One(target) => Ok(target),
+        RelationCandidates::None => Err(ImportIssueReason::NotFound),
+        RelationCandidates::Many => Err(ImportIssueReason::Ambiguous),
     }
 }
 
@@ -355,53 +430,89 @@ impl TsPaths {
         Some(Self { base: path.parent()?.join(base), paths: options.paths })
     }
 
-    fn target(&self, value: &str) -> Option<PathBuf> {
+    fn target(&self, value: &str) -> TsTarget {
         let (targets, capture) = if let Some(targets) = self.paths.get(value) {
             (targets, "")
         } else {
-            let (_, targets, capture) = self.paths.iter().filter_map(|(key, targets)| {
+            let Some((_, targets, capture)) = self.paths.iter().filter_map(|(key, targets)| {
                 let (prefix, suffix) = key.split_once('*')?;
                 if suffix.contains('*') { return None; }
                 let capture = value.strip_prefix(prefix)?.strip_suffix(suffix)?;
                 Some((prefix.len(), targets, capture))
-            }).max_by_key(|(prefix, _, _)| *prefix)?;
+            }).max_by_key(|(prefix, _, _)| *prefix) else { return TsTarget::NoMatch };
             (targets, capture)
         };
         // Ordered fallback lists would require knowing whether each target
         // exists even when it isn't on the canvas or in this Git snapshot.
-        let [target] = targets.as_slice() else { return None; };
+        let [target] = targets.as_slice() else { return TsTarget::Several };
         let target = target.replacen('*', capture, 1);
         let target = Path::new(&target);
-        (target.is_relative() && !target.to_string_lossy().contains(['*', ':', '\\', '%']))
-            .then(|| self.base.join(target))
+        if target.is_relative() && !target.to_string_lossy().contains(['*', ':', '\\', '%']) {
+            TsTarget::Path(self.base.join(target))
+        } else {
+            TsTarget::Unsupported
+        }
     }
 }
 
-fn add_js_import(
-    root: &Path, open: &OpenFiles<'_>, (path, text): (&Path, &str), value: &str,
-    offset: usize, paths: Option<&TsPaths>, out: &mut Vec<DependencyLink>,
-) {
+/// What the `paths` of a tsconfig say about an import.
+enum TsTarget {
+    /// No key matches: a package, or a path the config does not know.
+    NoMatch,
+    /// The key lists several fallbacks, which need the disk to pick from.
+    Several,
+    /// The target is absolute or has a form that is not followed.
+    Unsupported,
+    Path(PathBuf),
+}
+
+fn add_js_import(cx: &Ctx<'_, '_>, value: &str, offset: usize, out: &mut LocalAnalysis) {
     if value.starts_with('.') {
-        return add_relative(root, open, (path, text), value, offset, true, out);
+        return add_relative(cx, value, offset, true, out);
     }
-    if value.contains([':', '?', '\\', '%', '#']) || value.starts_with('/') { return; }
-    let Some(base) = paths.and_then(|paths| paths.target(value)) else { return; };
-    if let Some(target) = unique(root, open, module_candidates(&base)) {
-        push(path, text, &target, offset, offset + value.len(), RelationshipType::Imports, out);
+    if value.starts_with("node:") { return cx.report(out, offset, value, ImportIssueReason::External); }
+    if value.contains([':', '?', '\\', '%', '#']) || value.starts_with('/') {
+        return cx.report(out, offset, value, ImportIssueReason::Unsupported);
+    }
+    let base = match cx.config.paths.map(|paths| paths.target(value)) {
+        // A package, unless an alias the config could not give us.
+        None | Some(TsTarget::NoMatch) if cx.config.tsconfig_unreadable => {
+            return cx.report(out, offset, value, ImportIssueReason::MissingContext);
+        }
+        None | Some(TsTarget::NoMatch) => return cx.report(out, offset, value, ImportIssueReason::External),
+        Some(TsTarget::Several) => return cx.report(out, offset, value, ImportIssueReason::MissingContext),
+        Some(TsTarget::Unsupported) => return cx.report(out, offset, value, ImportIssueReason::Unsupported),
+        Some(TsTarget::Path(base)) => base,
+    };
+    match resolve(cx.root, cx.open, module_candidates(&base)) {
+        Ok(target) => push(cx.path, cx.text, &target, offset, offset + value.len(), RelationshipType::Imports, &mut out.links),
+        Err(reason) => cx.report(out, offset, value, reason),
     }
 }
 
-fn add_relative(root: &Path, open: &OpenFiles<'_>, source: (&Path, &str), value: &str, offset: usize, module: bool, out: &mut Vec<DependencyLink>) {
-    let (path, text) = source;
+/// A relative path in code (`module`) or in a document. Only code reports
+/// what it could not resolve: documents link to anything.
+fn add_relative(cx: &Ctx<'_, '_>, value: &str, offset: usize, module: bool, out: &mut LocalAnalysis) {
     let value = value.split('#').next().unwrap_or("");
-    if value.is_empty() || value.contains([':', '?', '\\', '%']) || value.starts_with('/') { return; }
+    if value.is_empty() { return; }
+    if value.contains([':', '?', '\\', '%']) || value.starts_with('/') {
+        if module { cx.report(out, offset, value, ImportIssueReason::Unsupported); }
+        return;
+    }
     if module && !value.starts_with('.') { return; }
-    let Some(parent) = path.parent() else { return };
+    let Some(parent) = cx.path.parent() else { return };
     let base = parent.join(value);
+    if module && normalize(&base).is_none_or(|path| !path.starts_with(cx.root)) {
+        return cx.report(out, offset, value, ImportIssueReason::OutsideWorkspace);
+    }
     let candidates = if module { module_candidates(&base) } else { vec![base] };
-    if let Some(target) = unique(root, open, candidates) {
-        let relationship = if module { RelationshipType::Imports } else { RelationshipType::References };
-        push(path, text, &target, offset, offset + value.len(), relationship, out);
+    match resolve(cx.root, cx.open, candidates) {
+        Ok(target) => {
+            let relationship = if module { RelationshipType::Imports } else { RelationshipType::References };
+            push(cx.path, cx.text, &target, offset, offset + value.len(), relationship, &mut out.links);
+        }
+        Err(reason) if module => cx.report(out, offset, value, reason),
+        Err(_) => {}
     }
 }
 
@@ -430,7 +541,8 @@ fn push(path: &Path, text: &str, target: &Path, start: usize, end: usize, relati
     });
 }
 
-fn markdown_links(root: &Path, open: &OpenFiles<'_>, path: &Path, text: &str, out: &mut Vec<DependencyLink>) {
+fn markdown_links(cx: &Ctx<'_, '_>, out: &mut LocalAnalysis) {
+    let text = cx.text;
     let mut fence = None;
     let mut offset = 0;
     for line in text.split_inclusive('\n') {
@@ -445,14 +557,15 @@ fn markdown_links(root: &Path, open: &OpenFiles<'_>, path: &Path, text: &str, ou
                 let Some(end) = line[start..].find(')').map(|n| start + n) else { continue };
                 let value = &line[start..end];
                 if value.contains(char::is_whitespace) { continue; }
-                add_relative(root, open, (path, text), value, offset + start, false, out);
+                add_relative(cx, value, offset + start, false, out);
             }
         }
         offset += line.len();
     }
 }
 
-fn json_links(root: &Path, open: &OpenFiles<'_>, path: &Path, text: &str, out: &mut Vec<DependencyLink>) {
+fn json_links(cx: &Ctx<'_, '_>, out: &mut LocalAnalysis) {
+    let text = cx.text;
     if serde_json::from_str::<serde_json::Value>(text).is_err() { return; }
     let bytes = text.as_bytes();
     let mut i = 0;
@@ -470,7 +583,7 @@ fn json_links(root: &Path, open: &OpenFiles<'_>, path: &Path, text: &str, out: &
         let token = &text[start..=i];
         i += 1;
         if let Some(value) = literal(token) {
-            if reference_value { add_relative(root, open, (path, text), value, start + 1, false, out); }
+            if reference_value { add_relative(cx, value, start + 1, false, out); }
             reference_value = matches!(value, "$ref" | "extends") && text[i..].trim_start().starts_with(':')
                 && text[i..].trim_start().strip_prefix(':').is_some_and(|s| s.trim_start().starts_with('"'));
         } else { reference_value = false; }
@@ -756,5 +869,146 @@ mod ambiguous;
         let paths = config_paths(Path::new("/p"), [Path::new("/p/cmd/main.go"), Path::new("/p/web/a.ts"), Path::new("/p/x.py")]);
         let names: Vec<&str> = paths.iter().map(|p| p.to_str().unwrap()).collect();
         assert_eq!(names, ["/p/cmd/go.mod", "/p/go.mod", "/p/tsconfig.json", "/p/web/tsconfig.json"], "every folder from the file up to the root");
+    }
+
+    // ---- why an import gave no link (TASK-92) ----
+
+    /// `(path, line, specifier, reason)` of the listed issues, and the number
+    /// of packages counted, of `files` (open) with `closed` in the folder.
+    fn issues_of(
+        files: &[(&str, &str)],
+        closed: &[&str],
+        configs: &ConfigSources,
+    ) -> (Vec<(String, usize, String, ImportIssueReason)>, usize) {
+        let open = OpenFiles::new(files.iter().map(|(p, t)| (Path::new(p), *t)));
+        let paths: Vec<PathBuf> = closed.iter().map(PathBuf::from).collect();
+        let index = crate::analysis::dependencies::WorkspaceIndex::new(&paths);
+        let open = open.with_index(&index);
+        let issues = analyze_with_configs(Path::new("/p"), &open, configs, &mut ParseCache::default()).issues;
+        let listed = issues
+            .items()
+            .iter()
+            .map(|i| (i.path.to_str().unwrap().to_owned(), i.line, i.specifier.clone(), i.reason))
+            .collect();
+        (listed, issues.count(ImportIssueReason::External))
+    }
+
+    use ImportIssueReason as Why;
+
+    fn row(path: &str, line: usize, specifier: &str, reason: Why) -> (String, usize, String, Why) {
+        (path.to_owned(), line, specifier.to_owned(), reason)
+    }
+
+    #[test]
+    fn js_imports_say_why_they_gave_no_link() {
+        let app = "import React from 'react';\nimport fs from 'node:fs';\nimport './missing';\nimport '../../outside';\n\
+                   import 'https://cdn.example/x.js';\nimport '#internal/x';\nimport './x';\nimport './fine';\n";
+        let files = [("/p/src/app.ts", app), ("/p/src/x.ts", ""), ("/p/src/fine.ts", "")];
+        let (listed, external) = issues_of(&files, &["/p/src/x.js"], &ConfigSources::new());
+        assert_eq!(external, 2, "react and node:fs are counted, not listed");
+        assert_eq!(
+            listed,
+            vec![
+                row("src/app.ts", 3, "./missing", Why::NotFound),
+                row("src/app.ts", 4, "../../outside", Why::OutsideWorkspace),
+                row("src/app.ts", 5, "https://cdn.example/x.js", Why::Unsupported),
+                row("src/app.ts", 6, "#internal/x", Why::Unsupported),
+                row("src/app.ts", 7, "./x", Why::Ambiguous),
+            ],
+            "line numbers are 1-based and ./fine, which resolves, is not an issue"
+        );
+    }
+
+    #[test]
+    fn tsconfig_paths_tell_aliases_from_packages_and_missing_context() {
+        let app = "import a from '@/a';\nimport b from '@/gone';\nimport _ from 'lodash';\nimport m from 'multi/x';\n";
+        let config = r#"{"compilerOptions": {"paths": {"@/*": ["src/*"], "multi/*": ["a/*", "b/*"]}}}"#;
+        let configs = ConfigSources::from([(PathBuf::from("/p/tsconfig.json"), config.to_string())]);
+        let (listed, external) = issues_of(&[("/p/app.ts", app)], &["/p/src/a.ts"], &configs);
+        assert_eq!(external, 1, "lodash matches no alias");
+        assert_eq!(
+            listed,
+            vec![row("app.ts", 2, "@/gone", Why::NotFound), row("app.ts", 4, "multi/x", Why::MissingContext)],
+            "a key with several fallbacks needs the disk to pick"
+        );
+
+        // A tsconfig that could not be read might hold the alias of a bare import.
+        let unreadable = ConfigSources::from([(PathBuf::from("/p/tsconfig.json"), r#"{"extends": "./base.json"}"#.to_string())]);
+        let (listed, external) = issues_of(&[("/p/app.ts", "import x from 'maybe-an-alias';\n")], &[], &unreadable);
+        assert_eq!((listed, external), (vec![row("app.ts", 1, "maybe-an-alias", Why::MissingContext)], 0));
+    }
+
+    #[test]
+    fn python_imports_say_why_they_gave_no_link() {
+        let code = "from os import path\nfrom . import sibling\nfrom .gone import f\nfrom .....far import g\nfrom .fine import h\n";
+        let (listed, external) = issues_of(&[("/p/pkg/a.py", code), ("/p/pkg/fine.py", "")], &[], &ConfigSources::new());
+        assert_eq!(external, 1, "an absolute package");
+        assert_eq!(
+            listed,
+            vec![
+                row("pkg/a.py", 2, ".", Why::Unsupported),
+                row("pkg/a.py", 3, ".gone", Why::NotFound),
+                row("pkg/a.py", 4, ".....far", Why::OutsideWorkspace),
+            ]
+        );
+    }
+
+    #[test]
+    fn go_imports_say_why_they_gave_no_link() {
+        let main = "package main\nimport (\n\t\"fmt\"\n\t\"example.com/m/util\"\n\t\"example.com/m/nodir\"\n\t\"example.com/m/pkg\"\n)\n";
+        let gomod = ConfigSources::from([(PathBuf::from("/p/go.mod"), "module example.com/m\n".to_string())]);
+        let files = [("/p/cmd/main.go", main)];
+        let closed = ["/p/util/u.go", "/p/pkg/a.go", "/p/pkg/b.go"];
+        let (listed, external) = issues_of(&files, &closed, &gomod);
+        assert_eq!(external, 1, "the standard library");
+        assert_eq!(
+            listed,
+            vec![
+                row("cmd/main.go", 5, "example.com/m/nodir", Why::NotFound),
+                row("cmd/main.go", 6, "example.com/m/pkg", Why::Unsupported),
+            ],
+            "a package of several files has no single target (it is not an ambiguity)"
+        );
+        let (listed, _) = issues_of(&files, &closed, &ConfigSources::new());
+        assert_eq!(listed.len(), 4, "without a go.mod nothing can be told: {listed:?}");
+        assert!(listed.iter().all(|(_, _, _, reason)| *reason == Why::MissingContext));
+    }
+
+    #[test]
+    fn rust_modules_use_the_same_reasons() {
+        let main = "mod util;\nmod gone;\n#[cfg(test)] mod gated;\n#[path = \"../../escape.rs\"] mod out;\n";
+        let (listed, _) = issues_of(&[("/p/src/main.rs", main), ("/p/src/util.rs", "")], &[], &ConfigSources::new());
+        assert_eq!(
+            listed,
+            vec![
+                row("src/main.rs", 2, "gone", Why::NotFound),
+                row("src/main.rs", 3, "gated", Why::Conditional),
+                row("src/main.rs", 4, "out", Why::OutsideWorkspace),
+            ]
+        );
+    }
+
+    #[test]
+    fn documents_do_not_report_broken_links() {
+        let md = "[gone](./nowhere.md) and [site](https://example.com) and [ok](./b.md)\n";
+        let (listed, external) = issues_of(&[("/p/a.md", md), ("/p/b.md", "")], &[], &ConfigSources::new());
+        assert!(listed.is_empty() && external == 0, "{listed:?}");
+        assert!(issues_of(&[("/p/c.json", r#"{"$ref": "./nope.json"}"#)], &[], &ConfigSources::new()).0.is_empty());
+    }
+
+    #[test]
+    fn many_issues_are_capped_but_counted_exactly() {
+        use issues::{ImportIssues, MAX_ISSUES};
+        let imports: String = (0..600).map(|i| format!("import './gone{i}';\n")).collect();
+        let open = OpenFiles::new([(Path::new("/p/app.ts"), imports.as_str())]);
+        let issues = analyze_with_configs(Path::new("/p"), &open, &ConfigSources::new(), &mut ParseCache::default()).issues;
+        assert_eq!(issues.items().len(), MAX_ISSUES);
+        assert_eq!((issues.count(Why::NotFound), issues.unresolved()), (600, 600), "the counts stay exact");
+        assert_eq!(issues.items()[0].line, 1, "the first ones by place are kept");
+
+        let mut sums = ImportIssues::default();
+        sums.external();
+        sums.external();
+        assert_eq!((sums.count(Why::External), sums.unresolved(), sums.items().len()), (2, 0, 0), "packages are not listed");
     }
 }

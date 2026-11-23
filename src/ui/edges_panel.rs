@@ -3,7 +3,7 @@
 //! reference: v2.codecanvas.app.
 
 use crate::analysis::dependencies::indexer::ServerProgress;
-use crate::analysis::dependencies::local::{ModuleIssue, ModuleIssueReason};
+use crate::analysis::dependencies::local::{ImportIssueReason, ImportIssues};
 use crate::analysis::lsp::manager::ServerStatus;
 use crate::edges::edge_store::EdgeVisibility;
 use crate::edges::style::{EdgeStyle, GradientGapMode, OpacityMode, RelationshipType};
@@ -56,7 +56,7 @@ pub fn draw_edges_panel(ui: &mut egui::Ui, state: &mut AppState) {
             );
     });
 
-    rust_module_diagnostics(ui, state.deps.rust_module_issues());
+    import_diagnostics(ui, state.deps.import_issues());
 
     section(ui, "Style", |ui| {
         let style = &mut state.edge_style;
@@ -287,33 +287,53 @@ pub fn draw_edges_panel(ui: &mut egui::Ui, state: &mut AppState) {
         });
 }
 
-fn rust_module_diagnostics(ui: &mut egui::Ui, issues: &[ModuleIssue]) {
+/// Why imports of the open files gave no edge: the ones nobody can follow
+/// (packages) are only counted, the rest are listed.
+fn import_diagnostics(ui: &mut egui::Ui, issues: &ImportIssues) {
     const MAX_ROWS: usize = 12;
     if issues.is_empty() {
         return;
     }
-    Section::new("Rust modules (static)")
-        .info("File links from Rust module declarations, independent of the language server and visibility filters. A module resolves to any file of the folder; the link is drawn when both files are open.")
+    Section::new("Unresolved imports (static)")
+        .info("Imports and Rust module declarations of the open files that gave no file link, independent of the language server and visibility filters. A path resolves to any file of the folder, and the link is drawn when both files are open. Packages are only counted.")
         .show(ui, |ui| {
-            ui.label(match issues.len() {
-                1 => "1 unresolved Rust module".to_owned(),
-                n => format!("{n} unresolved Rust modules"),
-            });
-            for issue in issues.iter().take(MAX_ROWS) {
-                let reason = match issue.reason {
-                    ModuleIssueReason::Conditional => "Conditional module (cfg or cfg_attr)",
-                    ModuleIssueReason::UnsupportedAttribute => "Unsupported module attribute",
-                    ModuleIssueReason::OutsideWorkspace => "Path leaves the workspace",
-                    ModuleIssueReason::Missing => "No file for this module in the folder",
-                    ModuleIssueReason::Ambiguous => "Multiple targets in the folder",
-                };
+            match issues.unresolved() {
+                0 => {}
+                1 => {
+                    ui.label("1 unresolved import");
+                }
+                n => {
+                    ui.label(format!("{n} unresolved imports"));
+                }
+            }
+            let by_reason: Vec<String> = issues
+                .counts()
+                .filter(|(reason, _)| *reason != ImportIssueReason::External)
+                .map(|(reason, n)| format!("{} {n}", reason.short()))
+                .collect();
+            if by_reason.len() > 1 {
+                ui.weak(by_reason.join(" \u{b7} "));
+            }
+            match issues.count(ImportIssueReason::External) {
+                0 => {}
+                1 => {
+                    ui.weak("1 external import (a package, not drawn)");
+                }
+                n => {
+                    ui.weak(format!("{n} external imports (packages, not drawn)"));
+                }
+            }
+            for issue in issues.items().iter().take(MAX_ROWS) {
                 ui.weak(format!(
-                    "{}:{} · {}: {reason}",
-                    issue.path.display(), issue.line, issue.name
+                    "{}:{} \u{b7} {}: {}",
+                    issue.path.display(),
+                    issue.line,
+                    issue.specifier,
+                    issue.reason.label()
                 ));
             }
-            if issues.len() > MAX_ROWS {
-                ui.weak(format!("{} more not shown", issues.len() - MAX_ROWS));
+            if issues.unresolved() > MAX_ROWS {
+                ui.weak(format!("{} more not shown", issues.unresolved() - MAX_ROWS));
             }
         });
 }

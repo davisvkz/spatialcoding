@@ -14,7 +14,7 @@ use std::collections::{HashMap, VecDeque};
 use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
 
-use super::local::{self, LocalAnalysis, ModuleIssue};
+use super::local::{self, ImportIssues, LocalAnalysis};
 use super::{DependencyLink, LineSpan, OpenFilePaths, OpenFiles, StatementFinder, byte_offset, pick_symbols, usage_occurrences};
 use crate::analysis::lsp::manager::{LspManager, LspRequest, LspResponse, RequestId, ServerStatus};
 use crate::analysis::lsp::{Location, LspSymbol, Position, ServerId, server_for};
@@ -181,8 +181,9 @@ impl DependencyIndexer {
         self.parse_cache = local::ParseCache::default();
     }
 
-    pub(crate) fn rust_module_issues(&self) -> &[ModuleIssue] {
-        &self.local.rust_issues
+    /// The imports of the open files that gave no link, and why.
+    pub(crate) fn import_issues(&self) -> &ImportIssues {
+        &self.local.issues
     }
 
     pub(crate) fn open_files<'a>(&'a self, files: impl IntoIterator<Item = (&'a Path, &'a str)>) -> OpenFiles<'a> {

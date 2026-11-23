@@ -31,17 +31,17 @@ fn dependency_edges_explain_unresolved_rust_modules_without_lsp() {
     app.set_size(egui::vec2(1800.0, 2200.0));
     app.app_state_mut().right_panel = Some(RightPanel::DependencyEdges);
     app.run();
-    app.get_by_label("Rust modules (static)");
-    app.get_by_label("3 unresolved Rust modules");
+    app.get_by_label("Unresolved imports (static)");
+    app.get_by_label("3 unresolved imports");
     app.get_by_label_contains("gated: Conditional");
-    app.get_by_label_contains("missing: No file for this module in the folder");
+    app.get_by_label_contains("missing: No file for this import in the folder");
     app.get_by_label_contains("clash: Multiple targets in the folder");
     assert_eq!(app.app_state().edge_store.all_edges().count(), 1);
 
     std::fs::write(fx.path("src/missing.rs"), "").unwrap();
     let target = app.open(&fx.path("src/missing.rs"));
     app.run();
-    app.get_by_label("2 unresolved Rust modules");
+    app.get_by_label("2 unresolved imports");
     // The folder's file list is read again when the watcher reports the new
     // file; do it here so the test does not wait for it.
     app.app_state().folder_files_cache.replace(None);
@@ -50,12 +50,37 @@ fn dependency_edges_explain_unresolved_rust_modules_without_lsp() {
     app.run();
     // The module file still exists in the folder, so closing it does not make
     // the declaration unresolved; only the link to it is no longer drawn.
-    app.get_by_label("2 unresolved Rust modules");
-    assert!(app.query_by_label("3 unresolved Rust modules").is_none());
+    app.get_by_label("2 unresolved imports");
+    assert!(app.query_by_label("3 unresolved imports").is_none());
 
     spatialcoding::workspace::clear_canvas(app.app_state_mut());
     app.run();
-    assert!(app.query_by_label("Rust modules (static)").is_none());
+    assert!(app.query_by_label("Unresolved imports (static)").is_none());
+}
+
+#[test]
+fn the_panel_lists_unresolved_ts_imports_and_only_counts_packages() {
+    let fx = fixture();
+    std::fs::write(
+        fx.path("web/app.ts"),
+        "import React from 'react';\nimport './missing';\nimport { a } from './a';\nimport 'lodash';\n",
+    )
+    .unwrap();
+    let mut app = app_with(&fx);
+    app.app_state_mut()
+        .lsp
+        .manager
+        .set_launcher(std::sync::Arc::new(|_, _| Err("offline".into())));
+    app.open(&fx.path("web/app.ts"));
+    app.set_size(egui::vec2(1800.0, 2200.0));
+    app.app_state_mut().right_panel = Some(RightPanel::DependencyEdges);
+    app.run();
+    app.get_by_label("Unresolved imports (static)");
+    app.get_by_label("1 unresolved import");
+    app.get_by_label("2 external imports (packages, not drawn)");
+    app.get_by_label_contains("web/app.ts:2 \u{b7} ./missing: No file for this import in the folder");
+    assert!(app.query_by_label_contains("react").is_none(), "packages are counted, not listed");
+    assert!(app.query_by_label_contains("web/app.ts:3").is_none(), "./a resolves to a file of the folder");
 }
 
 #[test]
